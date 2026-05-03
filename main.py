@@ -69,8 +69,10 @@ def make_state() -> dict:
         "pending_key":  None,
         "history":      [],   # 每筆 {ts, bet, before, after, change, result}
         "goal_reached": False,
-        "neko_status": "unknown",   # dispatching / not_dispatching / unknown
-        "neko_remaining_min": None,
+        "neko_status": "unknown",     # dispatching / not_dispatching / unknown
+        "neko_deadline_ts": None,     # 派遣完成時間戳；用來本地倒數，避免一直 /check
+        "neko_last_check_ts": None,
+        "neko_check_ts":     None,  # 上次 /check 讀到剩餘時間的 epoch；用於 UI 即時倒數
         "session_start_ts": time.time(),
     }
 
@@ -413,14 +415,12 @@ def build_layout(state: dict, config: dict) -> Layout:
     t2.add_row("📅 /daily",   fmt_remaining(state.get("daily_next")))
 
     neko_st = state.get("neko_status", "unknown")
-    neko_min = state.get("neko_remaining_min")
-    if neko_st == "dispatching":
-        if neko_min is None:
-            neko_str = "[yellow]派遣中[/yellow]"
-        elif neko_min >= 60:
-            neko_str = f"[yellow]派遣中 ({neko_min // 60}h{neko_min % 60:02d}m)[/yellow]"
-        else:
-            neko_str = f"[yellow]派遣中 ({neko_min}m)[/yellow]"
+    neko_deadline = state.get("neko_deadline_ts")
+    if neko_st == "dispatching" and neko_deadline is not None:
+        # fmt_remaining 會即時算 deadline - now，每次 UI refresh 都更新
+        neko_str = f"[yellow]派遣中 {fmt_remaining(neko_deadline)}[/yellow]"
+    elif neko_st == "dispatching":
+        neko_str = "[yellow]派遣中[/yellow]"
     elif neko_st == "not_dispatching":
         neko_str = "[green]待領取/閒置[/green]"
     else:
@@ -990,11 +990,39 @@ async def _read_check_response(page: Page, timeout: float = 15.0) -> str | None:
 
 async def nekomusume_loop(page: Page, state: dict, config_holder: list):
     """
-    定期送 /check 查貓娘派遣狀態；當狀態從「派遣中」轉為「不在派遣中」時 @ 通知。
-    自適應睡眠：剩 >1 小時就先睡到剩 30 分鐘前；快到時則 5-10 分鐘輪詢一次。
+    啟動 / reboot 後送一次 /check 對齊派遣剩餘時間，把 deadline 時間戳存到 state，
+    之後純粹本地倒數（UI 也用這個 timestamp 算即時剩餘）。只有倒數結束時再
+    送一次 /check 確認 → 通知 → 等待新派遣再對齊。
+
+    每次派遣只會送 2 次 /check：開始一次對齊、結束一次確認，不再每 30 分鐘輪詢洗版。
     """
     log = logging.getLogger(__name__)
     last_status: str | None = None
+
+    async def _query_status() -> tuple[str, int | None]:
+        text = await _read_check_response(page)
+        state["neko_last_check_ts"] = time.time()
+        if text is None:
+            return "unknown", None
+        return parse_dispatch_status(text)
+
+    async def _notify_completion():
+        user_id = str(config_holder[0].get("gambling", {})
+                      .get("notify_user_id", DEFAULT_NOTIFY_USER_ID))
+        try:
+            await send_message(
+                page,
+                f"<@{user_id}> 貓娘派遣已完成！記得 `/nekomusume claim` 領取戰利品",
+            )
+            log.info("已送出貓娘完成通知")
+        except Exception as e:
+            log.warning("貓娘完成通知失敗: %s", e)
+        ecfg = config_holder[0].get("email", {})
+        if ecfg.get("enabled"):
+            await send_email(
+                ecfg, "[Discord Bot] 貓娘派遣已完成",
+                "貓娘派遣已完成，請至 Discord 用 /nekomusume claim 領取。",
+            )
 
     while not state["quit"]:
         await _wait_while_paused(state)
@@ -1003,52 +1031,45 @@ async def nekomusume_loop(page: Page, state: dict, config_holder: list):
 
         ncfg = config_holder[0].get("nekomusume", {})
         if not ncfg.get("enabled", True):
+            state["neko_deadline_ts"] = None
             await interruptible_sleep(state, 300)
             continue
 
-        text = await _read_check_response(page)
-        if text is None:
-            await interruptible_sleep(state, 600)
+        deadline_ts = state.get("neko_deadline_ts")
+        now = time.time()
+
+        # ── 本地倒數中 → 不發任何指令，睡到 deadline ──
+        if deadline_ts is not None and now < deadline_ts:
+            await interruptible_sleep(state, deadline_ts - now)
             continue
 
-        new_status, minutes = parse_dispatch_status(text)
+        # ── 尚未對齊 / 倒數已到 → 送一次 /check ──
+        new_status, minutes = await _query_status()
         state["neko_status"] = new_status
-        state["neko_remaining_min"] = minutes
-        log.info("貓娘狀態: %s%s", new_status,
-                 f"（剩 {minutes} 分鐘）" if minutes is not None else "")
 
-        # 派遣中 → 不在派遣中：通知使用者
-        if last_status == "dispatching" and new_status != "dispatching":
-            user_id = str(config_holder[0].get("gambling", {})
-                          .get("notify_user_id", DEFAULT_NOTIFY_USER_ID))
-            try:
-                await send_message(
-                    page,
-                    f"<@{user_id}> 貓娘派遣已完成！記得 `/nekomusume claim` 領取戰利品",
-                )
-                log.info("已送出貓娘完成通知")
-            except Exception as e:
-                log.warning("貓娘完成通知失敗: %s", e)
-
-            ecfg = config_holder[0].get("email", {})
-            if ecfg.get("enabled"):
-                await send_email(
-                    ecfg, "[Discord Bot] 貓娘派遣已完成",
-                    "貓娘派遣已完成，請至 Discord 用 /nekomusume claim 領取。",
-                )
+        if new_status == "dispatching" and minutes is not None:
+            # 鎖定 deadline，之後純本地倒數
+            state["neko_deadline_ts"] = now + minutes * 60
+            log.info("貓娘派遣中：剩 %d 分鐘，鎖定本地倒數（不再輪詢）", minutes)
+        elif new_status == "dispatching":
+            # 解析不到時間 → 用基本間距重試
+            state["neko_deadline_ts"] = None
+            log.info("貓娘派遣中但解析不到時間，稍後重試")
+        else:
+            # 不在派遣中：上一輪是 dispatching → 派遣完成的轉折點，通知
+            state["neko_deadline_ts"] = None
+            if last_status == "dispatching":
+                await _notify_completion()
+            else:
+                log.info("貓娘狀態: %s（閒置）", new_status)
 
         last_status = new_status
 
-        # 自適應睡眠
-        base_min = float(ncfg.get("check_interval_min", DEFAULT_NEKOMUSUME_INTERVAL_MIN))
-        if new_status == "dispatching" and minutes is not None:
-            if minutes > 60:
-                sleep_min = max(base_min, minutes - 30)
-            else:
-                sleep_min = max(5.0, min(base_min, 10.0))
-        else:
-            sleep_min = base_min
-        await interruptible_sleep(state, sleep_min * 60)
+        # 不在派遣中 / 對齊失敗 → 用 base 間距再對齊（讓使用者派出新貓娘後能被偵測）
+        if state.get("neko_deadline_ts") is None:
+            base_min = float(ncfg.get("check_interval_min",
+                                      DEFAULT_NEKOMUSUME_INTERVAL_MIN))
+            await interruptible_sleep(state, base_min * 60)
 
 
 async def _maybe_notify_goal(page: Page, state: dict, config_holder: list):
