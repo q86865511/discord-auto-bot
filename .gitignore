@@ -1,0 +1,32 @@
+# 個人資訊 — 絕對不要 commit
+config.json
+storage_state.json
+
+# 匯出的賭博紀錄
+exports/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE / 編輯器
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code 本地設定
+.claude/
+
+# Playwright 暫存
+playwright-report/
+test-results/
+
+# 日誌
+*.log
