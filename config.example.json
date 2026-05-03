@@ -11,6 +11,20 @@
     "interval_min": 4,
     "interval_max": 10,
     "goal": 0,
+    "goal_action": "pause",
+    "goal_step": 10000,
     "notify_user_id": "YOUR_DISCORD_USER_ID_HERE"
+  },
+  "email": {
+    "enabled": false,
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "user": "your_email@gmail.com",
+    "password": "GMAIL_APP_PASSWORD_HERE",
+    "to": "your_email@gmail.com"
+  },
+  "nekomusume": {
+    "enabled": true,
+    "check_interval_min": 30
   }
 }

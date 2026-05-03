@@ -63,6 +63,8 @@ UI 上的快速鍵：
 | `R` | 從檔案重載設定 |
 | `P` | 暫停 / 恢復所有功能（會即時打斷 hourly/daily 等待）|
 | `E` | 匯出賭博紀錄為 CSV + PNG 圖表（存到 `exports/`）|
+| `L` | 重新載入 Discord 頻道頁面（page state 變糟時用）|
+| `F` | 整個程式重啟（透過 `run.bat` loop 達成；直接 `python main.py` 跑時會直接退出）|
 
 ## 賭博設定說明
 
@@ -78,8 +80,35 @@ UI 上的快速鍵：
 | `bet_fraction` | `0.02` | auto 策略：押注超過門檻部分的這個比例 |
 | `interval_min` | `4` | 兩次下注之間最短秒數 |
 | `interval_max` | `10` | 兩次下注之間最長秒數 |
-| `goal` | `0` | 餘額目標；達到時 `@` 指定使用者，`0` = 不啟用 |
-| `notify_user_id` | — | 目標達成時要通知的人的 Discord User ID |
+| `goal` | `0` | 餘額目標；達到時通知，`0` = 不啟用 |
+| `goal_action` | `pause` | 達標後動作：`pause` = 停用賭博；`raise` = 把已達目標當作新門檻、目標 += `goal_step` 後繼續（保護獲利的階梯式策略）|
+| `goal_step` | `10000` | `raise` 模式下，新目標 = 舊目標 + 此值 |
+| `notify_user_id` | — | 目標達成 / 貓娘完成時要 `@` 的 Discord User ID |
+
+### Email 通知（選用）
+
+`config.json` → `email`：
+
+| 欄位 | 說明 |
+|------|------|
+| `enabled` | 是否啟用 |
+| `smtp_host` / `smtp_port` | SMTP 伺服器（預設 Gmail）|
+| `user` | 寄件人帳號 |
+| `password` | **Gmail 必須用 [App Password](https://myaccount.google.com/apppasswords)，不是登入密碼** |
+| `to` | 收件人 |
+
+達成 `goal` 時會寄送一份含當前統計的 email。
+
+### 貓娘派遣監控
+
+`config.json` → `nekomusume`：
+
+| 欄位 | 預設 | 說明 |
+|------|------|------|
+| `enabled` | `true` | 是否監控 |
+| `check_interval_min` | `30` | 基本檢查間距（分鐘）；剩 1 小時內會自動加密輪詢 |
+
+每隔 N 分鐘送一次 `/check`（ephemeral，不會洗版），偵測到從「派遣中」轉為「完成 / 閒置」時，自動 `@` 指定使用者，提醒 `/nekomusume claim` 領取。同時若 email 啟用也會寄信。
 
 ## 檔案說明
 

@@ -9,9 +9,12 @@ import msvcrt
 import os
 import random
 import re
+import smtplib
+import sys
 import threading
 import time
 from datetime import datetime
+from email.mime.text import MIMEText
 
 from playwright.async_api import async_playwright, Page
 from rich.console import Console
@@ -36,7 +39,11 @@ GAMBLE_RECHECK_SEC  = 300
 DEFAULT_NOTIFY_USER_ID = "429881182168023040"
 DEFAULT_INTERVAL_MIN = 4
 DEFAULT_INTERVAL_MAX = 10
-DEFAULT_GOAL = 0   # 0 = 未設定目標
+DEFAULT_GOAL = 0          # 0 = 未設定目標
+DEFAULT_GOAL_ACTION = "pause"   # "pause" 或 "raise"
+DEFAULT_GOAL_STEP   = 10000     # raise 模式：新目標 = 舊目標 + step
+DEFAULT_NEKOMUSUME_INTERVAL_MIN = 30   # /check 監控間距
+REBOOT_EXIT_CODE = 42     # main 退出時用這個碼通知 run.bat 重新啟動
 
 command_lock = asyncio.Lock()
 console = Console()
@@ -57,10 +64,13 @@ def make_state() -> dict:
         "hourly_next":  None,
         "daily_next":   None,
         "quit":         False,
+        "reboot":       False,
         "paused":       False,
         "pending_key":  None,
         "history":      [],   # 每筆 {ts, bet, before, after, change, result}
         "goal_reached": False,
+        "neko_status": "unknown",   # dispatching / not_dispatching / unknown
+        "neko_remaining_min": None,
         "session_start_ts": time.time(),
     }
 
@@ -175,6 +185,62 @@ def export_history_chart(state: dict) -> str | None:
     return path
 
 
+# ── Email 通知 ───────────────────────────────────────────────────────────────
+def _send_email_sync(email_cfg: dict, subject: str, body: str) -> bool:
+    log = logging.getLogger(__name__)
+    if not email_cfg.get("enabled"):
+        return False
+    user = email_cfg.get("user") or ""
+    pwd  = email_cfg.get("password") or ""
+    to   = email_cfg.get("to") or ""
+    if not (user and pwd and to):
+        log.warning("Email 設定不完整（user/password/to 缺一），略過寄送")
+        return False
+    try:
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"]    = user
+        msg["To"]      = to
+        host = email_cfg.get("smtp_host", "smtp.gmail.com")
+        port = int(email_cfg.get("smtp_port", 587))
+        with smtplib.SMTP(host, port, timeout=15) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(user, pwd)
+            server.send_message(msg)
+        log.info("Email 已寄出: %s", subject)
+        return True
+    except Exception as e:
+        log.warning("Email 寄送失敗: %s", e)
+        return False
+
+
+async def send_email(email_cfg: dict, subject: str, body: str) -> bool:
+    """非同步寄信（在 executor 裡跑 blocking smtplib）。"""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, _send_email_sync, email_cfg, subject, body
+    )
+
+
+# ── 貓娘派遣狀態解析 ─────────────────────────────────────────────────────────
+def parse_dispatch_status(text: str) -> tuple[str, int | None]:
+    """
+    從 /check 回應文字解析貓娘派遣狀態。
+    回傳 (status, remaining_minutes)：
+      - "dispatching", N  →  派遣中，剩 N 分鐘
+      - "not_dispatching", None  →  已完成或未派遣（找到 貓娘派遣 但無「派遣中」）
+      - "unknown", None  →  完全沒找到
+    """
+    m = re.search(r'貓娘派遣[\s\S]{0,80}?派遣中\s*(\d+)\s*(小時|分鐘)', text)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        return "dispatching", (n * 60 if unit == "小時" else n)
+    if "貓娘派遣" in text:
+        return "not_dispatching", None
+    return "unknown", None
+
+
 # ── 設定 ──────────────────────────────────────────────────────────────────────
 def load_config() -> dict:
     with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -187,7 +253,7 @@ def save_config(config: dict):
 
 
 def ensure_gambling_defaults(config: dict, balance: int | None = None):
-    """補齊 gambling 欄位預設值（只填未設定的欄位）。"""
+    """補齊 gambling / email / nekomusume 欄位預設值（只填未設定的欄位）。"""
     gcfg = config.setdefault("gambling", {})
     gcfg.setdefault("enabled",         True)
     gcfg.setdefault("threshold",       5000)
@@ -198,9 +264,24 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     gcfg.setdefault("interval_max",    DEFAULT_INTERVAL_MAX)
     gcfg.setdefault("goal",            DEFAULT_GOAL)
     gcfg.setdefault("notify_user_id",  DEFAULT_NOTIFY_USER_ID)
+    gcfg.setdefault("goal_action",     DEFAULT_GOAL_ACTION)
+    gcfg.setdefault("goal_step",       DEFAULT_GOAL_STEP)
     if "max_bet" not in gcfg:
         excess = max(0, (balance or 0) - gcfg["threshold"])
         gcfg["max_bet"] = max(500, int(excess * 0.10))
+
+    ecfg = config.setdefault("email", {})
+    ecfg.setdefault("enabled",   False)
+    ecfg.setdefault("smtp_host", "smtp.gmail.com")
+    ecfg.setdefault("smtp_port", 587)
+    ecfg.setdefault("user",      "")
+    ecfg.setdefault("password",  "")
+    ecfg.setdefault("to",        "")
+
+    ncfg = config.setdefault("nekomusume", {})
+    ncfg.setdefault("enabled",          True)
+    ncfg.setdefault("check_interval_min", DEFAULT_NEKOMUSUME_INTERVAL_MIN)
+
     save_config(config)
 
 
@@ -330,6 +411,22 @@ def build_layout(state: dict, config: dict) -> Layout:
     t2.add_row("", "")
     t2.add_row("⏰ /hourly",  fmt_remaining(state.get("hourly_next")))
     t2.add_row("📅 /daily",   fmt_remaining(state.get("daily_next")))
+
+    neko_st = state.get("neko_status", "unknown")
+    neko_min = state.get("neko_remaining_min")
+    if neko_st == "dispatching":
+        if neko_min is None:
+            neko_str = "[yellow]派遣中[/yellow]"
+        elif neko_min >= 60:
+            neko_str = f"[yellow]派遣中 ({neko_min // 60}h{neko_min % 60:02d}m)[/yellow]"
+        else:
+            neko_str = f"[yellow]派遣中 ({neko_min}m)[/yellow]"
+    elif neko_st == "not_dispatching":
+        neko_str = "[green]待領取/閒置[/green]"
+    else:
+        neko_str = "[dim]─[/dim]"
+    t2.add_row("🐱 貓娘",     neko_str)
+
     cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改 R:重載[/dim]",
                       border_style="green")
 
@@ -341,8 +438,8 @@ def build_layout(state: dict, config: dict) -> Layout:
     # Footer
     pause_label = "[yellow]P 恢復[/yellow]" if state.get("paused") else "[bold]P[/bold] 暫停"
     footer = Panel(
-        f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改設定  "
-        f"[bold]R[/bold] 重載設定  {pause_label}  [bold]E[/bold] 匯出紀錄[/dim]",
+        f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改設定  [bold]R[/bold] 重載  "
+        f"{pause_label}  [bold]E[/bold] 匯出  [bold]L[/bold] 重載頻道  [bold]F[/bold] 重啟程式[/dim]",
         style="dim", height=3,
     )
 
@@ -387,33 +484,52 @@ async def run_config_menu(state: dict, config_holder: list):
     config = config_holder[0]
     gcfg   = config.setdefault("gambling", {})
 
-    while True:
-        i_min = gcfg.get('interval_min', DEFAULT_INTERVAL_MIN)
-        i_max = gcfg.get('interval_max', DEFAULT_INTERVAL_MAX)
-        goal  = gcfg.get('goal', DEFAULT_GOAL)
-        uid   = gcfg.get('notify_user_id', DEFAULT_NOTIFY_USER_ID)
+    ecfg = config.setdefault("email",       {})
+    ncfg = config.setdefault("nekomusume",  {})
 
-        print(f"\n{'═'*42}")
+    while True:
+        i_min  = gcfg.get('interval_min', DEFAULT_INTERVAL_MIN)
+        i_max  = gcfg.get('interval_max', DEFAULT_INTERVAL_MAX)
+        goal   = gcfg.get('goal', DEFAULT_GOAL)
+        uid    = gcfg.get('notify_user_id', DEFAULT_NOTIFY_USER_ID)
+        action = gcfg.get('goal_action', DEFAULT_GOAL_ACTION)
+        step   = gcfg.get('goal_step', DEFAULT_GOAL_STEP)
+        em_on  = ecfg.get('enabled', False)
+        em_to  = ecfg.get('to', '')
+        nk_on  = ncfg.get('enabled', True)
+
+        print(f"\n{'═'*48}")
         print("  ⚙️  Discord Bot — 設定修改")
-        print(f"{'═'*42}")
-        print(f"  [1] 保底門檻:  {gcfg.get('threshold', 5000):,}")
-        print(f"  [2] 最小下注:  {gcfg.get('min_bet', 100):,}")
-        print(f"  [3] 最大下注:  {gcfg.get('max_bet', 500):,}  (0 = 自動計算)")
-        print(f"  [4] 押注比例:  {gcfg.get('bet_fraction', 0.02)*100:.1f}%  (auto策略用)")
-        print(f"  [5] 策略:      {gcfg.get('strategy', 'auto')}  (auto / fixed)")
-        print(f"  [6] 賭博:      {'[啟用]' if gcfg.get('enabled') else '[停用]'}")
-        print(f"  [7] 下注間距:  {i_min}-{i_max} 秒")
-        print(f"  [8] 目標餘額:  {goal:,}  (0 = 不設目標)")
-        print(f"  [9] 通知對象:  {uid}")
+        print(f"{'═'*48}")
+        print("  [賭博]")
+        print(f"   [1] 保底門檻:    {gcfg.get('threshold', 5000):,}")
+        print(f"   [2] 最小下注:    {gcfg.get('min_bet', 100):,}")
+        print(f"   [3] 最大下注:    {gcfg.get('max_bet', 500):,}  (0 = 自動)")
+        print(f"   [4] 押注比例:    {gcfg.get('bet_fraction', 0.02)*100:.1f}%  (auto策略用)")
+        print(f"   [5] 策略:        {gcfg.get('strategy', 'auto')}  (auto / fixed)")
+        print(f"   [6] 賭博:        {'啟用' if gcfg.get('enabled') else '停用'}")
+        print(f"   [7] 下注間距:    {i_min}-{i_max} 秒")
+        print("  [目標]")
+        print(f"   [8] 目標餘額:    {goal:,}  (0 = 不設目標)")
+        print(f"   [9] 通知 UID:    {uid}")
+        print(f"   [A] 達標行為:    {action}  (pause = 停用; raise = 提升門檻續跑)")
+        print(f"   [B] raise 步進:  {step:,}  (達標後 新目標 = 舊目標 + 步進)")
+        print("  [Email 通知]")
+        print(f"   [C] Email:       {'啟用' if em_on else '停用'}  收件人={em_to or '(未設定)'}")
+        print(f"   [D] SMTP 設定 (host / port / user / password)")
+        print("  [貓娘監控]")
+        print(f"   [E] 貓娘監控:    {'啟用' if nk_on else '停用'}  (派遣完成自動 @ 通知)")
+        print(f"   [F] 檢查間距:    {ncfg.get('check_interval_min', DEFAULT_NEKOMUSUME_INTERVAL_MIN)} 分鐘")
+        print()
         print("  [0] 儲存並返回")
         print()
 
-        choice = (await ainput("  選擇 [0-9]: ")).strip()
+        choice = (await ainput("  選擇: ")).strip().upper()
 
         if choice == "0":
             break
         elif choice == "1":
-            raw = (await ainput(f"  保底門檻 (目前 {gcfg.get('threshold',5000):,}，Enter 跳過): ")).strip()
+            raw = (await ainput(f"  保底門檻 (目前 {gcfg.get('threshold',5000):,}): ")).strip()
             if raw.isdigit():
                 gcfg["threshold"] = int(raw); print(f"  ✓ 門檻 → {int(raw):,}")
         elif choice == "2":
@@ -428,17 +544,14 @@ async def run_config_menu(state: dict, config_holder: list):
         elif choice == "4":
             raw = (await ainput("  押注比例 % (例: 2 = 2%): ")).strip()
             try:
-                val = float(raw)
-                gcfg["bet_fraction"] = val / 100
-                print(f"  ✓ 押注比例 → {val:.1f}%")
+                gcfg["bet_fraction"] = float(raw) / 100
+                print(f"  ✓ 押注比例 → {float(raw):.1f}%")
             except ValueError:
                 print("  無效輸入")
         elif choice == "5":
             raw = (await ainput("  策略 (auto / fixed): ")).strip().lower()
             if raw in ("auto", "fixed"):
                 gcfg["strategy"] = raw; print(f"  ✓ 策略 → {raw}")
-            else:
-                print("  請輸入 auto 或 fixed")
         elif choice == "6":
             gcfg["enabled"] = not gcfg.get("enabled", True)
             print(f"  ✓ 賭博 → {'啟用' if gcfg['enabled'] else '停用'}")
@@ -446,10 +559,8 @@ async def run_config_menu(state: dict, config_holder: list):
             raw_min = (await ainput(f"  最小間距秒數 (目前 {i_min}): ")).strip()
             raw_max = (await ainput(f"  最大間距秒數 (目前 {i_max}): ")).strip()
             try:
-                if raw_min:
-                    gcfg["interval_min"] = max(0.0, float(raw_min))
-                if raw_max:
-                    gcfg["interval_max"] = max(0.0, float(raw_max))
+                if raw_min: gcfg["interval_min"] = max(0.0, float(raw_min))
+                if raw_max: gcfg["interval_max"] = max(0.0, float(raw_max))
                 if gcfg["interval_max"] < gcfg["interval_min"]:
                     gcfg["interval_max"] = gcfg["interval_min"]
                 print(f"  ✓ 間距 → {gcfg['interval_min']}-{gcfg['interval_max']} 秒")
@@ -459,15 +570,57 @@ async def run_config_menu(state: dict, config_holder: list):
             raw = (await ainput("  目標餘額 (0=取消): ")).strip()
             if raw.isdigit():
                 gcfg["goal"] = int(raw)
-                state["goal_reached"] = False   # 重設，重新偵測達標
+                state["goal_reached"] = False
                 print(f"  ✓ 目標 → {int(raw):,}")
         elif choice == "9":
             raw = (await ainput("  Discord User ID (數字串): ")).strip()
             if raw.isdigit():
                 gcfg["notify_user_id"] = raw
                 print(f"  ✓ 通知對象 → {raw}")
+        elif choice == "A":
+            raw = (await ainput("  達標行為 (pause / raise): ")).strip().lower()
+            if raw in ("pause", "raise"):
+                gcfg["goal_action"] = raw
+                print(f"  ✓ 達標行為 → {raw}")
+        elif choice == "B":
+            raw = (await ainput(f"  raise 步進 (目前 {step:,}): ")).strip()
+            if raw.isdigit():
+                gcfg["goal_step"] = int(raw)
+                print(f"  ✓ 步進 → {int(raw):,}")
+        elif choice == "C":
+            ecfg["enabled"] = not ecfg.get("enabled", False)
+            print(f"  ✓ Email → {'啟用' if ecfg['enabled'] else '停用'}")
+            if ecfg["enabled"]:
+                raw = (await ainput(f"  收件人 (目前 {em_to or '(未設定)'}): ")).strip()
+                if raw:
+                    ecfg["to"] = raw
+                    print(f"  ✓ 收件人 → {raw}")
+        elif choice == "D":
+            print(f"   目前 host={ecfg.get('smtp_host','smtp.gmail.com')} "
+                  f"port={ecfg.get('smtp_port',587)} user={ecfg.get('user','')}")
+            host = (await ainput("  SMTP host (Enter 跳過): ")).strip()
+            port = (await ainput("  SMTP port (Enter 跳過): ")).strip()
+            user = (await ainput("  SMTP user (Enter 跳過): ")).strip()
+            pwd  = (await ainput("  SMTP password (Enter 跳過; Gmail 用 App Password): ")).strip()
+            if host: ecfg["smtp_host"] = host
+            if port.isdigit(): ecfg["smtp_port"] = int(port)
+            if user: ecfg["user"] = user
+            if pwd:  ecfg["password"] = pwd
+            print("  ✓ SMTP 已更新")
+        elif choice == "E":
+            ncfg["enabled"] = not ncfg.get("enabled", True)
+            print(f"  ✓ 貓娘監控 → {'啟用' if ncfg['enabled'] else '停用'}")
+        elif choice == "F":
+            raw = (await ainput("  檢查間距分鐘 (建議 15-60): ")).strip()
+            try:
+                ncfg["check_interval_min"] = max(1.0, float(raw))
+                print(f"  ✓ 檢查間距 → {ncfg['check_interval_min']} 分鐘")
+            except ValueError:
+                print("  無效輸入")
 
-    config["gambling"] = gcfg
+    config["gambling"]   = gcfg
+    config["email"]      = ecfg
+    config["nekomusume"] = ncfg
     save_config(config)
     config_holder[0] = config
     _log(state, "設定已更新並儲存")
@@ -814,24 +967,155 @@ async def daily_loop(page: Page, state: dict):
         await interruptible_sleep(state, delay)
 
 
-async def _maybe_notify_goal(page: Page, state: dict, gcfg: dict):
-    goal = int(gcfg.get("goal", 0) or 0)
+async def _read_check_response(page: Page, timeout: float = 15.0) -> str | None:
+    """送 /check（ephemeral），等回應出現「貓娘派遣」字樣後回傳新增文字。"""
+    log = logging.getLogger(__name__)
+    async with command_lock:
+        before = await page.evaluate("() => document.body.textContent")
+        before_len = len(before)
+        await _send_slash_command(page, "/check")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            await asyncio.sleep(0.5)
+            current = await page.evaluate("() => document.body.textContent")
+            new_part = current[before_len:] if len(current) >= before_len else current
+            if "貓娘派遣" in new_part:
+                await asyncio.sleep(0.5)
+                current = await page.evaluate("() => document.body.textContent")
+                new_part = current[before_len:] if len(current) >= before_len else current
+                return new_part
+    log.warning("/check 在 %.0fs 內未取得回應", timeout)
+    return None
+
+
+async def nekomusume_loop(page: Page, state: dict, config_holder: list):
+    """
+    定期送 /check 查貓娘派遣狀態；當狀態從「派遣中」轉為「不在派遣中」時 @ 通知。
+    自適應睡眠：剩 >1 小時就先睡到剩 30 分鐘前；快到時則 5-10 分鐘輪詢一次。
+    """
+    log = logging.getLogger(__name__)
+    last_status: str | None = None
+
+    while not state["quit"]:
+        await _wait_while_paused(state)
+        if state["quit"]:
+            break
+
+        ncfg = config_holder[0].get("nekomusume", {})
+        if not ncfg.get("enabled", True):
+            await interruptible_sleep(state, 300)
+            continue
+
+        text = await _read_check_response(page)
+        if text is None:
+            await interruptible_sleep(state, 600)
+            continue
+
+        new_status, minutes = parse_dispatch_status(text)
+        state["neko_status"] = new_status
+        state["neko_remaining_min"] = minutes
+        log.info("貓娘狀態: %s%s", new_status,
+                 f"（剩 {minutes} 分鐘）" if minutes is not None else "")
+
+        # 派遣中 → 不在派遣中：通知使用者
+        if last_status == "dispatching" and new_status != "dispatching":
+            user_id = str(config_holder[0].get("gambling", {})
+                          .get("notify_user_id", DEFAULT_NOTIFY_USER_ID))
+            try:
+                await send_message(
+                    page,
+                    f"<@{user_id}> 貓娘派遣已完成！記得 `/nekomusume claim` 領取戰利品",
+                )
+                log.info("已送出貓娘完成通知")
+            except Exception as e:
+                log.warning("貓娘完成通知失敗: %s", e)
+
+            ecfg = config_holder[0].get("email", {})
+            if ecfg.get("enabled"):
+                await send_email(
+                    ecfg, "[Discord Bot] 貓娘派遣已完成",
+                    "貓娘派遣已完成，請至 Discord 用 /nekomusume claim 領取。",
+                )
+
+        last_status = new_status
+
+        # 自適應睡眠
+        base_min = float(ncfg.get("check_interval_min", DEFAULT_NEKOMUSUME_INTERVAL_MIN))
+        if new_status == "dispatching" and minutes is not None:
+            if minutes > 60:
+                sleep_min = max(base_min, minutes - 30)
+            else:
+                sleep_min = max(5.0, min(base_min, 10.0))
+        else:
+            sleep_min = base_min
+        await interruptible_sleep(state, sleep_min * 60)
+
+
+async def _maybe_notify_goal(page: Page, state: dict, config_holder: list):
+    """
+    達成 gambling.goal 時：
+      1. 送 Discord @ mention
+      2. 若 email 已啟用，寄 email
+      3. 依 goal_action 處理：
+         - "pause"：停用 gambling，等使用者再啟用
+         - "raise"：把已達目標設為新門檻，目標 += goal_step；
+                    達成後立刻 reset goal_reached，開始追新目標（無限循環）
+    """
+    log = logging.getLogger(__name__)
+    config = config_holder[0]
+    gcfg   = config.get("gambling", {})
+    goal   = int(gcfg.get("goal", 0) or 0)
     if goal <= 0:
         return
     bal = state["balance"]
     if bal is None:
         return
+
     if bal >= goal and not state["goal_reached"]:
         state["goal_reached"] = True
         user_id = str(gcfg.get("notify_user_id") or DEFAULT_NOTIFY_USER_ID)
-        log = logging.getLogger(__name__)
-        log.info("達成目標 %d（餘額 %d），送 mention", goal, bal)
+        action  = (gcfg.get("goal_action") or DEFAULT_GOAL_ACTION).lower()
+        step    = int(gcfg.get("goal_step", DEFAULT_GOAL_STEP) or 0)
+
+        log.info("達成目標 %d（餘額 %d），動作=%s", goal, bal, action)
+
+        # 1. Discord mention
         try:
             await notify_goal_reached(page, bal, goal, user_id)
         except Exception as e:
-            log.warning("mention 訊息送出失敗: %s", e)
+            log.warning("Discord mention 失敗: %s", e)
+
+        # 2. Email
+        ecfg = config.get("email", {})
+        if ecfg.get("enabled"):
+            stats = (
+                f"目前餘額: {bal:,}\n"
+                f"目標餘額: {goal:,}\n"
+                f"起始餘額: {state.get('start_balance')}\n"
+                f"本次盈虧: {(bal - (state.get('start_balance') or bal)):+,}\n"
+                f"總下注: {state['total_bets']}（勝 {state['wins']} / 負 {state['losses']}）\n"
+                f"後續動作: {action}"
+            )
+            await send_email(ecfg, f"[Discord Bot] 達成賭博目標 {goal:,}", stats)
+
+        # 3. 處理後續動作
+        if action == "raise" and step > 0:
+            new_threshold = goal
+            new_goal = goal + step
+            gcfg["threshold"] = new_threshold
+            gcfg["goal"]      = new_goal
+            save_config(config)
+            config_holder[0] = load_config()
+            state["goal_reached"] = False   # 重置以便追新目標
+            log.info("raise 模式：門檻 → %d、目標 → %d", new_threshold, new_goal)
+        else:
+            # pause 模式（也是預設）：停用賭博，由使用者決定是否再啟用
+            gcfg["enabled"] = False
+            save_config(config)
+            config_holder[0] = load_config()
+            log.info("pause 模式：賭博已停用，等候使用者重新啟用")
+
     elif bal < goal and state["goal_reached"]:
-        # 餘額掉回目標下方，重置以便下次再達標時還會通知
         state["goal_reached"] = False
 
 
@@ -927,7 +1211,7 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                 "change": change,
                 "result": "win" if change > 0 else "loss",
             })
-            await _maybe_notify_goal(page, state, gcfg)
+            await _maybe_notify_goal(page, state, config_holder)
         else:
             parse_fail += 1
             consecutive_fail += 1
@@ -957,7 +1241,7 @@ def _log(state: dict, msg: str):
         state["log_lines"].pop(0)
 
 
-async def ui_loop(state: dict, config_holder: list):
+async def ui_loop(state: dict, config_holder: list, page: Page | None = None):
     with Live(
         build_layout(state, config_holder[0]),
         console=console,
@@ -995,6 +1279,23 @@ async def ui_loop(state: dict, config_holder: list):
                             _log(state, f"圖表已匯出: {png_path}")
                         else:
                             _log(state, "（未安裝 matplotlib，跳過圖表）")
+                elif key == "f":
+                    # 整個程式重啟（透過 exit code 由 run.bat 偵測）
+                    _log(state, "已請求重啟，正在收尾...")
+                    state["reboot"] = True
+                    state["quit"]   = True
+                    break
+                elif key == "l":
+                    # 只重新載入頻道頁面
+                    if page is None:
+                        _log(state, "頁面參考遺失，無法 reload")
+                    else:
+                        live.stop()
+                        try:
+                            ok = await recover_page(page, state)
+                            _log(state, "頻道已重新載入" if ok else "頻道重新載入失敗")
+                        finally:
+                            live.start()
 
             live.update(build_layout(state, config_holder[0]))
             await asyncio.sleep(0.5)
@@ -1048,11 +1349,12 @@ async def main():
 
         state["status"] = "運行中"
 
-        ui_task = asyncio.create_task(ui_loop(state, config_holder))
+        ui_task = asyncio.create_task(ui_loop(state, config_holder, page))
         worker_tasks = [
             asyncio.create_task(hourly_loop(page, state)),
             asyncio.create_task(daily_loop(page, state)),
             asyncio.create_task(gambling_loop(page, state, config_holder)),
+            asyncio.create_task(nekomusume_loop(page, state, config_holder)),
         ]
 
         await ui_task   # 等待使用者按 Q 離開
@@ -1062,6 +1364,10 @@ async def main():
         await asyncio.gather(*worker_tasks, return_exceptions=True)
         await browser.close()
         log.info("程式已結束")
+
+        if state.get("reboot"):
+            log.info("Reboot 已請求，以 exit code %d 退出讓 run.bat 重啟", REBOOT_EXIT_CODE)
+            sys.exit(REBOOT_EXIT_CODE)
 
 
 if __name__ == "__main__":
