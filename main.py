@@ -46,12 +46,34 @@ DEFAULT_NEKOMUSUME_INTERVAL_MIN = 30   # /check 監控間距
 DEFAULT_BIGWIN_MULTIPLIER = 5.0  # 中大獎賠率門檻（總計贏得 / 下注）
 DEFAULT_DEAD_THRESHOLD    = 2    # 連續讀取餘額失敗幾次算「bot 停擺」
 REBOOT_EXIT_CODE = 42     # main 退出時用這個碼通知 run.bat 重新啟動
+ANALYSIS_PATH     = "slot_analysis.json"
+MIN_KELLY_SAMPLES = 50    # Kelly 策略需要的最少轉數才生效
 
 command_lock = asyncio.Lock()
 console = Console()
 
 
 # ── 共享狀態 ──────────────────────────────────────────────────────────────────
+def _make_slot_analysis() -> dict:
+    return {
+        "total_spins": 0,
+        "total_wins": 0,
+        "total_losses": 0,
+        "total_wagered": 0,
+        "total_gross_won": 0,
+        "sum_return_ratio": 0.0,
+        "sum_return_ratio_sq": 0.0,
+        "symbol_stats": {},
+        "line_stats": {},
+        "grid_symbol_freq": {},
+        "grid_total_cells": 0,
+        "payout_distribution": {
+            "0x": 0, "0-1x": 0, "1-2x": 0,
+            "2-5x": 0, "5-10x": 0, "10x+": 0,
+        },
+    }
+
+
 def make_state() -> dict:
     return {
         "balance":      None,
@@ -77,6 +99,7 @@ def make_state() -> dict:
         "neko_check_ts":     None,  # 上次 /check 讀到剩餘時間的 epoch；用於 UI 即時倒數
         "dead_notified":    False,  # 「bot 停擺」email 是否已寄出，避免重複通知
         "session_start_ts": time.time(),
+        "slot_analysis": _make_slot_analysis(),
     }
 
 
@@ -138,10 +161,13 @@ def export_history_csv(state: dict) -> str | None:
     path = _export_filename("gambling", "csv")
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["時間", "下注", "下注前餘額", "下注後餘額", "變動", "結果"])
+        writer.writerow(["時間", "下注", "下注前餘額", "下注後餘額", "變動", "結果", "中獎線路"])
         for r in history:
+            lines_json = (json.dumps(r["lines"], ensure_ascii=False)
+                          if r.get("lines") else "")
             writer.writerow([
-                r["ts"], r["bet"], r["before"], r["after"], r["change"], r["result"],
+                r["ts"], r["bet"], r["before"], r["after"],
+                r["change"], r["result"], lines_json,
             ])
     return path
 
@@ -188,6 +214,126 @@ def export_history_chart(state: dict) -> str | None:
     fig.savefig(path, dpi=120)
     plt.close(fig)
     return path
+
+
+def export_slot_analysis(state: dict) -> str | None:
+    sa = state.get("slot_analysis", {})
+    if sa.get("total_spins", 0) == 0:
+        return None
+    stats = compute_slot_stats(sa)
+    path = _export_filename("slot_analysis", "txt")
+    with open(path, "w", encoding="utf-8") as f:
+        n = stats["total_spins"]
+        f.write(f"Slot Analysis Report - {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        f.write(f"{'=' * 50}\n\n")
+        f.write(f"Total spins:    {n}\n")
+        f.write(f"Win rate:       {stats['win_rate']:.2%}\n")
+        f.write(f"EV:             {stats['ev']:.4f}x (edge: {stats['edge']:+.2%})\n")
+        f.write(f"Std dev:        {stats['std_dev']:.4f}\n")
+        f.write(f"Variance:       {stats['variance']:.4f}\n")
+        kf = stats["kelly_fraction"]
+        f.write(f"Kelly fraction: {kf:.4f} (half: {kf / 2:.4f})\n\n")
+
+        f.write("Payout Distribution\n")
+        f.write(f"{'-' * 40}\n")
+        for bucket, count in stats.get("payout_distribution", {}).items():
+            pct = count / n * 100 if n else 0
+            f.write(f"  {bucket:>6s}: {count:>5d} ({pct:5.1f}%)\n")
+
+        si = stats.get("symbol_info", {})
+        if si:
+            f.write(f"\nSymbol Stats (from winning lines)\n")
+            f.write(f"{'-' * 40}\n")
+            f.write(f"  {'Symbol':<6s} {'Hits':>6s} {'AvgMult':>8s} {'TotalPay':>10s}\n")
+            for sym, info in sorted(si.items(), key=lambda x: -x[1]["total_payout"]):
+                f.write(f"  {sym:<6s} {info['win_appearances']:>6d} "
+                        f"{info['avg_mult']:>8.2f}x {info['total_payout']:>10,}\n")
+
+        gp = stats.get("grid_symbol_prob", {})
+        if gp:
+            f.write(f"\nGrid Symbol Probability\n")
+            f.write(f"{'-' * 40}\n")
+            for sym, prob in sorted(gp.items(), key=lambda x: -x[1]):
+                f.write(f"  {sym:<6s} {prob:>6.1%}\n")
+
+        li = stats.get("line_info", {})
+        if li:
+            f.write(f"\nLine Stats\n")
+            f.write(f"{'-' * 40}\n")
+            f.write(f"  {'Line':<10s} {'Hits':>6s} {'Rate':>8s} {'TotalPay':>10s}\n")
+            for ln, info in sorted(li.items(), key=lambda x: -x[1]["hits"]):
+                f.write(f"  {ln:<10s} {info['hits']:>6d} "
+                        f"{info['hit_rate']:>7.1%} {info['total_payout']:>10,}\n")
+    return path
+
+
+def _show_slot_analysis(state: dict):
+    os.system("cls")
+    sa = state.get("slot_analysis", {})
+    stats = compute_slot_stats(sa)
+
+    print(f"\n{'═' * 56}")
+    print("  🎰  Slot Machine Analysis")
+    print(f"{'═' * 56}")
+
+    if stats.get("total_spins", 0) == 0:
+        print("\n  尚無分析資料。開始賭博後會自動累積。")
+        input("\n  按 Enter 返回...")
+        return
+
+    n = stats["total_spins"]
+    ec = "+" if stats["edge"] >= 0 else ""
+    print(f"\n  總旋轉次數:  {n}")
+    print(f"  勝率:        {stats['win_rate']:.1%}")
+    print(f"  期望值 (EV): {stats['ev']:.4f}x  (邊際: {ec}{stats['edge']:.2%})")
+    print(f"  標準差:      {stats['std_dev']:.4f}")
+    print(f"  變異數:      {stats['variance']:.4f}")
+    kf = stats["kelly_fraction"]
+    if stats["sufficient_data"]:
+        print(f"  Kelly f*:    {kf:.4f}  (半 Kelly: {kf / 2:.4f})")
+    else:
+        print(f"  Kelly f*:    資料不足 (需 {MIN_KELLY_SAMPLES} 筆，目前 {n})")
+
+    dist = stats.get("payout_distribution", {})
+    if dist:
+        print(f"\n  {'─' * 40}")
+        print("  📊 賠率分布")
+        for bucket, count in dist.items():
+            pct = count / n * 100
+            bar = "█" * int(pct / 2)
+            print(f"    {bucket:>6s}: {count:>5d} ({pct:5.1f}%) {bar}")
+
+    si = stats.get("symbol_info", {})
+    gp = stats.get("grid_symbol_prob", {})
+    if si:
+        print(f"\n  {'─' * 40}")
+        print("  🎯 符號統計")
+        header = f"    {'符號':<6s} {'中獎次數':>8s} {'平均倍率':>8s} {'總賠付':>10s}"
+        if gp:
+            header += f" {'九宮格機率':>10s}"
+        print(header)
+        for sym, info in sorted(si.items(), key=lambda x: -x[1]["total_payout"]):
+            line = (f"    {sym:<6s} {info['win_appearances']:>8d} "
+                    f"{info['avg_mult']:>8.2f}x {info['total_payout']:>10,}")
+            if gp and sym in gp:
+                line += f" {gp[sym]:>10.1%}"
+            print(line)
+        # 只在九宮格有資料但不在 si 的符號
+        if gp:
+            for sym in sorted(gp.keys()):
+                if sym not in si:
+                    print(f"    {sym:<6s} {'─':>8s} {'─':>8s} {'─':>10s} {gp[sym]:>10.1%}")
+
+    li = stats.get("line_info", {})
+    if li:
+        print(f"\n  {'─' * 40}")
+        print("  📐 線路統計")
+        print(f"    {'線路':<10s} {'命中次數':>8s} {'命中率':>8s} {'總賠付':>10s}")
+        for ln, info in sorted(li.items(), key=lambda x: -x[1]["hits"]):
+            print(f"    {ln:<10s} {info['hits']:>8d} "
+                  f"{info['hit_rate']:>7.1%} {info['total_payout']:>10,}")
+
+    input("\n  按 Enter 返回...")
 
 
 # ── Email 通知 ───────────────────────────────────────────────────────────────
@@ -252,6 +398,21 @@ def load_config() -> dict:
         return json.load(f)
 
 
+def load_slot_analysis() -> dict | None:
+    if not os.path.exists(ANALYSIS_PATH):
+        return None
+    try:
+        with open(ANALYSIS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def save_slot_analysis(state: dict):
+    with open(ANALYSIS_PATH, "w", encoding="utf-8") as f:
+        json.dump(state["slot_analysis"], f, ensure_ascii=False, indent=2)
+
+
 def save_config(config: dict):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
@@ -297,7 +458,8 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
 
 
 # ── 押注策略 ──────────────────────────────────────────────────────────────────
-def calculate_bet(balance: int, gcfg: dict) -> int:
+def calculate_bet(balance: int, gcfg: dict,
+                  slot_analysis: dict | None = None) -> int:
     threshold = gcfg.get("threshold", 5000)
     min_bet   = gcfg.get("min_bet",   100)
     max_bet   = gcfg.get("max_bet",   500)
@@ -308,10 +470,20 @@ def calculate_bet(balance: int, gcfg: dict) -> int:
     if excess <= 0:
         return 0
 
-    bet = min_bet if strategy == "fixed" else max(min_bet, int(excess * fraction))
+    if strategy == "kelly" and slot_analysis is not None:
+        stats = compute_slot_stats(slot_analysis)
+        if stats.get("sufficient_data") and stats["kelly_fraction"] > 0:
+            bet = max(min_bet, int(excess * stats["kelly_fraction"] / 2))
+        else:
+            bet = min_bet
+    elif strategy == "fixed":
+        bet = min_bet
+    else:
+        bet = max(min_bet, int(excess * fraction))
+
     if max_bet > 0:
         bet = min(bet, max_bet)
-    return min(bet, excess)   # 安全上限：不讓餘額低於門檻
+    return min(bet, excess)
 
 
 # ── UI 渲染 ───────────────────────────────────────────────────────────────────
@@ -389,6 +561,18 @@ def build_layout(state: dict, config: dict) -> Layout:
     t1.add_row("❌ 失敗",      f"[red]{state['losses']}[/red]")
     t1.add_row("📊 勝率",      f"{win_rate:.1f}%")
     t1.add_row("💵 賭博淨收",  net_str)
+
+    sa = state.get("slot_analysis", {})
+    sa_n = sa.get("total_spins", 0)
+    if sa_n > 0:
+        sa_stats = compute_slot_stats(sa)
+        ev_c = "green" if sa_stats["edge"] >= 0 else "red"
+        ev_str = (f"[{ev_c}]{sa_stats['ev']:.3f}x ({sa_stats['edge']:+.1%})[/{ev_c}]"
+                  f"  n={sa_n}")
+    else:
+        ev_str = "[dim]資料不足[/dim]"
+    t1.add_row("📈 EV/期望值", ev_str)
+
     t1.add_row("", "")
     t1.add_row("🎯 當前下注",
                f"[yellow]{cur_bet:,}[/yellow]" if cur_bet else "─")
@@ -399,7 +583,15 @@ def build_layout(state: dict, config: dict) -> Layout:
     frac_pct    = f"{gcfg.get('bet_fraction', 0.02) * 100:.1f}%"
     max_bet     = gcfg.get("max_bet", 0)
     max_bet_str = f"{max_bet:,}" if max_bet > 0 else "自動"
-    strat_label = f"[cyan]{strategy}[/cyan]" + (f" ({frac_pct})" if strategy == "auto" else "")
+    strat_label = f"[cyan]{strategy}[/cyan]"
+    if strategy == "auto":
+        strat_label += f" ({frac_pct})"
+    elif strategy == "kelly":
+        if sa_n >= MIN_KELLY_SAMPLES:
+            kf = sa_stats["kelly_fraction"] if sa_n > 0 else 0
+            strat_label += f" (f*={kf:.3f})"
+        else:
+            strat_label += f" ({sa_n}/{MIN_KELLY_SAMPLES})"
 
     i_min = gcfg.get("interval_min", DEFAULT_INTERVAL_MIN)
     i_max = gcfg.get("interval_max", DEFAULT_INTERVAL_MAX)
@@ -448,7 +640,7 @@ def build_layout(state: dict, config: dict) -> Layout:
     pause_label = "[yellow]P 恢復[/yellow]" if state.get("paused") else "[bold]P[/bold] 暫停"
     footer = Panel(
         f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改設定  [bold]R[/bold] 重載  "
-        f"{pause_label}  [bold]E[/bold] 匯出  [bold]L[/bold] 重載頻道  [bold]F[/bold] 重啟程式[/dim]",
+        f"{pause_label}  [bold]E[/bold] 匯出  [bold]S[/bold] 分析  [bold]L[/bold] 重載頻道  [bold]F[/bold] 重啟程式[/dim]",
         style="dim", height=3,
     )
 
@@ -519,7 +711,7 @@ async def run_config_menu(state: dict, config_holder: list):
         print(f"   [2] 最小下注:    {gcfg.get('min_bet', 100):,}")
         print(f"   [3] 最大下注:    {gcfg.get('max_bet', 500):,}  (0 = 自動)")
         print(f"   [4] 押注比例:    {gcfg.get('bet_fraction', 0.02)*100:.1f}%  (auto策略用)")
-        print(f"   [5] 策略:        {gcfg.get('strategy', 'auto')}  (auto / fixed)")
+        print(f"   [5] 策略:        {gcfg.get('strategy', 'auto')}  (auto / fixed / kelly)")
         print(f"   [6] 賭博:        {'啟用' if gcfg.get('enabled') else '停用'}")
         print(f"   [7] 下注間距:    {i_min}-{i_max} 秒")
         print("  [目標]")
@@ -535,6 +727,9 @@ async def run_config_menu(state: dict, config_holder: list):
         print("  [貓娘監控]")
         print(f"   [E] 貓娘監控:    {'啟用' if nk_on else '停用'}  (派遣完成自動 @ 通知)")
         print(f"   [F] 檢查間距:    {ncfg.get('check_interval_min', DEFAULT_NEKOMUSUME_INTERVAL_MIN)} 分鐘")
+        sa_spins = state.get("slot_analysis", {}).get("total_spins", 0)
+        print("  [Slot 分析]")
+        print(f"   [I] 重置分析:    {sa_spins} 筆紀錄")
         print()
         print("  [0] 儲存並返回")
         print()
@@ -564,8 +759,8 @@ async def run_config_menu(state: dict, config_holder: list):
             except ValueError:
                 print("  無效輸入")
         elif choice == "5":
-            raw = (await ainput("  策略 (auto / fixed): ")).strip().lower()
-            if raw in ("auto", "fixed"):
+            raw = (await ainput("  策略 (auto / fixed / kelly): ")).strip().lower()
+            if raw in ("auto", "fixed", "kelly"):
                 gcfg["strategy"] = raw; print(f"  ✓ 策略 → {raw}")
         elif choice == "6":
             gcfg["enabled"] = not gcfg.get("enabled", True)
@@ -655,6 +850,13 @@ async def run_config_menu(state: dict, config_holder: list):
                 if raw.isdigit() and int(raw) >= 1:
                     ecfg["dead_threshold"] = int(raw)
                     print(f"  ✓ 連續失敗門檻 → {ecfg['dead_threshold']}")
+        elif choice == "I":
+            confirm = (await ainput("  確認重置所有 slot 分析資料？(y/N): ")).strip().lower()
+            if confirm == "y":
+                state["slot_analysis"] = _make_slot_analysis()
+                if os.path.exists(ANALYSIS_PATH):
+                    os.remove(ANALYSIS_PATH)
+                print(f"  ✓ 分析資料已重置（{sa_spins} 筆清除）")
 
     config["gambling"]   = gcfg
     config["email"]      = ecfg
@@ -734,6 +936,204 @@ def _new_reply_detected(before_text: str, current_text: str) -> bool:
 # slot 勝/負 marker（從 embed 文字直接判定這局結果，避免和 hourly/daily 的餘額變動混淆）
 SLOT_WIN_PATTERN  = re.compile(r'總計贏得[\s:：]*([0-9,，]+)')
 SLOT_LOSS_PATTERN = re.compile(r'損失\s*([0-9,，]+)')
+
+# ── Slot 結果詳細解析 ──────────────────────────────────────────────────────────
+# 中獎線路: "中排水平: 🍒×3 = 864 (7.0x × 0.5x)"
+SLOT_LINE_PATTERN = re.compile(
+    r'(上排水平|中排水平|下排水平|左列垂直|中列垂直|右列垂直|對角線|反對角線)'
+    r'[\s:：]*'
+    r'(.+?)'
+    r'[×xX](\d+)'
+    r'\s*=\s*'
+    r'([0-9,，]+)'
+    r'\s*\('
+    r'([0-9.]+)[xX]'
+    r'\s*[×xX]\s*'
+    r'([0-9.]+)[xX]'
+    r'\s*\)'
+)
+
+SLOT_RESULT_BLOCK = re.compile(r'拉霸機結果([\s\S]*?)(?:總計贏得|什麼都沒中)')
+
+# emoji 擷取：匹配常見 slot 符號（水果、寶石、數字等）
+_EMOJI_RE = re.compile(
+    '['
+    '\U0001F344-\U0001F353'   # 🍄-🍓 (mushroom~strawberry)
+    '\U0001F345-\U0001F37F'   # 🍅-🍿 (tomato~popcorn, covers 🍇🍈🍉🍊🍋🍌🍍🍎🍏🍐🍑🍒)
+    '\U0001F4A0'              # 💠
+    '\U0001F4A8'              # 💨
+    '\U0001F4B0'              # 💰
+    '\U0001F4B2'              # 💲
+    '\U0001F514'              # 🔔
+    '\U0001F48E'              # 💎
+    '\U0001F31F'              # 🌟
+    '\U00002B50'              # ⭐
+    '\U0001F451'              # 👑
+    '\U0001F3B0'              # 🎰
+    '\U00002764'              # ❤
+    '\U0001F525'              # 🔥
+    ']'
+    '(?:\U0000FE0F)?'         # optional variation selector
+)
+
+# 7️⃣ 特殊多碼點 emoji
+_SEVEN_EMOJI_RE = re.compile(r'7️?⃣')
+
+
+def _parse_slot_lines(text: str) -> list[dict]:
+    """解析最後一個 slot embed 裡的中獎線路。"""
+    blocks = list(SLOT_RESULT_BLOCK.finditer(text))
+    if not blocks:
+        return []
+    block_text = blocks[-1].group(1)
+    lines = []
+    for m in SLOT_LINE_PATTERN.finditer(block_text):
+        lines.append({
+            "line_name":   m.group(1),
+            "symbol":      m.group(2).strip(),
+            "count":       int(m.group(3)),
+            "payout":      int(m.group(4).replace(',', '').replace('，', '')),
+            "symbol_mult": float(m.group(5)),
+            "line_mult":   float(m.group(6)),
+        })
+    return lines
+
+
+def _parse_slot_grid(text: str) -> list[str] | None:
+    """
+    嘗試從最後一個 slot embed 的 textContent 擷取 3×3 九宮格 emoji。
+    回傳長度 9 的 list（row-major: [0..2]=row1, [3..5]=row2, [6..8]=row3）
+    或 None（解析失敗）。
+    """
+    blocks = list(SLOT_RESULT_BLOCK.finditer(text))
+    if not blocks:
+        return None
+    block_text = blocks[-1].group(1)
+
+    # 先把 7️⃣ 替換成單字元佔位符再統一找
+    placeholder = '\U0010FFFF'
+    normalized = _SEVEN_EMOJI_RE.sub(placeholder, block_text)
+    symbols: list[str] = []
+    for m in _EMOJI_RE.finditer(normalized):
+        symbols.append(m.group())
+    # 把佔位符換回 7️⃣
+    symbols = ['7️⃣' if s == placeholder else s for s in symbols]
+
+    # 也找原文的 7️⃣
+    for m in _SEVEN_EMOJI_RE.finditer(block_text):
+        pass  # 已透過 placeholder 處理
+
+    if len(symbols) >= 9:
+        return symbols[:9]
+    return None
+
+
+# ── Slot 分析累加器 ────────────────────────────────────────────────────────────
+def _update_slot_analysis(state: dict, bet: int, change: int,
+                          lines: list[dict], grid: list[str] | None):
+    sa = state["slot_analysis"]
+    sa["total_spins"] += 1
+    sa["total_wagered"] += bet
+
+    gross_win = max(0, change + bet)
+    sa["total_gross_won"] += gross_win
+
+    rr = gross_win / bet if bet > 0 else 0.0
+    sa["sum_return_ratio"] += rr
+    sa["sum_return_ratio_sq"] += rr * rr
+
+    if change > 0:
+        sa["total_wins"] += 1
+    else:
+        sa["total_losses"] += 1
+
+    if rr == 0:
+        sa["payout_distribution"]["0x"] += 1
+    elif rr < 1:
+        sa["payout_distribution"]["0-1x"] += 1
+    elif rr < 2:
+        sa["payout_distribution"]["1-2x"] += 1
+    elif rr < 5:
+        sa["payout_distribution"]["2-5x"] += 1
+    elif rr < 10:
+        sa["payout_distribution"]["5-10x"] += 1
+    else:
+        sa["payout_distribution"]["10x+"] += 1
+
+    for line in lines:
+        sym = line["symbol"]
+        ss = sa["symbol_stats"].setdefault(
+            sym, {"win_appearances": 0, "total_payout": 0, "total_mult_sum": 0.0}
+        )
+        ss["win_appearances"] += 1
+        ss["total_payout"] += line["payout"]
+        ss["total_mult_sum"] += line["symbol_mult"]
+
+        ln = line["line_name"]
+        ls = sa["line_stats"].setdefault(ln, {"hits": 0, "total_payout": 0})
+        ls["hits"] += 1
+        ls["total_payout"] += line["payout"]
+
+    if grid is not None and len(grid) >= 9:
+        for sym in grid[:9]:
+            sa["grid_symbol_freq"][sym] = sa["grid_symbol_freq"].get(sym, 0) + 1
+        sa["grid_total_cells"] += 9
+
+
+def compute_slot_stats(sa: dict) -> dict:
+    n = sa.get("total_spins", 0)
+    if n == 0:
+        return {"sufficient_data": False, "total_spins": 0}
+
+    ev = sa["sum_return_ratio"] / n
+    mean_sq = sa["sum_return_ratio_sq"] / n
+    variance = max(0.0, mean_sq - ev * ev)
+    std_dev = variance ** 0.5
+
+    win_rate = sa["total_wins"] / n
+    avg_win_mult = (sa["total_gross_won"] / sa["total_wagered"]
+                    if sa["total_wagered"] > 0 else 0.0)
+
+    kelly_fraction = ((ev - 1.0) / variance) if (variance > 0 and ev > 1.0) else 0.0
+
+    symbol_info = {}
+    for sym, ss in sa.get("symbol_stats", {}).items():
+        cnt = ss["win_appearances"]
+        symbol_info[sym] = {
+            "win_appearances": cnt,
+            "avg_mult": ss["total_mult_sum"] / cnt if cnt > 0 else 0.0,
+            "total_payout": ss["total_payout"],
+        }
+
+    grid_total = sa.get("grid_total_cells", 0)
+    grid_symbol_prob = {}
+    if grid_total > 0:
+        for sym, cnt in sa.get("grid_symbol_freq", {}).items():
+            grid_symbol_prob[sym] = cnt / grid_total
+
+    line_info = {}
+    for ln, ls in sa.get("line_stats", {}).items():
+        line_info[ln] = {
+            "hits": ls["hits"],
+            "hit_rate": ls["hits"] / n,
+            "total_payout": ls["total_payout"],
+        }
+
+    return {
+        "sufficient_data": n >= MIN_KELLY_SAMPLES,
+        "total_spins": n,
+        "ev": ev,
+        "edge": ev - 1.0,
+        "variance": variance,
+        "std_dev": std_dev,
+        "win_rate": win_rate,
+        "avg_win_mult": avg_win_mult,
+        "kelly_fraction": kelly_fraction,
+        "symbol_info": symbol_info,
+        "grid_symbol_prob": grid_symbol_prob,
+        "line_info": line_info,
+        "payout_distribution": sa.get("payout_distribution", {}),
+    }
 
 
 def _parse_slot_change(text: str, bet: int) -> int | None:
@@ -930,12 +1330,18 @@ async def play_slot(page: Page, bet: int) -> dict | None:
                 continue
             if time.time() - last_change_time >= stability_sec:
                 change = _parse_slot_change(current_text, bet)
-                return {"balance": val, "change": change}
+                lines = _parse_slot_lines(current_text)
+                grid = _parse_slot_grid(current_text)
+                return {"balance": val, "change": change,
+                        "lines": lines, "grid": grid}
 
         if last_val is not None:
             change = _parse_slot_change(last_text, bet)
+            lines = _parse_slot_lines(last_text)
+            grid = _parse_slot_grid(last_text)
             log.info("/slot %d timeout 但已抓到值 %d (change=%s)", bet, last_val, change)
-            return {"balance": last_val, "change": change}
+            return {"balance": last_val, "change": change,
+                    "lines": lines, "grid": grid}
         log.warning("/slot %d 在 %.0fs 內未取得新餘額", bet, timeout)
         return None
 
@@ -1353,7 +1759,7 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                 await _maybe_notify_goal(page, state, config_holder)
             continue
 
-        bet = calculate_bet(balance, gcfg)
+        bet = calculate_bet(balance, gcfg, state.get("slot_analysis"))
         if bet <= 0:
             await interruptible_sleep(state, 30)
             continue
@@ -1393,7 +1799,16 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                 "after":  new_balance,
                 "change": change,
                 "result": "win" if change > 0 else "loss",
+                "lines":  result.get("lines", []),
             })
+
+            # 累加 slot 分析資料
+            _update_slot_analysis(
+                state, bet, change,
+                result.get("lines", []), result.get("grid"),
+            )
+            if state["slot_analysis"]["total_spins"] % 20 == 0:
+                save_slot_analysis(state)
 
             # 中大獎通知（改變餘額成功 + 真的解析到 win 才檢查）
             if parsed_change is not None and change > 0 and bet > 0:
@@ -1479,14 +1894,24 @@ async def ui_loop(state: dict, config_holder: list, page: Page | None = None):
                 elif key == "e":
                     csv_path = export_history_csv(state)
                     png_path = export_history_chart(state)
-                    if csv_path is None:
+                    analysis_path = export_slot_analysis(state)
+                    if csv_path is None and analysis_path is None:
                         _log(state, "尚無賭博紀錄可匯出")
                     else:
-                        _log(state, f"CSV 已匯出: {csv_path}")
+                        if csv_path:
+                            _log(state, f"CSV 已匯出: {csv_path}")
                         if png_path:
                             _log(state, f"圖表已匯出: {png_path}")
-                        else:
+                        elif csv_path:
                             _log(state, "（未安裝 matplotlib，跳過圖表）")
+                        if analysis_path:
+                            _log(state, f"分析已匯出: {analysis_path}")
+                elif key == "s":
+                    live.stop()
+                    try:
+                        _show_slot_analysis(state)
+                    finally:
+                        live.start()
                 elif key == "f":
                     # 整個程式重啟（透過 exit code 由 run.bat 偵測）
                     _log(state, "已請求重啟，正在收尾...")
@@ -1555,6 +1980,13 @@ async def main():
         ensure_gambling_defaults(config_holder[0], balance)
         config_holder[0] = load_config()
 
+        # 載入持久化的 slot 分析資料
+        persisted_sa = load_slot_analysis()
+        if persisted_sa:
+            state["slot_analysis"] = persisted_sa
+            log.info("已載入 slot 分析資料（%d 筆紀錄）",
+                     persisted_sa.get("total_spins", 0))
+
         state["status"] = "運行中"
 
         ui_task = asyncio.create_task(ui_loop(state, config_holder, page))
@@ -1571,7 +2003,8 @@ async def main():
             t.cancel()
         await asyncio.gather(*worker_tasks, return_exceptions=True)
         await browser.close()
-        log.info("程式已結束")
+        save_slot_analysis(state)
+        log.info("程式已結束（slot 分析已儲存）")
 
         if state.get("reboot"):
             log.info("Reboot 已請求，以 exit code %d 退出讓 run.bat 重啟", REBOOT_EXIT_CODE)

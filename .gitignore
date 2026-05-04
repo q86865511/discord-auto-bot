@@ -5,6 +5,9 @@ storage_state.json
 # 匯出的賭博紀錄
 exports/
 
+# Slot 分析資料（runtime 產生）
+slot_analysis.json
+
 # Python
 __pycache__/
 *.py[cod]

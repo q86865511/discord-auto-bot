@@ -62,7 +62,8 @@ UI 上的快速鍵：
 | `C` | 修改設定（互動式選單）|
 | `R` | 從檔案重載設定 |
 | `P` | 暫停 / 恢復所有功能（會即時打斷 hourly/daily 等待）|
-| `E` | 匯出賭博紀錄為 CSV + PNG 圖表（存到 `exports/`）|
+| `E` | 匯出賭博紀錄為 CSV + PNG 圖表 + Slot 分析報告（存到 `exports/`）|
+| `S` | 查看 Slot 分析報告（EV、符號統計、線路統計、Kelly 建議）|
 | `L` | 重新載入 Discord 頻道頁面（page state 變糟時用）|
 | `F` | 整個程式重啟（透過 `run.bat` loop 達成；直接 `python main.py` 跑時會直接退出）|
 
@@ -76,7 +77,7 @@ UI 上的快速鍵：
 | `threshold` | `5000` | 保底門檻：餘額低於這個值就停止下注 |
 | `min_bet` | `100` | 單次最小下注 |
 | `max_bet` | `500` | 單次最大下注（`0` = 自動：餘額超過門檻部分的 10%）|
-| `strategy` | `"auto"` | `auto` = 按比例；`fixed` = 固定 `min_bet` |
+| `strategy` | `"auto"` | `auto` = 按比例；`fixed` = 固定 `min_bet`；`kelly` = 依據期望值的 Kelly Criterion（詳見下方說明）|
 | `bet_fraction` | `0.02` | auto 策略：押注超過門檻部分的這個比例 |
 | `interval_min` | `4` | 兩次下注之間最短秒數 |
 | `interval_max` | `10` | 兩次下注之間最長秒數 |
@@ -120,6 +121,25 @@ UI 上的快速鍵：
 
 每隔 N 分鐘送一次 `/check`（ephemeral，不會洗版），偵測到從「派遣中」轉為「完成 / 閒置」時，自動 `@` 指定使用者，提醒 `/nekomusume claim` 領取。同時若 email 啟用也會寄信。
 
+### Slot 分析與 Kelly 策略
+
+按 `S` 鍵可查看完整分析報告，包含：
+
+- **期望值 (EV)**：每次下注的平均回報倍率。EV > 1 = 機器對玩家有利；EV < 1 = 莊家佔優
+- **符號統計**：各符號的中獎次數、平均倍率、總賠付，以及從九宮格解析的出現機率
+- **線路統計**：各連線方向的命中次數與命中率
+- **賠率分布**：0x / 0-1x / 1-2x / 2-5x / 5-10x / 10x+ 的分布直方圖
+- **Kelly Criterion**：基於 EV 和變異數計算的最佳下注比例
+
+**Kelly 策略** (`strategy: "kelly"`)：
+
+- 需要累計 50 筆以上轉數才會啟用；資料不足時以 `min_bet` 下注
+- 使用半 Kelly（f*/2）以降低波動風險
+- EV ≤ 1（負期望值）時固定下 `min_bet`，不停止賭博，UI 會清楚顯示 EV
+- 可隨時從設定選單切回 `auto` 或 `fixed`
+
+分析資料持久化在 `slot_analysis.json`，重啟後會自動載入繼續累計。可在設定選單 `[I]` 重置。
+
 ## 檔案說明
 
 ```
@@ -133,7 +153,8 @@ UI 上的快速鍵：
 ├── config.example.json      設定檔範本
 ├── config.json              你的實際設定（已被 .gitignore，不會上傳）
 ├── storage_state.json       Discord session（已被 .gitignore，不會上傳）
-└── exports/                 匯出的賭博紀錄（已被 .gitignore）
+├── slot_analysis.json       Slot 分析累計資料（已被 .gitignore，runtime 產生）
+└── exports/                 匯出的賭博紀錄與分析報告（已被 .gitignore）
 ```
 
 ## 技術說明
