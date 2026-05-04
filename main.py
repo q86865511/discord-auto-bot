@@ -58,6 +58,12 @@ command_lock = asyncio.Lock()
 console = Console()
 
 
+# 賠率分布的 bucket key 順序（同步用於 _update_slot_analysis 與顯示）
+PAYOUT_BUCKETS = ["0", "0~2", "2~5", "5~8", "8~10", "10~20", "以上"]
+HIGH_MULT_THRESHOLD = 20.0    # 賠率 >= 此值就計入 high_mults（並落在「以上」桶）
+HIGH_MULT_KEEP      = 50      # 最多保留多少筆 high_mults（避免無限長大）
+
+
 # ── 共享狀態 ──────────────────────────────────────────────────────────────────
 def _make_slot_analysis() -> dict:
     return {
@@ -72,10 +78,8 @@ def _make_slot_analysis() -> dict:
         "line_stats": {},
         "grid_symbol_freq": {},
         "grid_total_cells": 0,
-        "payout_distribution": {
-            "0x": 0, "0-1x": 0, "1-2x": 0,
-            "2-5x": 0, "5-10x": 0, "10x+": 0,
-        },
+        "payout_distribution": {k: 0 for k in PAYOUT_BUCKETS},
+        "high_mults": [],   # >=HIGH_MULT_THRESHOLD 的 return ratio（最多保留 HIGH_MULT_KEEP 筆）
     }
 
 
@@ -241,9 +245,16 @@ def export_slot_analysis(state: dict) -> str | None:
 
         f.write("Payout Distribution\n")
         f.write(f"{'-' * 40}\n")
-        for bucket, count in stats.get("payout_distribution", {}).items():
+        dist = stats.get("payout_distribution", {})
+        for bucket in PAYOUT_BUCKETS:
+            count = int(dist.get(bucket, 0))
             pct = count / n * 100 if n else 0
             f.write(f"  {bucket:>6s}: {count:>5d} ({pct:5.1f}%)\n")
+        high_mults = stats.get("high_mults", [])
+        if high_mults:
+            top = sorted(high_mults, reverse=True)
+            f.write(f"  >={int(HIGH_MULT_THRESHOLD)}x actual multipliers ({len(top)}): "
+                    + ", ".join(f"{m:.2f}x" for m in top) + "\n")
 
         si = stats.get("symbol_info", {})
         if si:
@@ -272,73 +283,28 @@ def export_slot_analysis(state: dict) -> str | None:
     return path
 
 
-def _ascii_sparkline(values: list[float], width: int = 50, height: int = 8) -> list[str]:
-    """生成簡單 ASCII 折線圖；回傳每行字串列表。"""
-    if not values:
-        return []
-    if len(values) > width:
-        # 等距取樣
-        step = len(values) / width
-        sampled = [values[int(i * step)] for i in range(width)]
-    else:
-        sampled = values[:]
-        # 補 width
-        if len(sampled) < width:
-            last = sampled[-1]
-            sampled.extend([last] * (width - len(sampled)))
-
-    vmin, vmax = min(sampled), max(sampled)
-    if vmax == vmin:
-        vmax = vmin + 1  # 避免 div/0
-
-    # 每個 column 對應一個 row 位置
-    rows = [[" "] * width for _ in range(height)]
-    for x, v in enumerate(sampled):
-        # 0 = 最高 row；height-1 = 最低 row
-        norm = (v - vmin) / (vmax - vmin)
-        y = int(round((1 - norm) * (height - 1)))
-        y = max(0, min(height - 1, y))
-        rows[y][x] = "●"
-
-    # 讓零基準線顯示為 "─"（如果範圍跨 0）
-    if vmin < 0 < vmax:
-        zero_y = int(round((1 - (0 - vmin) / (vmax - vmin)) * (height - 1)))
-        zero_y = max(0, min(height - 1, zero_y))
-        for x in range(width):
-            if rows[zero_y][x] == " ":
-                rows[zero_y][x] = "─"
-
-    return ["".join(r) for r in rows]
-
-
-def _show_history_chart(state: dict):
-    """印出累計淨收 / 餘額的 ASCII 折線圖。"""
+def _show_history_summary(state: dict):
+    """以文字摘要顯示賭博紀錄；圖表由 E 鍵以 PNG 匯出。"""
     history = state.get("history") or []
     if not history:
-        print("\n  📉 賭博紀錄圖：尚無下注紀錄")
         return
+    cum_net = sum(r.get("change", 0) for r in history)
+    last_balance = history[-1].get("after", 0)
+    win_count = sum(1 for r in history if r.get("change", 0) > 0)
+    lose_count = sum(1 for r in history if r.get("change", 0) < 0)
 
-    nets = []
-    cum = 0
-    for r in history:
-        cum += r.get("change", 0)
-        nets.append(cum)
-    balances = [r.get("after", 0) for r in history]
-
-    n = len(history)
-    print(f"\n  {'─' * 56}")
-    print(f"  📉 賭博紀錄圖  ({n} 筆下注)")
-    print(f"     累計淨收: {nets[-1]:+,}    餘額: {balances[-1]:,}")
-
-    # 累計淨收圖
-    print(f"\n  累計淨收（高: {max(nets):+,}  低: {min(nets):+,}）:")
-    for line in _ascii_sparkline(nets, width=56, height=6):
-        print(f"    {line}")
-
-    # 餘額圖
-    print(f"\n  餘額變化（高: {max(balances):,}  低: {min(balances):,}）:")
-    for line in _ascii_sparkline(balances, width=56, height=6):
-        print(f"    {line}")
+    console.print()
+    console.rule("[bold]📉 賭博紀錄[/]")
+    color = "green" if cum_net >= 0 else "red"
+    console.print(
+        f"  下注次數: [bold]{len(history)}[/]  "
+        f"勝/敗: [green]{win_count}[/]/[red]{lose_count}[/]  "
+        f"累計淨收: [{color}]{cum_net:+,}[/]  "
+        f"目前餘額: [bold]{last_balance:,}[/]"
+    )
+    console.print(
+        "  [dim]（按 [bold]E[/bold] 可匯出 CSV + PNG 折線圖到 exports/）[/dim]"
+    )
 
 
 def _show_slot_analysis(state: dict):
@@ -346,90 +312,130 @@ def _show_slot_analysis(state: dict):
     sa = state.get("slot_analysis", {})
     stats = compute_slot_stats(sa)
 
-    print(f"\n{'═' * 60}")
-    print("  🎰  Slot Machine Analysis")
-    print(f"{'═' * 60}")
+    console.print()
+    console.rule("[bold cyan]🎰  Slot Machine Analysis[/]")
 
     if stats.get("total_spins", 0) == 0:
-        print("\n  尚無分析資料。開始賭博後會自動累積。")
-        _show_history_chart(state)
+        console.print("\n  [dim]尚無分析資料。開始賭博後會自動累積。[/dim]")
+        _show_history_summary(state)
         input("\n  按 Enter 返回...")
         return
 
     n = stats["total_spins"]
-    ec = "+" if stats["edge"] >= 0 else ""
-    print(f"\n  總旋轉次數:  {n}")
-    print(f"  勝率:        {stats['win_rate']:.1%}")
-    print(f"  期望值 (EV): {stats['ev']:.4f}x  (邊際: {ec}{stats['edge']:.2%})")
-    print(f"  標準差:      {stats['std_dev']:.4f}")
-    print(f"  變異數:      {stats['variance']:.4f}")
+    edge = stats["edge"]
+    ec = "green" if edge >= 0 else "red"
+
+    # 基本統計
+    bt = Table(box=None, show_header=False, padding=(0, 2))
+    bt.add_column(style="dim", no_wrap=True)
+    bt.add_column()
+    bt.add_row("總旋轉次數", f"{n:,}")
+    bt.add_row("勝率",       f"{stats['win_rate']:.1%}")
+    bt.add_row(
+        "期望值 (EV)",
+        f"{stats['ev']:.4f}x  ([{ec}]邊際: {edge:+.2%}[/{ec}])"
+    )
+    bt.add_row("標準差", f"{stats['std_dev']:.4f}")
+    bt.add_row("變異數", f"{stats['variance']:.4f}")
     kf = stats["kelly_fraction"]
     if stats["sufficient_data"]:
-        print(f"  Kelly f*:    {kf:.4f}  (半 Kelly: {kf / 2:.4f})")
+        bt.add_row("Kelly f*", f"{kf:.4f}  (半 Kelly: {kf / 2:.4f})")
     else:
-        print(f"  Kelly f*:    資料不足 (需 {MIN_KELLY_SAMPLES} 筆，目前 {n})")
+        bt.add_row("Kelly f*", f"[dim]資料不足（需 {MIN_KELLY_SAMPLES} 筆，目前 {n}）[/dim]")
+    console.print(bt)
 
+    # 賠率分布
     dist = stats.get("payout_distribution", {})
-    if dist:
-        print(f"\n  {'─' * 56}")
-        print("  📊 賠率分布")
-        for bucket, count in dist.items():
-            pct = count / n * 100
-            bar = "█" * int(pct / 2)
-            print(f"    {bucket:>6s}: {count:>5d} ({pct:5.1f}%) {bar}")
+    high_mults = stats.get("high_mults", [])
+    console.print()
+    console.rule("[bold]📊 賠率分布[/]")
+    dt = Table(show_header=True, header_style="bold cyan")
+    dt.add_column("區間",     justify="right", no_wrap=True)
+    dt.add_column("次數",     justify="right")
+    dt.add_column("比例",     justify="right")
+    dt.add_column("分布",     justify="left", no_wrap=True)
+    dt.add_column("實際賠率", justify="left")  # 只有「以上」桶會用
 
+    for bucket in PAYOUT_BUCKETS:
+        count = int(dist.get(bucket, 0))
+        pct = count / n * 100 if n else 0
+        bar = "█" * min(40, int(pct / 2))
+        actual = ""
+        if bucket == "以上" and count > 0 and high_mults:
+            recent = sorted(high_mults, reverse=True)[:5]
+            actual = ", ".join(f"{m:.1f}x" for m in recent)
+            if len(high_mults) > len(recent):
+                actual += f"  [dim]…+{len(high_mults) - len(recent)}[/dim]"
+        dt.add_row(bucket, f"{count:,}", f"{pct:.1f}%", bar, actual)
+    console.print(dt)
+
+    # 符號統計
     si = stats.get("symbol_info", {})
     gp = stats.get("grid_symbol_prob", {})
     total_wagered = sa.get("total_wagered", 0) or 1   # 防 div/0
     if si or gp:
-        print(f"\n  {'─' * 56}")
-        print("  🎯 符號統計  (賠率 = 累計賠付 / 累計下注)")
-        header = (f"    {'符號':<14s} {'中獎次數':>8s} {'平均倍率':>8s} "
-                  f"{'累計賠付':>10s} {'回收率':>8s}")
+        console.print()
+        console.rule("[bold]🎯 符號統計  (回收率 = 累計賠付 / 累計下注)[/]")
+        st = Table(show_header=True, header_style="bold cyan")
+        st.add_column("符號",     justify="left",  no_wrap=True)
+        st.add_column("中獎次數", justify="right")
+        st.add_column("平均倍率", justify="right")
+        st.add_column("累計賠付", justify="right")
+        st.add_column("回收率",   justify="right")
         if gp:
-            header += f" {'格子機率':>8s}"
-        print(header)
+            st.add_column("格子機率", justify="right")
 
-        # 把所有符號合併（symbol_info 有的優先；只在格子裡的補在後面）
         all_symbols = set(si.keys()) | set(gp.keys())
-        # 排序：先按 total_payout（中獎金額）降冪；沒中獎的放最後
-        def _sort_key(sym):
-            return -(si.get(sym, {}).get("total_payout", 0))
+
+        def _sort_key(s):
+            return -(si.get(s, {}).get("total_payout", 0))
 
         for sym in sorted(all_symbols, key=_sort_key):
             info = si.get(sym, {})
             wins = info.get("win_appearances", 0)
-            avg_mult = info.get("avg_mult", 0.0)
-            total_pay = info.get("total_payout", 0)
-            # 回收率 = 該符號累計賠付 / 全部下注
-            recover_rate = total_pay / total_wagered
-
-            wins_str  = f"{wins:>8d}" if wins > 0 else f"{'─':>8s}"
-            mult_str  = f"{avg_mult:>7.2f}x" if wins > 0 else f"{'─':>8s}"
-            pay_str   = f"{total_pay:>10,}" if wins > 0 else f"{'─':>10s}"
-            rec_str   = f"{recover_rate:>7.1%}" if wins > 0 else f"{'─':>8s}"
-
-            line = f"    {sym:<14s} {wins_str} {mult_str} {pay_str} {rec_str}"
+            if wins > 0:
+                avg_mult = info.get("avg_mult", 0.0)
+                total_pay = info.get("total_payout", 0)
+                rec_rate = total_pay / total_wagered
+                row = [
+                    sym,
+                    f"{wins:,}",
+                    f"{avg_mult:.2f}x",
+                    f"{total_pay:,}",
+                    f"{rec_rate:.1%}",
+                ]
+            else:
+                row = [sym, "─", "─", "─", "─"]
             if gp:
-                line += (f" {gp[sym]:>7.1%}" if sym in gp else f" {'─':>8s}")
-            print(line)
+                row.append(f"{gp[sym]:.1%}" if sym in gp else "─")
+            st.add_row(*row)
+        console.print(st)
     else:
-        print(f"\n  {'─' * 56}")
-        print("  ⚠ 符號統計資料為空")
-        print("    1. 中獎次數可能還不夠，再多跑幾把就會累積；或")
-        print("    2. 早期版本的解析 bug — 請按 C → I 重置分析後重新累積。")
+        console.print()
+        console.print(
+            "  [yellow]⚠ 符號統計資料為空[/yellow]\n"
+            "    1. 中獎次數可能還不夠，再多跑幾把就會累積；或\n"
+            "    2. 早期版本的解析 bug — 請按 [bold]C → I[/bold] 重置分析後重新累積。"
+        )
 
+    # 線路統計
     li = stats.get("line_info", {})
     if li:
-        print(f"\n  {'─' * 56}")
-        print("  📐 線路統計")
-        print(f"    {'線路':<10s} {'命中次數':>8s} {'命中率':>8s} {'總賠付':>10s}")
+        console.print()
+        console.rule("[bold]📐 線路統計[/]")
+        lt = Table(show_header=True, header_style="bold cyan")
+        lt.add_column("線路",     justify="left",  no_wrap=True)
+        lt.add_column("命中次數", justify="right")
+        lt.add_column("命中率",   justify="right")
+        lt.add_column("總賠付",   justify="right")
         for ln, info in sorted(li.items(), key=lambda x: -x[1]["hits"]):
-            print(f"    {ln:<10s} {info['hits']:>8d} "
-                  f"{info['hit_rate']:>7.1%} {info['total_payout']:>10,}")
+            lt.add_row(ln, f"{info['hits']:,}",
+                       f"{info['hit_rate']:.1%}",
+                       f"{info['total_payout']:,}")
+        console.print(lt)
 
-    # 賭博紀錄圖（ASCII）
-    _show_history_chart(state)
+    # 紀錄摘要
+    _show_history_summary(state)
 
     input("\n  按 Enter 返回...")
 
@@ -501,9 +507,21 @@ def load_slot_analysis() -> dict | None:
         return None
     try:
         with open(ANALYSIS_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
+
+    # 遷移：若 payout_distribution 是舊版 bucket 結構，重置為新版
+    # （舊版逐筆 return ratio 沒留下，無法精確映射，只好歸零；
+    #  其他統計欄位完整保留）
+    pd = data.get("payout_distribution", {})
+    if not all(k in pd for k in PAYOUT_BUCKETS):
+        data["payout_distribution"] = {k: 0 for k in PAYOUT_BUCKETS}
+
+    # 遷移：補上新增的 high_mults 欄位
+    data.setdefault("high_mults", [])
+
+    return data
 
 
 def save_slot_analysis(state: dict):
@@ -1285,18 +1303,25 @@ def _update_slot_analysis(state: dict, bet: int, change: int,
     else:
         sa["total_losses"] += 1
 
+    pd = sa["payout_distribution"]
     if rr == 0:
-        sa["payout_distribution"]["0x"] += 1
-    elif rr < 1:
-        sa["payout_distribution"]["0-1x"] += 1
+        pd["0"] += 1
     elif rr < 2:
-        sa["payout_distribution"]["1-2x"] += 1
+        pd["0~2"] += 1
     elif rr < 5:
-        sa["payout_distribution"]["2-5x"] += 1
+        pd["2~5"] += 1
+    elif rr < 8:
+        pd["5~8"] += 1
     elif rr < 10:
-        sa["payout_distribution"]["5-10x"] += 1
+        pd["8~10"] += 1
+    elif rr < HIGH_MULT_THRESHOLD:
+        pd["10~20"] += 1
     else:
-        sa["payout_distribution"]["10x+"] += 1
+        pd["以上"] += 1
+        hm = sa.setdefault("high_mults", [])
+        hm.append(round(rr, 2))
+        if len(hm) > HIGH_MULT_KEEP:
+            del hm[:len(hm) - HIGH_MULT_KEEP]
 
     for line in lines:
         sym = line["symbol"]
@@ -1371,6 +1396,7 @@ def compute_slot_stats(sa: dict) -> dict:
         "grid_symbol_prob": grid_symbol_prob,
         "line_info": line_info,
         "payout_distribution": sa.get("payout_distribution", {}),
+        "high_mults": sa.get("high_mults", []),
     }
 
 
