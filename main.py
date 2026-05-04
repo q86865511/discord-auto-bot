@@ -939,45 +939,34 @@ SLOT_LOSS_PATTERN = re.compile(r'損失\s*([0-9,，]+)')
 
 # ── Slot 結果詳細解析 ──────────────────────────────────────────────────────────
 # 中獎線路: "中排水平: 🍒×3 = 864 (7.0x × 0.5x)"
+# Discord textContent 裡 emoji 以 :shortcode: 格式出現（非 Unicode codepoint）
+# 例：:cherry:×3 = 742 :oi: (7.0x × 0.5x)
+#       ^symbol    ^count ^payout ^currency_emoji ^mults
+
+# 中獎線路格式：線路名稱: :symbol:×N = amount [:oi:] (mult1x × mult2x)
 SLOT_LINE_PATTERN = re.compile(
     r'(上排水平|中排水平|下排水平|左列垂直|中列垂直|右列垂直|對角線|反對角線)'
-    r'[\s:：]*'
-    r'(.+?)'
-    r'[×xX](\d+)'
+    r'\s*:\s*'                     # 分隔符 ": "
+    r'(:[a-z0-9_]+:)'             # 符號 :cherry:
+    r'[×xX](\d+)'                 # 次數 ×3
     r'\s*=\s*'
-    r'([0-9,，]+)'
+    r'([0-9,，]+)'                 # 金額 742
+    r'(?:\s*:[a-z0-9_]+:)*'       # 可選 :oi: 等貨幣 emoji
     r'\s*\('
-    r'([0-9.]+)[xX]'
+    r'([0-9.]+)[xX]'              # 符號倍率 7.0x
     r'\s*[×xX]\s*'
-    r'([0-9.]+)[xX]'
+    r'([0-9.]+)[xX]'              # 線路倍率 0.5x
     r'\s*\)'
 )
 
+# 涵蓋線路描述區塊（到 總計贏得/損失）
 SLOT_RESULT_BLOCK = re.compile(r'拉霸機結果([\s\S]*?)(?:總計贏得|什麼都沒中)')
 
-# emoji 擷取：匹配常見 slot 符號（水果、寶石、數字等）
-_EMOJI_RE = re.compile(
-    '['
-    '\U0001F344-\U0001F353'   # 🍄-🍓 (mushroom~strawberry)
-    '\U0001F345-\U0001F37F'   # 🍅-🍿 (tomato~popcorn, covers 🍇🍈🍉🍊🍋🍌🍍🍎🍏🍐🍑🍒)
-    '\U0001F4A0'              # 💠
-    '\U0001F4A8'              # 💨
-    '\U0001F4B0'              # 💰
-    '\U0001F4B2'              # 💲
-    '\U0001F514'              # 🔔
-    '\U0001F48E'              # 💎
-    '\U0001F31F'              # 🌟
-    '\U00002B50'              # ⭐
-    '\U0001F451'              # 👑
-    '\U0001F3B0'              # 🎰
-    '\U00002764'              # ❤
-    '\U0001F525'              # 🔥
-    ']'
-    '(?:\U0000FE0F)?'         # optional variation selector
-)
+# 較大的區塊：到 下注: 為止，同時涵蓋格子 emoji（格子在總計贏得之後）
+SLOT_FULL_BLOCK = re.compile(r'拉霸機結果([\s\S]{0,600}?)下注\s*[:：]')
 
-# 7️⃣ 特殊多碼點 emoji
-_SEVEN_EMOJI_RE = re.compile(r'7️?⃣')
+# :shortcode: emoji 匹配（用於九宮格解析）
+_SHORTCODE_RE = re.compile(r':[a-z0-9_]+:')
 
 
 def _parse_slot_lines(text: str) -> list[dict]:
@@ -990,7 +979,7 @@ def _parse_slot_lines(text: str) -> list[dict]:
     for m in SLOT_LINE_PATTERN.finditer(block_text):
         lines.append({
             "line_name":   m.group(1),
-            "symbol":      m.group(2).strip(),
+            "symbol":      m.group(2),           # :cherry: 格式
             "count":       int(m.group(3)),
             "payout":      int(m.group(4).replace(',', '').replace('，', '')),
             "symbol_mult": float(m.group(5)),
@@ -1001,30 +990,40 @@ def _parse_slot_lines(text: str) -> list[dict]:
 
 def _parse_slot_grid(text: str) -> list[str] | None:
     """
-    嘗試從最後一個 slot embed 的 textContent 擷取 3×3 九宮格 emoji。
-    回傳長度 9 的 list（row-major: [0..2]=row1, [3..5]=row2, [6..8]=row3）
-    或 None（解析失敗）。
+    從 slot embed 的 textContent 擷取 3×3 九宮格符號（:shortcode: 格式）。
+    格子顯示在「總計贏得」之後、「下注:」之前，需用 SLOT_FULL_BLOCK 搜尋。
+    回傳長度 9 的 list 或 None。
     """
-    blocks = list(SLOT_RESULT_BLOCK.finditer(text))
-    if not blocks:
-        return None
-    block_text = blocks[-1].group(1)
+    log = logging.getLogger(__name__)
 
-    # 先把 7️⃣ 替換成單字元佔位符再統一找
-    placeholder = '\U0010FFFF'
-    normalized = _SEVEN_EMOJI_RE.sub(placeholder, block_text)
-    symbols: list[str] = []
-    for m in _EMOJI_RE.finditer(normalized):
-        symbols.append(m.group())
-    # 把佔位符換回 7️⃣
-    symbols = ['7️⃣' if s == placeholder else s for s in symbols]
+    # 優先用涵蓋格子的較大 block
+    full_blocks = list(SLOT_FULL_BLOCK.finditer(text))
+    if full_blocks:
+        block_text = full_blocks[-1].group(1)
+    else:
+        simple_blocks = list(SLOT_RESULT_BLOCK.finditer(text))
+        if not simple_blocks:
+            return None
+        block_text = simple_blocks[-1].group(1)
 
-    # 也找原文的 7️⃣
-    for m in _SEVEN_EMOJI_RE.finditer(block_text):
-        pass  # 已透過 placeholder 處理
+    # 移除線路描述，避免把「中獎符號」計入格子
+    cleaned = SLOT_LINE_PATTERN.sub(' ', block_text)
 
-    if len(symbols) >= 9:
-        return symbols[:9]
+    # 找剩餘的 :shortcode:（應只剩九宮格的 9 個 + 極少非格子 emoji 如 :oi:）
+    all_codes = _SHORTCODE_RE.findall(cleaned)
+
+    # 過濾掉已知非格子的輔助 emoji（貨幣、特效等）
+    # 這些通常只出現 1-2 次；格子 9 格中同符號可能出現多次
+    from collections import Counter
+    freq = Counter(all_codes)
+    # 策略：若總數 > 9，優先取出現頻率較高的符號（格子 > 輔助 emoji）
+    # 簡單做法：若總數 >= 9 則取前 9；Discord 格子是固定的前 9 個 shortcode
+    if len(all_codes) >= 9:
+        grid = all_codes[:9]
+        log.debug("Grid parsed: %s", grid)
+        return grid
+
+    log.debug("Grid parse insufficient: found %d codes (%s)", len(all_codes), all_codes[:15])
     return None
 
 
