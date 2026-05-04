@@ -1121,35 +1121,48 @@ SLOT_WIN_PATTERN  = re.compile(r'總計贏得[\s:：]*([0-9,，]+)')
 SLOT_LOSS_PATTERN = re.compile(r'損失\s*([0-9,，]+)')
 
 # ── Slot 結果詳細解析 ──────────────────────────────────────────────────────────
-# 中獎線路: "中排水平: 🍒×3 = 864 (7.0x × 0.5x)"
-# Discord textContent 裡 emoji 以 :shortcode: 格式出現（非 Unicode codepoint）
-# 例：:cherry:×3 = 742 :oi: (7.0x × 0.5x)
-#       ^symbol    ^count ^payout ^currency_emoji ^mults
+# 中獎線路範例：「中排水平: :cherry:×3 = 864 :oi: (7.0x × 0.5x)」
+#
+# 重要：Discord textContent **不會** 包含 <img> 元素的 alt 屬性，但 emoji 都是
+# <img> 元素（自訂 emoji alt 是 :shortcode:；標準 emoji alt 通常是 unicode 字元）。
+# 解法：在 JS 端手動 walk DOM，把 img.alt 也納入 → 見 _get_page_text()。
+# 因此 symbol 在解析後可能是 ":cherry:" 也可能是 "🍒"，regex 兩種都要支援。
 
-# 中獎線路格式：線路名稱: :symbol:×N = amount [:oi:] (mult1x × mult2x)
+# 一個 emoji symbol：自訂 shortcode 或 Unicode 圖形字元（含可選 VS-16 / keycap）
+_SYMBOL_RE_SRC = (
+    r'(?:'
+    r':[a-z0-9_]+:'                                      # 自訂 shortcode
+    r'|[0-9#*]️⃣'                              # 鍵帽 7️⃣
+    r'|[\U0001F000-\U0001FAFF⌀-➿⬀-⯿]'
+    r'️?(?:‍[\U0001F000-\U0001FAFF⌀-➿])*'
+    r')'
+)
+_SYMBOL_RE = re.compile(_SYMBOL_RE_SRC)
+
+# 視為「非格子」的輔助 emoji（貨幣、特效…）— 解析格子時要過濾掉
+_AUX_EMOJIS = {':oi:', ':coin:', ':moneybag:', ':tada:', '🎉', '💰', '💵', '🪙'}
+
 SLOT_LINE_PATTERN = re.compile(
     r'(上排水平|中排水平|下排水平|左列垂直|中列垂直|右列垂直|對角線|反對角線)'
-    r'\s*:\s*'                     # 分隔符 ": "
-    r'(:[a-z0-9_]+:)'             # 符號 :cherry:
-    r'[×xX](\d+)'                 # 次數 ×3
+    r'\s*:\s*'                                # 分隔符 ": "
+    rf'({_SYMBOL_RE_SRC})'                    # 符號（shortcode 或 Unicode）
+    r'\s*[×xX]\s*(\d+)'                       # 次數 ×3
     r'\s*=\s*'
-    r'([0-9,，]+)'                 # 金額 742
-    r'(?:\s*:[a-z0-9_]+:)*'       # 可選 :oi: 等貨幣 emoji
+    r'([0-9,，]+)'                             # 金額 742
+    rf'(?:\s*{_SYMBOL_RE_SRC})*'              # 可選 :oi: 等貨幣 emoji
     r'\s*\('
-    r'([0-9.]+)[xX]'              # 符號倍率 7.0x
+    r'([0-9.]+)\s*[xX]'                       # 符號倍率 7.0x
     r'\s*[×xX]\s*'
-    r'([0-9.]+)[xX]'              # 線路倍率 0.5x
+    r'([0-9.]+)\s*[xX]'                       # 線路倍率 0.5x
     r'\s*\)'
 )
 
-# 涵蓋線路描述區塊（到 總計贏得/損失）
+# 涵蓋線路描述區塊（到 總計贏得/什麼都沒中 為止）
 SLOT_RESULT_BLOCK = re.compile(r'拉霸機結果([\s\S]*?)(?:總計贏得|什麼都沒中)')
 
-# 較大的區塊：到 下注: 為止，同時涵蓋格子 emoji（格子在總計贏得之後）
-SLOT_FULL_BLOCK = re.compile(r'拉霸機結果([\s\S]{0,600}?)下注\s*[:：]')
-
-# :shortcode: emoji 匹配（用於九宮格解析）
-_SHORTCODE_RE = re.compile(r':[a-z0-9_]+:')
+# 涵蓋整個 slot 訊息（含結果文字之後的 9 格符號）
+# 不再依賴「下注:」結尾，loss 場合該 footer 可能不在；改用固定長度視窗
+SLOT_FULL_BLOCK = re.compile(r'拉霸機結果([\s\S]{0,500})')
 
 
 def _parse_slot_lines(text: str) -> list[dict]:
@@ -1162,7 +1175,7 @@ def _parse_slot_lines(text: str) -> list[dict]:
     for m in SLOT_LINE_PATTERN.finditer(block_text):
         lines.append({
             "line_name":   m.group(1),
-            "symbol":      m.group(2),           # :cherry: 格式
+            "symbol":      m.group(2),           # :cherry: 或 🍒
             "count":       int(m.group(3)),
             "payout":      int(m.group(4).replace(',', '').replace('，', '')),
             "symbol_mult": float(m.group(5)),
@@ -1173,41 +1186,84 @@ def _parse_slot_lines(text: str) -> list[dict]:
 
 def _parse_slot_grid(text: str) -> list[str] | None:
     """
-    從 slot embed 的 textContent 擷取 3×3 九宮格符號（:shortcode: 格式）。
-    格子顯示在「總計贏得」之後、「下注:」之前，需用 SLOT_FULL_BLOCK 搜尋。
+    從 slot embed 的 textContent 擷取 3×3 九宮格符號。
+    9 格固定出現在最尾端（總計贏得 / 損失 文字之後），策略：
+      1. 取 拉霸機結果 之後最多 500 字元的視窗
+      2. 把線路描述移除（避免中獎符號被誤計）
+      3. 找所有 emoji symbol，過濾貨幣等輔助 emoji
+      4. 取「最後 9 個」（grid 必定在尾端）
     回傳長度 9 的 list 或 None。
     """
     log = logging.getLogger(__name__)
 
-    # 優先用涵蓋格子的較大 block
     full_blocks = list(SLOT_FULL_BLOCK.finditer(text))
-    if full_blocks:
-        block_text = full_blocks[-1].group(1)
-    else:
-        simple_blocks = list(SLOT_RESULT_BLOCK.finditer(text))
-        if not simple_blocks:
-            return None
-        block_text = simple_blocks[-1].group(1)
+    if not full_blocks:
+        return None
+    block_text = full_blocks[-1].group(1)
 
-    # 移除線路描述，避免把「中獎符號」計入格子
+    # 移除線路描述，避免把「中獎符號」也計入格子
     cleaned = SLOT_LINE_PATTERN.sub(' ', block_text)
 
-    # 找剩餘的 :shortcode:（應只剩九宮格的 9 個 + 極少非格子 emoji 如 :oi:）
-    all_codes = _SHORTCODE_RE.findall(cleaned)
+    # 找所有 emoji symbol
+    all_syms = _SYMBOL_RE.findall(cleaned)
 
-    # 過濾掉已知非格子的輔助 emoji（貨幣、特效等）
-    # 這些通常只出現 1-2 次；格子 9 格中同符號可能出現多次
-    from collections import Counter
-    freq = Counter(all_codes)
-    # 策略：若總數 > 9，優先取出現頻率較高的符號（格子 > 輔助 emoji）
-    # 簡單做法：若總數 >= 9 則取前 9；Discord 格子是固定的前 9 個 shortcode
-    if len(all_codes) >= 9:
-        grid = all_codes[:9]
+    # 過濾貨幣／特效等輔助 emoji
+    grid_candidates = [s for s in all_syms if s not in _AUX_EMOJIS]
+
+    if len(grid_candidates) >= 9:
+        # 取最後 9 個 — grid 永遠在尾端（總計贏得 / 損失 文字之後）
+        grid = grid_candidates[-9:]
         log.debug("Grid parsed: %s", grid)
         return grid
 
-    log.debug("Grid parse insufficient: found %d codes (%s)", len(all_codes), all_codes[:15])
+    log.debug("Grid parse insufficient: found %d (filtered=%s, all=%s)",
+              len(grid_candidates), grid_candidates[:15], all_syms[:15])
     return None
+
+
+# ── 頁面文字擷取（含 <img> alt）─────────────────────────────────────────────
+# Discord 用 <img> 渲染 emoji（自訂 emoji alt = :shortcode:；標準 emoji alt =
+# unicode 字元），純 textContent **不會** 取到 alt。
+# 在 JS 端 walk DOM 自己處理 img.alt → 取代既有的 textContent 讀法。
+_PAGE_TEXT_JS = """
+() => {
+    function walk(node) {
+        if (node.nodeType === 3) return node.nodeValue || '';
+        if (node.nodeType !== 1) return '';
+        const tag = node.tagName;
+        if (tag === 'IMG') {
+            return node.getAttribute('alt')
+                || node.getAttribute('aria-label')
+                || node.getAttribute('data-name')
+                || '';
+        }
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return '';
+        let text = '';
+        for (const child of node.childNodes) text += walk(child);
+        return text;
+    }
+    return walk(document.body);
+}
+"""
+
+
+async def _get_page_text(page: Page) -> str:
+    """讀整頁文字，含 <img> 的 alt（emoji 用）。"""
+    return await page.evaluate(_PAGE_TEXT_JS)
+
+
+def _debug_dump_slot_text(text: str, reason: str):
+    """解析失敗時把 拉霸機結果 區塊文字寫到 slot_debug.log 方便排查。"""
+    try:
+        block = ""
+        m = SLOT_FULL_BLOCK.search(text)
+        if m:
+            block = m.group(0)
+        with open("slot_debug.log", "a", encoding="utf-8") as f:
+            f.write(f"=== {datetime.now():%Y-%m-%d %H:%M:%S}  {reason} ===\n")
+            f.write(repr(block) + "\n\n")
+    except OSError:
+        pass
 
 
 # ── Slot 分析累加器 ────────────────────────────────────────────────────────────
@@ -1556,7 +1612,8 @@ async def play_slot(page: Page, bet: int) -> dict | None:
     stability_sec = 5.0
 
     async with command_lock:
-        before_text = await page.evaluate("() => document.body.textContent")
+        # 用 alt-aware 取文字（含 <img> alt），確保 emoji 也能讀到
+        before_text = await _get_page_text(page)
 
         await _send_slash_command(page, "/slot", param=str(bet))
 
@@ -1566,7 +1623,7 @@ async def play_slot(page: Page, bet: int) -> dict | None:
         last_text = before_text
         while time.time() < deadline:
             await asyncio.sleep(0.5)
-            current_text = await page.evaluate("() => document.body.textContent")
+            current_text = await _get_page_text(page)
             last_text = current_text
             if not _new_reply_detected(before_text, current_text):
                 continue
@@ -1581,6 +1638,11 @@ async def play_slot(page: Page, bet: int) -> dict | None:
                 change = _parse_slot_change(current_text, bet)
                 lines = _parse_slot_lines(current_text)
                 grid = _parse_slot_grid(current_text)
+                # 這把 bet > 0 但 lines 或 grid 解析不到 → 寫 debug log 方便排查
+                if change is not None and change > 0 and not lines:
+                    _debug_dump_slot_text(current_text, "win but no lines parsed")
+                if grid is None:
+                    _debug_dump_slot_text(current_text, "grid not parsed")
                 return {"balance": val, "change": change,
                         "lines": lines, "grid": grid}
 
@@ -1588,6 +1650,10 @@ async def play_slot(page: Page, bet: int) -> dict | None:
             change = _parse_slot_change(last_text, bet)
             lines = _parse_slot_lines(last_text)
             grid = _parse_slot_grid(last_text)
+            if change is not None and change > 0 and not lines:
+                _debug_dump_slot_text(last_text, "win but no lines parsed (timeout path)")
+            if grid is None:
+                _debug_dump_slot_text(last_text, "grid not parsed (timeout path)")
             log.info("/slot %d timeout 但已抓到值 %d (change=%s)", bet, last_val, change)
             return {"balance": last_val, "change": change,
                     "lines": lines, "grid": grid}
