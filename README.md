@@ -59,11 +59,10 @@ UI 上的快速鍵：
 | 鍵 | 功能 |
 |----|------|
 | `Q` | 退出 |
-| `C` | 修改設定（互動式選單）|
-| `R` | 從檔案重載設定 |
+| `C` | 修改設定（互動式選單；存檔後即時套用，不需手動重載）|
 | `P` | 暫停 / 恢復所有功能（會即時打斷 hourly/daily 等待）|
 | `E` | 匯出賭博紀錄為 CSV + PNG 圖表 + Slot 分析報告（存到 `exports/`）|
-| `S` | 查看 Slot 分析報告（EV、符號統計、線路統計、Kelly 建議）|
+| `S` | 查看 Slot 分析報告（EV、符號統計、線路統計、Kelly 建議、ASCII 賭博紀錄圖）|
 | `L` | 重新載入 Discord 頻道頁面（page state 變糟時用）|
 | `F` | 整個程式重啟（透過 `run.bat` loop 達成；直接 `python main.py` 跑時會直接退出）|
 
@@ -140,6 +139,23 @@ UI 上的快速鍵：
 
 分析資料持久化在 `slot_analysis.json`，重啟後會自動載入繼續累計。可在設定選單 `[I]` 重置。
 
+下注歷史紀錄持久化在 `gambling_history.json`（最近 5000 筆），重啟後仍可從 `S` 鍵看到 ASCII 賭博紀錄圖、按 `E` 鍵匯出 CSV / PNG 折線圖。
+
+### 自動轉帳
+
+`config.json` → `transfer`：
+
+| 欄位 | 預設 | 說明 |
+|------|------|------|
+| `enabled` | `false` | 是否啟用 |
+| `target` | `""` | 對象 — 用於觸發 Discord user picker 的搜尋字串。可填顯示名稱片段或 user ID（純數字）。送指令時會打字到 `user:` 參數，再按 Enter 選最上面那位 |
+| `amount` | `100` | 每次轉帳金額 |
+| `interval_min` | `60` | 多久轉一次（分鐘）|
+
+啟用後，bot 每隔 N 分鐘自動送 `/transfer`，並按下「確認轉錢」按鈕完成轉帳。設定可在 UI 按 `C` → `[J/K/L/M]` 修改。
+
+> ⚠ **注意**：對象的搜尋字串請填夠精準的關鍵字，否則 user picker 可能選到不是你預期的人。
+
 ## 檔案說明
 
 ```
@@ -154,6 +170,7 @@ UI 上的快速鍵：
 ├── config.json              你的實際設定（已被 .gitignore，不會上傳）
 ├── storage_state.json       Discord session（已被 .gitignore，不會上傳）
 ├── slot_analysis.json       Slot 分析累計資料（已被 .gitignore，runtime 產生）
+├── gambling_history.json    下注歷史紀錄（已被 .gitignore，runtime 產生）
 └── exports/                 匯出的賭博紀錄與分析報告（已被 .gitignore）
 ```
 

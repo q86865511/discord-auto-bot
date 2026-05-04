@@ -8,6 +8,9 @@ exports/
 # Slot 分析資料（runtime 產生）
 slot_analysis.json
 
+# 下注歷史紀錄（runtime 產生）
+gambling_history.json
+
 # Python
 __pycache__/
 *.py[cod]

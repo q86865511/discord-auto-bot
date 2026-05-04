@@ -32,5 +32,11 @@
   "nekomusume": {
     "enabled": true,
     "check_interval_min": 30
+  },
+  "transfer": {
+    "enabled": false,
+    "target": "",
+    "amount": 100,
+    "interval_min": 60
   }
 }

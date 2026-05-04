@@ -47,7 +47,12 @@ DEFAULT_BIGWIN_MULTIPLIER = 5.0  # 中大獎賠率門檻（總計贏得 / 下注
 DEFAULT_DEAD_THRESHOLD    = 2    # 連續讀取餘額失敗幾次算「bot 停擺」
 REBOOT_EXIT_CODE = 42     # main 退出時用這個碼通知 run.bat 重新啟動
 ANALYSIS_PATH     = "slot_analysis.json"
+HISTORY_PATH      = "gambling_history.json"
 MIN_KELLY_SAMPLES = 50    # Kelly 策略需要的最少轉數才生效
+HISTORY_MAX_LEN   = 5000  # 最近 N 筆紀錄（避免檔案無限長大）
+
+# 自動轉帳預設值
+DEFAULT_TRANSFER_INTERVAL_MIN = 60   # 預設每 60 分鐘轉一次
 
 command_lock = asyncio.Lock()
 console = Console()
@@ -267,17 +272,87 @@ def export_slot_analysis(state: dict) -> str | None:
     return path
 
 
+def _ascii_sparkline(values: list[float], width: int = 50, height: int = 8) -> list[str]:
+    """生成簡單 ASCII 折線圖；回傳每行字串列表。"""
+    if not values:
+        return []
+    if len(values) > width:
+        # 等距取樣
+        step = len(values) / width
+        sampled = [values[int(i * step)] for i in range(width)]
+    else:
+        sampled = values[:]
+        # 補 width
+        if len(sampled) < width:
+            last = sampled[-1]
+            sampled.extend([last] * (width - len(sampled)))
+
+    vmin, vmax = min(sampled), max(sampled)
+    if vmax == vmin:
+        vmax = vmin + 1  # 避免 div/0
+
+    # 每個 column 對應一個 row 位置
+    rows = [[" "] * width for _ in range(height)]
+    for x, v in enumerate(sampled):
+        # 0 = 最高 row；height-1 = 最低 row
+        norm = (v - vmin) / (vmax - vmin)
+        y = int(round((1 - norm) * (height - 1)))
+        y = max(0, min(height - 1, y))
+        rows[y][x] = "●"
+
+    # 讓零基準線顯示為 "─"（如果範圍跨 0）
+    if vmin < 0 < vmax:
+        zero_y = int(round((1 - (0 - vmin) / (vmax - vmin)) * (height - 1)))
+        zero_y = max(0, min(height - 1, zero_y))
+        for x in range(width):
+            if rows[zero_y][x] == " ":
+                rows[zero_y][x] = "─"
+
+    return ["".join(r) for r in rows]
+
+
+def _show_history_chart(state: dict):
+    """印出累計淨收 / 餘額的 ASCII 折線圖。"""
+    history = state.get("history") or []
+    if not history:
+        print("\n  📉 賭博紀錄圖：尚無下注紀錄")
+        return
+
+    nets = []
+    cum = 0
+    for r in history:
+        cum += r.get("change", 0)
+        nets.append(cum)
+    balances = [r.get("after", 0) for r in history]
+
+    n = len(history)
+    print(f"\n  {'─' * 56}")
+    print(f"  📉 賭博紀錄圖  ({n} 筆下注)")
+    print(f"     累計淨收: {nets[-1]:+,}    餘額: {balances[-1]:,}")
+
+    # 累計淨收圖
+    print(f"\n  累計淨收（高: {max(nets):+,}  低: {min(nets):+,}）:")
+    for line in _ascii_sparkline(nets, width=56, height=6):
+        print(f"    {line}")
+
+    # 餘額圖
+    print(f"\n  餘額變化（高: {max(balances):,}  低: {min(balances):,}）:")
+    for line in _ascii_sparkline(balances, width=56, height=6):
+        print(f"    {line}")
+
+
 def _show_slot_analysis(state: dict):
     os.system("cls")
     sa = state.get("slot_analysis", {})
     stats = compute_slot_stats(sa)
 
-    print(f"\n{'═' * 56}")
+    print(f"\n{'═' * 60}")
     print("  🎰  Slot Machine Analysis")
-    print(f"{'═' * 56}")
+    print(f"{'═' * 60}")
 
     if stats.get("total_spins", 0) == 0:
         print("\n  尚無分析資料。開始賭博後會自動累積。")
+        _show_history_chart(state)
         input("\n  按 Enter 返回...")
         return
 
@@ -296,7 +371,7 @@ def _show_slot_analysis(state: dict):
 
     dist = stats.get("payout_distribution", {})
     if dist:
-        print(f"\n  {'─' * 40}")
+        print(f"\n  {'─' * 56}")
         print("  📊 賠率分布")
         for bucket, count in dist.items():
             pct = count / n * 100
@@ -305,33 +380,56 @@ def _show_slot_analysis(state: dict):
 
     si = stats.get("symbol_info", {})
     gp = stats.get("grid_symbol_prob", {})
-    if si:
-        print(f"\n  {'─' * 40}")
-        print("  🎯 符號統計")
-        header = f"    {'符號':<6s} {'中獎次數':>8s} {'平均倍率':>8s} {'總賠付':>10s}"
+    total_wagered = sa.get("total_wagered", 0) or 1   # 防 div/0
+    if si or gp:
+        print(f"\n  {'─' * 56}")
+        print("  🎯 符號統計  (賠率 = 累計賠付 / 累計下注)")
+        header = (f"    {'符號':<14s} {'中獎次數':>8s} {'平均倍率':>8s} "
+                  f"{'累計賠付':>10s} {'回收率':>8s}")
         if gp:
-            header += f" {'九宮格機率':>10s}"
+            header += f" {'格子機率':>8s}"
         print(header)
-        for sym, info in sorted(si.items(), key=lambda x: -x[1]["total_payout"]):
-            line = (f"    {sym:<6s} {info['win_appearances']:>8d} "
-                    f"{info['avg_mult']:>8.2f}x {info['total_payout']:>10,}")
-            if gp and sym in gp:
-                line += f" {gp[sym]:>10.1%}"
+
+        # 把所有符號合併（symbol_info 有的優先；只在格子裡的補在後面）
+        all_symbols = set(si.keys()) | set(gp.keys())
+        # 排序：先按 total_payout（中獎金額）降冪；沒中獎的放最後
+        def _sort_key(sym):
+            return -(si.get(sym, {}).get("total_payout", 0))
+
+        for sym in sorted(all_symbols, key=_sort_key):
+            info = si.get(sym, {})
+            wins = info.get("win_appearances", 0)
+            avg_mult = info.get("avg_mult", 0.0)
+            total_pay = info.get("total_payout", 0)
+            # 回收率 = 該符號累計賠付 / 全部下注
+            recover_rate = total_pay / total_wagered
+
+            wins_str  = f"{wins:>8d}" if wins > 0 else f"{'─':>8s}"
+            mult_str  = f"{avg_mult:>7.2f}x" if wins > 0 else f"{'─':>8s}"
+            pay_str   = f"{total_pay:>10,}" if wins > 0 else f"{'─':>10s}"
+            rec_str   = f"{recover_rate:>7.1%}" if wins > 0 else f"{'─':>8s}"
+
+            line = f"    {sym:<14s} {wins_str} {mult_str} {pay_str} {rec_str}"
+            if gp:
+                line += (f" {gp[sym]:>7.1%}" if sym in gp else f" {'─':>8s}")
             print(line)
-        # 只在九宮格有資料但不在 si 的符號
-        if gp:
-            for sym in sorted(gp.keys()):
-                if sym not in si:
-                    print(f"    {sym:<6s} {'─':>8s} {'─':>8s} {'─':>10s} {gp[sym]:>10.1%}")
+    else:
+        print(f"\n  {'─' * 56}")
+        print("  ⚠ 符號統計資料為空")
+        print("    1. 中獎次數可能還不夠，再多跑幾把就會累積；或")
+        print("    2. 早期版本的解析 bug — 請按 C → I 重置分析後重新累積。")
 
     li = stats.get("line_info", {})
     if li:
-        print(f"\n  {'─' * 40}")
+        print(f"\n  {'─' * 56}")
         print("  📐 線路統計")
         print(f"    {'線路':<10s} {'命中次數':>8s} {'命中率':>8s} {'總賠付':>10s}")
         for ln, info in sorted(li.items(), key=lambda x: -x[1]["hits"]):
             print(f"    {ln:<10s} {info['hits']:>8d} "
                   f"{info['hit_rate']:>7.1%} {info['total_payout']:>10,}")
+
+    # 賭博紀錄圖（ASCII）
+    _show_history_chart(state)
 
     input("\n  按 Enter 返回...")
 
@@ -413,6 +511,33 @@ def save_slot_analysis(state: dict):
         json.dump(state["slot_analysis"], f, ensure_ascii=False, indent=2)
 
 
+def load_history() -> list | None:
+    """從 gambling_history.json 載入歷史下注紀錄。"""
+    if not os.path.exists(HISTORY_PATH):
+        return None
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            return None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def save_history(state: dict):
+    """寫入歷史下注紀錄；只保留最近 HISTORY_MAX_LEN 筆。"""
+    history = state.get("history") or []
+    if len(history) > HISTORY_MAX_LEN:
+        history = history[-HISTORY_MAX_LEN:]
+        state["history"] = history
+    try:
+        with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
 def save_config(config: dict):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
@@ -453,6 +578,12 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     ncfg = config.setdefault("nekomusume", {})
     ncfg.setdefault("enabled",          True)
     ncfg.setdefault("check_interval_min", DEFAULT_NEKOMUSUME_INTERVAL_MIN)
+
+    tcfg = config.setdefault("transfer", {})
+    tcfg.setdefault("enabled",      False)
+    tcfg.setdefault("target",       "")        # 對象 — 用於 user picker 搜尋（顯示名稱或 user ID）
+    tcfg.setdefault("amount",       100)       # 每次轉帳金額
+    tcfg.setdefault("interval_min", DEFAULT_TRANSFER_INTERVAL_MIN)  # 多久一次（分鐘）
 
     save_config(config)
 
@@ -628,7 +759,20 @@ def build_layout(state: dict, config: dict) -> Layout:
         neko_str = "[dim]─[/dim]"
     t2.add_row("🐱 貓娘",     neko_str)
 
-    cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改 R:重載[/dim]",
+    tcfg = config.get("transfer", {})
+    if tcfg.get("enabled"):
+        try:
+            tr_amt = int(tcfg.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            tr_amt = 0
+        tr_target = tcfg.get("target") or "—"
+        tr_int = tcfg.get("interval_min", DEFAULT_TRANSFER_INTERVAL_MIN)
+        transfer_str = f"[green]{tr_target} {tr_amt:,}/次 ({tr_int}m)[/green]"
+    else:
+        transfer_str = "[dim]停用[/dim]"
+    t2.add_row("💸 自動轉帳",  transfer_str)
+
+    cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改[/dim]",
                       border_style="green")
 
     # 日誌
@@ -639,7 +783,7 @@ def build_layout(state: dict, config: dict) -> Layout:
     # Footer
     pause_label = "[yellow]P 恢復[/yellow]" if state.get("paused") else "[bold]P[/bold] 暫停"
     footer = Panel(
-        f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改設定  [bold]R[/bold] 重載  "
+        f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改設定  "
         f"{pause_label}  [bold]E[/bold] 匯出  [bold]S[/bold] 分析  [bold]L[/bold] 重載頻道  [bold]F[/bold] 重啟程式[/dim]",
         style="dim", height=3,
     )
@@ -687,6 +831,7 @@ async def run_config_menu(state: dict, config_holder: list):
 
     ecfg = config.setdefault("email",       {})
     ncfg = config.setdefault("nekomusume",  {})
+    tcfg = config.setdefault("transfer",    {})
 
     while True:
         i_min  = gcfg.get('interval_min', DEFAULT_INTERVAL_MIN)
@@ -730,6 +875,15 @@ async def run_config_menu(state: dict, config_holder: list):
         sa_spins = state.get("slot_analysis", {}).get("total_spins", 0)
         print("  [Slot 分析]")
         print(f"   [I] 重置分析:    {sa_spins} 筆紀錄")
+        tr_on  = tcfg.get('enabled', False)
+        tr_tg  = tcfg.get('target', '')
+        tr_amt = tcfg.get('amount', 0)
+        tr_int = tcfg.get('interval_min', DEFAULT_TRANSFER_INTERVAL_MIN)
+        print("  [自動轉帳]")
+        print(f"   [J] 自動轉帳:    {'啟用' if tr_on else '停用'}")
+        print(f"   [K] 對象 (名稱/UID): {tr_tg or '(未設定)'}")
+        print(f"   [L] 金額:        {tr_amt:,}")
+        print(f"   [M] 間距:        {tr_int} 分鐘")
         print()
         print("  [0] 儲存並返回")
         print()
@@ -857,10 +1011,39 @@ async def run_config_menu(state: dict, config_holder: list):
                 if os.path.exists(ANALYSIS_PATH):
                     os.remove(ANALYSIS_PATH)
                 print(f"  ✓ 分析資料已重置（{sa_spins} 筆清除）")
+        elif choice == "J":
+            tcfg["enabled"] = not tcfg.get("enabled", False)
+            print(f"  ✓ 自動轉帳 → {'啟用' if tcfg['enabled'] else '停用'}")
+        elif choice == "K":
+            print("  注意：對象用於觸發 Discord user picker 的搜尋字串。")
+            print("        可填顯示名稱片段或 user ID（純數字）。")
+            raw = (await ainput(f"  對象 (目前 {tr_tg or '(未設定)'}): ")).strip()
+            if raw:
+                tcfg["target"] = raw
+                print(f"  ✓ 對象 → {raw}")
+        elif choice == "L":
+            raw = (await ainput(f"  金額 (目前 {tr_amt:,}): ")).strip()
+            if raw.isdigit() and int(raw) > 0:
+                tcfg["amount"] = int(raw)
+                print(f"  ✓ 金額 → {int(raw):,}")
+            else:
+                print("  無效輸入（需要正整數）")
+        elif choice == "M":
+            raw = (await ainput(f"  間距分鐘數 (目前 {tr_int}): ")).strip()
+            try:
+                v = float(raw)
+                if v >= 1:
+                    tcfg["interval_min"] = v
+                    print(f"  ✓ 間距 → {v} 分鐘")
+                else:
+                    print("  無效輸入（最少 1 分鐘）")
+            except ValueError:
+                print("  無效輸入")
 
     config["gambling"]   = gcfg
     config["email"]      = ecfg
     config["nekomusume"] = ncfg
+    config["transfer"]   = tcfg
     save_config(config)
     config_holder[0] = config
     _log(state, "設定已更新並儲存")
@@ -1231,6 +1414,73 @@ async def notify_goal_reached(page: Page, balance: int, goal: int, user_id: str)
     await send_message(page, text)
 
 
+async def _send_transfer_command(page: Page, target: str, amount: int):
+    """
+    送 /transfer user:<target> amount:<amount>。
+
+    target 用於觸發 user picker 的搜尋字串（顯示名稱片段或 user ID）。
+    送出順序：/transfer → Tab（選 command 焦點到 user 參數）→ 輸入 target →
+    Enter（從 autocomplete 選最上面那位）→ 輸入 amount → Enter。
+
+    呼叫端必須已持有 command_lock。
+    """
+    log = logging.getLogger(__name__)
+    input_box = page.locator('[data-slate-editor="true"]')
+    await input_box.click()
+    await asyncio.sleep(random.uniform(0.3, 0.8))
+    await page.keyboard.press("Control+a")
+    await page.keyboard.press("Backspace")
+    await asyncio.sleep(0.2)
+
+    await human_type(page, "/transfer")
+    await asyncio.sleep(1.5)
+    await page.keyboard.press("Tab")          # 選 /transfer，焦點落在 user 參數
+    await asyncio.sleep(random.uniform(0.5, 0.9))
+
+    # 輸入 target；觸發 user picker
+    await human_type(page, target)
+    await asyncio.sleep(1.2)
+    # 用 Enter 選擇 picker 最上面那位（Discord 預設高亮第一筆）
+    await page.keyboard.press("Enter")
+    await asyncio.sleep(random.uniform(0.4, 0.8))
+
+    # 輸入金額（自動進入下一個必填參數）
+    await human_type(page, str(amount))
+    await asyncio.sleep(random.uniform(0.3, 0.6))
+    await page.keyboard.press("Enter")        # 送出指令
+    await asyncio.sleep(1.0)
+    log.info("/transfer target=%s amount=%d 已送出", target, amount)
+
+
+async def _click_confirm_transfer(page: Page, timeout: float = 15.0) -> bool:
+    """
+    等待並點擊「確認轉錢」按鈕。Discord button 是 <button> 元素帶文字。
+    成功點擊回傳 True；超時回傳 False。
+    """
+    log = logging.getLogger(__name__)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            btn = page.locator('button:has-text("確認轉錢")').last
+            if await btn.count() > 0 and await btn.is_visible():
+                await btn.click(timeout=3000)
+                log.info("已點擊「確認轉錢」按鈕")
+                return True
+        except Exception as e:
+            log.debug("等待確認按鈕中: %s", e)
+        await asyncio.sleep(0.5)
+    log.warning("等待「確認轉錢」按鈕超時 (%.0fs)", timeout)
+    return False
+
+
+async def do_transfer(page: Page, target: str, amount: int) -> bool:
+    """完整轉帳流程：送指令 + 點確認按鈕。回傳是否成功點擊。"""
+    async with command_lock:
+        await _send_transfer_command(page, target, amount)
+        # 等待確認嵌入訊息出現再點按鈕（按鈕在 confirm embed 上）
+        return await _click_confirm_transfer(page, timeout=15.0)
+
+
 async def send_and_capture_balance(
     page: Page, command: str, param: str = "", timeout: float = 30.0,
     stability_sec: float = 2.0,
@@ -1405,6 +1655,52 @@ async def hourly_loop(page: Page, state: dict, config_holder: list):
         delay = HOURLY_BASE_SEC + random.uniform(-HOURLY_JITTER_SEC, HOURLY_JITTER_SEC)
         state["hourly_next"] = time.time() + delay
         await interruptible_sleep(state, delay)
+
+
+async def transfer_loop(page: Page, state: dict, config_holder: list):
+    """
+    自動轉帳迴圈：每 N 分鐘對指定對象 /transfer，並按下「確認轉錢」按鈕。
+    config["transfer"] = {enabled, target, amount, interval_min}
+    """
+    log = logging.getLogger(__name__)
+    while not state["quit"]:
+        await _wait_while_paused(state)
+        if state["quit"]:
+            break
+
+        tcfg = config_holder[0].get("transfer", {})
+        if not tcfg.get("enabled", False):
+            await interruptible_sleep(state, 30)
+            continue
+
+        target = (tcfg.get("target") or "").strip()
+        try:
+            amount = int(tcfg.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            amount = 0
+
+        if not target or amount <= 0:
+            log.warning("自動轉帳設定不完整 (target=%r, amount=%d)，30 秒後重試",
+                        target, amount)
+            await interruptible_sleep(state, 30)
+            continue
+
+        try:
+            ok = await do_transfer(page, target, amount)
+            if ok:
+                _log(state, f"💸 已轉帳 {amount:,} → {target}")
+            else:
+                _log(state, f"⚠ 轉帳指令送出但找不到確認按鈕 ({target} {amount:,})")
+        except Exception as e:
+            log.error("自動轉帳失敗: %s", e)
+            _log(state, f"⚠ 自動轉帳發生錯誤: {e}")
+
+        try:
+            interval = float(tcfg.get("interval_min", DEFAULT_TRANSFER_INTERVAL_MIN))
+        except (TypeError, ValueError):
+            interval = DEFAULT_TRANSFER_INTERVAL_MIN
+        interval = max(1.0, interval)
+        await interruptible_sleep(state, interval * 60)
 
 
 async def daily_loop(page: Page, state: dict, config_holder: list):
@@ -1808,6 +2104,7 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
             )
             if state["slot_analysis"]["total_spins"] % 20 == 0:
                 save_slot_analysis(state)
+                save_history(state)
 
             # 中大獎通知（改變餘額成功 + 真的解析到 win 才檢查）
             if parsed_change is not None and change > 0 and bet > 0:
@@ -1883,9 +2180,6 @@ async def ui_loop(state: dict, config_holder: list, page: Page | None = None):
                         await run_config_menu(state, config_holder)
                     finally:
                         live.start()
-                elif key == "r":
-                    config_holder[0] = load_config()
-                    _log(state, "設定已從檔案重載")
                 elif key == "p":
                     state["paused"] = not state.get("paused", False)
                     _log(state, "已暫停所有功能（再按 P 恢復）"
@@ -1986,6 +2280,12 @@ async def main():
             log.info("已載入 slot 分析資料（%d 筆紀錄）",
                      persisted_sa.get("total_spins", 0))
 
+        # 載入持久化的下注歷史紀錄（讓 E 鍵的圖表匯出可跨 session 使用）
+        persisted_history = load_history()
+        if persisted_history:
+            state["history"] = persisted_history
+            log.info("已載入下注歷史紀錄（%d 筆）", len(persisted_history))
+
         state["status"] = "運行中"
 
         ui_task = asyncio.create_task(ui_loop(state, config_holder, page))
@@ -1994,6 +2294,7 @@ async def main():
             asyncio.create_task(daily_loop(page, state, config_holder)),
             asyncio.create_task(gambling_loop(page, state, config_holder)),
             asyncio.create_task(nekomusume_loop(page, state, config_holder)),
+            asyncio.create_task(transfer_loop(page, state, config_holder)),
         ]
 
         await ui_task   # 等待使用者按 Q 離開
@@ -2003,7 +2304,8 @@ async def main():
         await asyncio.gather(*worker_tasks, return_exceptions=True)
         await browser.close()
         save_slot_analysis(state)
-        log.info("程式已結束（slot 分析已儲存）")
+        save_history(state)
+        log.info("程式已結束（slot 分析 / 歷史紀錄已儲存）")
 
         if state.get("reboot"):
             log.info("Reboot 已請求，以 exit code %d 退出讓 run.bat 重啟", REBOOT_EXIT_CODE)
