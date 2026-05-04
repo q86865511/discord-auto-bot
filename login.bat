@@ -1,5 +1,5 @@
 @echo off
-REM ─ 啟動 login.py：開瀏覽器讓你手動登入 Discord 後存 storage_state.json ─
+REM Run login.py: opens a real browser; finish Discord login manually then it auto-closes.
 chcp 65001 >nul
 cd /d "%~dp0"
 

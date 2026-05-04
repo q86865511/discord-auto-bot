@@ -670,6 +670,29 @@ def _last_balance_value(text: str) -> int | None:
     return last_val
 
 
+# 追蹤「新回應出現」的尾端視窗大小。
+# 用整頁 count diff 在長時間運行後會失效——Discord 會把舊訊息從 DOM 最前端移除
+# (virtualization)，新訊息加在尾端，導致全頁 count 「進一個出一個」沒變。
+# 改成只比對最後 N 字元，舊訊息離開不影響、新訊息一定在這個視窗裡。
+_REPLY_WINDOW_CHARS = 10000
+
+
+def _new_reply_detected(before_text: str, current_text: str) -> bool:
+    """
+    判斷自 before_text 之後是否有新的「含餘額/油幣」回應出現。
+    任一訊號成立即算 True：
+      1. 整頁最後一個餘額數字變了（值不同 → 一定有新內容）
+      2. 在最後 _REPLY_WINDOW_CHARS 字元視窗裡，餘額/油幣出現次數增加
+    """
+    bv = _last_balance_value(before_text)
+    cv = _last_balance_value(current_text)
+    if cv is not None and cv != bv:
+        return True
+    bt = before_text[-_REPLY_WINDOW_CHARS:] if len(before_text) > _REPLY_WINDOW_CHARS else before_text
+    ct = current_text[-_REPLY_WINDOW_CHARS:] if len(current_text) > _REPLY_WINDOW_CHARS else current_text
+    return _count_balance_mentions(ct) > _count_balance_mentions(bt)
+
+
 # slot 勝/負 marker（從 embed 文字直接判定這局結果，避免和 hourly/daily 的餘額變動混淆）
 SLOT_WIN_PATTERN  = re.compile(r'總計贏得[\s:：]*([0-9,，]+)')
 SLOT_LOSS_PATTERN = re.compile(r'損失\s*([0-9,，]+)')
@@ -796,7 +819,6 @@ async def send_and_capture_balance(
     log = logging.getLogger(__name__)
     async with command_lock:
         before_text = await page.evaluate("() => document.body.textContent")
-        before_count = _count_balance_mentions(before_text)
 
         await _send_slash_command(page, command, param)
 
@@ -806,8 +828,7 @@ async def send_and_capture_balance(
         while time.time() < deadline:
             await asyncio.sleep(0.5)
             current_text = await page.evaluate("() => document.body.textContent")
-            current_count = _count_balance_mentions(current_text)
-            if current_count <= before_count:
+            if not _new_reply_detected(before_text, current_text):
                 continue
             val = _last_balance_value(current_text)
             if val is None:
@@ -849,7 +870,6 @@ async def play_slot(page: Page, bet: int) -> dict | None:
 
     async with command_lock:
         before_text = await page.evaluate("() => document.body.textContent")
-        before_count = _count_balance_mentions(before_text)
 
         await _send_slash_command(page, "/slot", param=str(bet))
 
@@ -861,8 +881,7 @@ async def play_slot(page: Page, bet: int) -> dict | None:
             await asyncio.sleep(0.5)
             current_text = await page.evaluate("() => document.body.textContent")
             last_text = current_text
-            current_count = _count_balance_mentions(current_text)
-            if current_count <= before_count:
+            if not _new_reply_detected(before_text, current_text):
                 continue
             val = _last_balance_value(current_text)
             if val is None:
@@ -921,7 +940,7 @@ async def _wait_while_paused(state: dict):
         await asyncio.sleep(0.5)
 
 
-async def hourly_loop(page: Page, state: dict):
+async def hourly_loop(page: Page, state: dict, config_holder: list):
     log = logging.getLogger(__name__)
     while not state["quit"]:
         await _wait_while_paused(state)
@@ -936,6 +955,8 @@ async def hourly_loop(page: Page, state: dict):
         if new_bal is not None:
             state["balance"] = new_bal
             log.info("/hourly 完成，餘額更新為 %d", new_bal)
+            # hourly 也可能讓餘額到達目標（例如使用者停用賭博、靠領取慢慢累積）
+            await _maybe_notify_goal(page, state, config_holder)
         else:
             log.info("/hourly 已送出（未取得新餘額，可能尚未到時間）")
         delay = HOURLY_BASE_SEC + random.uniform(-HOURLY_JITTER_SEC, HOURLY_JITTER_SEC)
@@ -943,7 +964,7 @@ async def hourly_loop(page: Page, state: dict):
         await interruptible_sleep(state, delay)
 
 
-async def daily_loop(page: Page, state: dict):
+async def daily_loop(page: Page, state: dict, config_holder: list):
     log = logging.getLogger(__name__)
     startup = random.uniform(0, DAILY_STARTUP_DELAY_SEC)
     state["daily_next"] = time.time() + startup
@@ -960,6 +981,7 @@ async def daily_loop(page: Page, state: dict):
         if new_bal is not None:
             state["balance"] = new_bal
             log.info("/daily 完成，餘額更新為 %d", new_bal)
+            await _maybe_notify_goal(page, state, config_holder)
         else:
             log.info("/daily 已送出（未取得新餘額，可能尚未到時間）")
         delay = DAILY_BASE_SEC + random.uniform(-DAILY_JITTER_SEC, DAILY_JITTER_SEC)
@@ -967,25 +989,41 @@ async def daily_loop(page: Page, state: dict):
         await interruptible_sleep(state, delay)
 
 
-async def _read_check_response(page: Page, timeout: float = 15.0) -> str | None:
-    """送 /check（ephemeral），等回應出現「貓娘派遣」字樣後回傳新增文字。"""
+async def _read_check_response(page: Page, timeout: float = 20.0) -> str | None:
+    """
+    送 /check（ephemeral）並等待新派遣資訊出現。回傳整頁文字（讓上層 parse）。
+
+    舊版用 body.textContent length diff 偵測，但 ephemeral 的位置／長度
+    在長時間運行後常常不可靠（Discord virtualization）；這版改成直接比對
+    「整頁解析出來的派遣狀態」前後是否變化，不依賴 DOM 位置與長度。
+    """
     log = logging.getLogger(__name__)
     async with command_lock:
-        before = await page.evaluate("() => document.body.textContent")
-        before_len = len(before)
+        before_text = await page.evaluate("() => document.body.textContent")
+        before_st, before_min = parse_dispatch_status(before_text)
         await _send_slash_command(page, "/check")
+        # 給 ephemeral popup 至少 2 秒時間出現再開始判斷
+        await asyncio.sleep(2.0)
+
         deadline = time.time() + timeout
+        last_st, last_min, last_change = None, None, time.time()
         while time.time() < deadline:
-            await asyncio.sleep(0.5)
             current = await page.evaluate("() => document.body.textContent")
-            new_part = current[before_len:] if len(current) >= before_len else current
-            if "貓娘派遣" in new_part:
-                await asyncio.sleep(0.5)
-                current = await page.evaluate("() => document.body.textContent")
-                new_part = current[before_len:] if len(current) >= before_len else current
-                return new_part
-    log.warning("/check 在 %.0fs 內未取得回應", timeout)
-    return None
+            cur_st, cur_min = parse_dispatch_status(current)
+            if (cur_st, cur_min) != (before_st, before_min):
+                # 偵測到變化；要求穩定 1 秒避免讀到還在渲染的中間值
+                if (cur_st, cur_min) == (last_st, last_min):
+                    if time.time() - last_change >= 1.0:
+                        return current
+                else:
+                    last_st, last_min = cur_st, cur_min
+                    last_change = time.time()
+            await asyncio.sleep(0.5)
+
+        # 沒偵測到變化（狀態與之前相同 = 可能就是同一個派遣還沒換）
+        # 回傳最新整頁讓上層 parse 一次，至少 UI 會看到目前狀態
+        log.info("/check 未偵測到狀態變化，回傳當前整頁文字讓上層解析")
+        return await page.evaluate("() => document.body.textContent")
 
 
 async def nekomusume_loop(page: Page, state: dict, config_holder: list):
@@ -1142,9 +1180,8 @@ async def _maybe_notify_goal(page: Page, state: dict, config_holder: list):
 
 async def gambling_loop(page: Page, state: dict, config_holder: list):
     log = logging.getLogger(__name__)
-    parse_fail = 0           # 連續無法讀餘額/結果
-    consecutive_fail = 0     # 連續整體失敗（用於觸發 page recovery）
-    RECOVER_THRESHOLD = 5
+    fail_count = 0           # 連續失敗計數（簡化單一 counter）
+    RECOVER_THRESHOLD = 3    # 累積到此值就 reload 頻道並強制重抓餘額
 
     while not state["quit"]:
         await _wait_while_paused(state)
@@ -1172,12 +1209,18 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                     ensure_gambling_defaults(config_holder[0], new)
                     config_holder[0] = load_config()
                 log.info("已取得餘額: %d 油幣", new)
-                consecutive_fail = 0
+                fail_count = 0
+                await _maybe_notify_goal(page, state, config_holder)
             else:
-                consecutive_fail += 1
-                if consecutive_fail >= RECOVER_THRESHOLD:
+                fail_count += 1
+                if fail_count >= RECOVER_THRESHOLD:
+                    log.warning("連續 %d 次抓不到餘額 → 觸發頻道 reload", fail_count)
                     await recover_page(page, state)
-                    consecutive_fail = 0
+                    re_bal = await get_balance(page)
+                    if re_bal is not None:
+                        state["balance"] = re_bal
+                        log.info("reload 後重抓餘額成功: %d", re_bal)
+                    fail_count = 0
             continue
 
         if balance <= threshold:
@@ -1187,7 +1230,8 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
             new = await get_balance(page)
             if new is not None:
                 state["balance"] = new
-            parse_fail = 0
+                await _maybe_notify_goal(page, state, config_holder)
+            fail_count = 0
             continue
 
         bet = calculate_bet(balance, gcfg)
@@ -1219,8 +1263,7 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
             else:
                 state["losses"] += 1
             state["balance"] = new_balance
-            parse_fail = 0
-            consecutive_fail = 0
+            fail_count = 0
             log.info("結果: %s%d | 餘額: %d | 勝/敗: %d/%d",
                      "+" if change >= 0 else "", change, new_balance,
                      state["wins"], state["losses"])
@@ -1234,18 +1277,26 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
             })
             await _maybe_notify_goal(page, state, config_holder)
         else:
-            parse_fail += 1
-            consecutive_fail += 1
-            log.warning("無法解析餘額（第 %d 次）", parse_fail)
-            if parse_fail >= 2:
+            fail_count += 1
+            log.warning("無法解析餘額（連續第 %d 次失敗）", fail_count)
+
+            # 階梯式恢復：第 2 次先試 /balance 補抓；第 3 次直接 reload 頻道
+            if fail_count == 2:
+                log.info("試 /balance 重新對齊餘額")
                 new = await get_balance(page)
                 if new is not None:
                     state["balance"] = new
-                    consecutive_fail = 0
-                parse_fail = 0
-            if consecutive_fail >= RECOVER_THRESHOLD:
-                await recover_page(page, state)
-                consecutive_fail = 0
+                    log.info("/balance 取得餘額: %d", new)
+                    fail_count = 0
+            elif fail_count >= RECOVER_THRESHOLD:
+                log.warning("連續 %d 次失敗 → 觸發頻道 reload", fail_count)
+                ok = await recover_page(page, state)
+                if ok:
+                    re_bal = await get_balance(page)
+                    if re_bal is not None:
+                        state["balance"] = re_bal
+                        log.info("reload 後重抓餘額成功: %d", re_bal)
+                fail_count = 0
 
         # 用 config 設定的間距休息
         i_min = float(gcfg.get("interval_min", DEFAULT_INTERVAL_MIN))
@@ -1372,8 +1423,8 @@ async def main():
 
         ui_task = asyncio.create_task(ui_loop(state, config_holder, page))
         worker_tasks = [
-            asyncio.create_task(hourly_loop(page, state)),
-            asyncio.create_task(daily_loop(page, state)),
+            asyncio.create_task(hourly_loop(page, state, config_holder)),
+            asyncio.create_task(daily_loop(page, state, config_holder)),
             asyncio.create_task(gambling_loop(page, state, config_holder)),
             asyncio.create_task(nekomusume_loop(page, state, config_holder)),
         ]
