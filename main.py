@@ -43,6 +43,8 @@ DEFAULT_GOAL = 0          # 0 = 未設定目標
 DEFAULT_GOAL_ACTION = "pause"   # "pause" 或 "raise"
 DEFAULT_GOAL_STEP   = 10000     # raise 模式：新目標 = 舊目標 + step
 DEFAULT_NEKOMUSUME_INTERVAL_MIN = 30   # /check 監控間距
+DEFAULT_BIGWIN_MULTIPLIER = 5.0  # 中大獎賠率門檻（總計贏得 / 下注）
+DEFAULT_DEAD_THRESHOLD    = 2    # 連續讀取餘額失敗幾次算「bot 停擺」
 REBOOT_EXIT_CODE = 42     # main 退出時用這個碼通知 run.bat 重新啟動
 
 command_lock = asyncio.Lock()
@@ -73,6 +75,7 @@ def make_state() -> dict:
         "neko_deadline_ts": None,     # 派遣完成時間戳；用來本地倒數，避免一直 /check
         "neko_last_check_ts": None,
         "neko_check_ts":     None,  # 上次 /check 讀到剩餘時間的 epoch；用於 UI 即時倒數
+        "dead_notified":    False,  # 「bot 停擺」email 是否已寄出，避免重複通知
         "session_start_ts": time.time(),
     }
 
@@ -268,6 +271,7 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     gcfg.setdefault("notify_user_id",  DEFAULT_NOTIFY_USER_ID)
     gcfg.setdefault("goal_action",     DEFAULT_GOAL_ACTION)
     gcfg.setdefault("goal_step",       DEFAULT_GOAL_STEP)
+    gcfg.setdefault("bigwin_multiplier", DEFAULT_BIGWIN_MULTIPLIER)
     if "max_bet" not in gcfg:
         excess = max(0, (balance or 0) - gcfg["threshold"])
         gcfg["max_bet"] = max(500, int(excess * 0.10))
@@ -279,6 +283,11 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     ecfg.setdefault("user",      "")
     ecfg.setdefault("password",  "")
     ecfg.setdefault("to",        "")
+    ecfg.setdefault("notify_goal",   True)   # 達標 email
+    ecfg.setdefault("notify_bigwin", True)   # 中大獎 email
+    ecfg.setdefault("notify_dead",   True)   # bot 停擺 email
+    ecfg.setdefault("notify_neko",   True)   # 貓娘完成 email
+    ecfg.setdefault("dead_threshold", DEFAULT_DEAD_THRESHOLD)
 
     ncfg = config.setdefault("nekomusume", {})
     ncfg.setdefault("enabled",          True)
@@ -497,6 +506,10 @@ async def run_config_menu(state: dict, config_holder: list):
         em_on  = ecfg.get('enabled', False)
         em_to  = ecfg.get('to', '')
         nk_on  = ncfg.get('enabled', True)
+        bw_on  = ecfg.get('notify_bigwin', True)
+        bw_mul = float(gcfg.get('bigwin_multiplier', DEFAULT_BIGWIN_MULTIPLIER))
+        dd_on  = ecfg.get('notify_dead', True)
+        dd_thr = int(ecfg.get('dead_threshold', DEFAULT_DEAD_THRESHOLD))
 
         print(f"\n{'═'*48}")
         print("  ⚙️  Discord Bot — 設定修改")
@@ -517,6 +530,8 @@ async def run_config_menu(state: dict, config_holder: list):
         print("  [Email 通知]")
         print(f"   [C] Email:       {'啟用' if em_on else '停用'}  收件人={em_to or '(未設定)'}")
         print(f"   [D] SMTP 設定 (host / port / user / password)")
+        print(f"   [G] 中大獎通知:  {'啟用' if bw_on else '停用'}  賠率門檻={bw_mul:.1f}x")
+        print(f"   [H] 停擺通知:    {'啟用' if dd_on else '停用'}  連續失敗門檻={dd_thr}")
         print("  [貓娘監控]")
         print(f"   [E] 貓娘監控:    {'啟用' if nk_on else '停用'}  (派遣完成自動 @ 通知)")
         print(f"   [F] 檢查間距:    {ncfg.get('check_interval_min', DEFAULT_NEKOMUSUME_INTERVAL_MIN)} 分鐘")
@@ -617,6 +632,29 @@ async def run_config_menu(state: dict, config_holder: list):
                 print(f"  ✓ 檢查間距 → {ncfg['check_interval_min']} 分鐘")
             except ValueError:
                 print("  無效輸入")
+        elif choice == "G":
+            ecfg["notify_bigwin"] = not ecfg.get("notify_bigwin", True)
+            print(f"  ✓ 中大獎通知 → {'啟用' if ecfg['notify_bigwin'] else '停用'}")
+            if ecfg["notify_bigwin"]:
+                raw = (await ainput(
+                    f"  賠率門檻 (例: 5 = 5x；目前 {bw_mul:.1f}x): "
+                )).strip()
+                try:
+                    if raw:
+                        gcfg["bigwin_multiplier"] = max(1.0, float(raw))
+                        print(f"  ✓ 賠率門檻 → {gcfg['bigwin_multiplier']:.1f}x")
+                except ValueError:
+                    print("  無效輸入")
+        elif choice == "H":
+            ecfg["notify_dead"] = not ecfg.get("notify_dead", True)
+            print(f"  ✓ 停擺通知 → {'啟用' if ecfg['notify_dead'] else '停用'}")
+            if ecfg["notify_dead"]:
+                raw = (await ainput(
+                    f"  連續失敗幾次算停擺 (目前 {dd_thr}): "
+                )).strip()
+                if raw.isdigit() and int(raw) >= 1:
+                    ecfg["dead_threshold"] = int(raw)
+                    print(f"  ✓ 連續失敗門檻 → {ecfg['dead_threshold']}")
 
     config["gambling"]   = gcfg
     config["email"]      = ecfg
@@ -1056,7 +1094,7 @@ async def nekomusume_loop(page: Page, state: dict, config_holder: list):
         except Exception as e:
             log.warning("貓娘完成通知失敗: %s", e)
         ecfg = config_holder[0].get("email", {})
-        if ecfg.get("enabled"):
+        if ecfg.get("enabled") and ecfg.get("notify_neko", True):
             await send_email(
                 ecfg, "[Discord Bot] 貓娘派遣已完成",
                 "貓娘派遣已完成，請至 Discord 用 /nekomusume claim 領取。",
@@ -1110,6 +1148,69 @@ async def nekomusume_loop(page: Page, state: dict, config_holder: list):
             await interruptible_sleep(state, base_min * 60)
 
 
+async def _notify_bigwin(state: dict, config_holder: list,
+                         bet: int, gross_win: int, multiplier: float):
+    """
+    /slot 中大獎時寄 email（Discord 那邊不另發訊息，避免洗版）。
+    `gross_win` 是 slot embed 的「總計贏得」原始數字（含本金），
+    `multiplier` = gross_win / bet。
+    """
+    log = logging.getLogger(__name__)
+    log.info("🎰 中大獎！下注 %d → 贏得 %d (%.2fx)", bet, gross_win, multiplier)
+
+    ecfg = config_holder[0].get("email", {})
+    if not (ecfg.get("enabled") and ecfg.get("notify_bigwin", True)):
+        return
+
+    bal = state.get("balance")
+    bal_str = f"{bal:,}" if isinstance(bal, int) else "未知"
+    body = (
+        f"🎰 Discord Bot 中大獎通知\n\n"
+        f"下注:        {bet:,}\n"
+        f"總計贏得:    {gross_win:,}\n"
+        f"淨變動:      +{gross_win - bet:,}\n"
+        f"賠率:        {multiplier:.2f}x\n"
+        f"目前餘額:    {bal_str}\n"
+        f"累計勝/敗:   {state['wins']} / {state['losses']}\n"
+        f"賭博淨收:    {state['net_change']:+,}"
+    )
+    await send_email(
+        ecfg, f"[Discord Bot] 🎰 中大獎 {multiplier:.1f}x！贏得 {gross_win:,}", body
+    )
+
+
+async def _notify_dead(state: dict, config_holder: list, fail_count: int,
+                        context: str = ""):
+    """
+    連續讀餘額失敗達門檻時，寄 email 提醒使用者 bot 可能掛了。
+    用 state["dead_notified"] 確保同一個「死掉」期間只寄一次；
+    任何一次成功讀餘額後 fail_count 歸零、dead_notified 也應重置。
+    """
+    log = logging.getLogger(__name__)
+    if state.get("dead_notified"):
+        return
+
+    ecfg = config_holder[0].get("email", {})
+    if not (ecfg.get("enabled") and ecfg.get("notify_dead", True)):
+        return
+
+    state["dead_notified"] = True
+    bal = state.get("balance")
+    bal_str = f"{bal:,}" if isinstance(bal, int) else "未知"
+    body = (
+        f"⚠️ Discord Bot 可能停擺\n\n"
+        f"連續失敗次數: {fail_count}\n"
+        f"上次成功餘額: {bal_str}\n"
+        f"說明: /balance 與 /slot 連續無法解析回應，已嘗試 reload 頻道頁面。\n"
+        f"建議檢查：Discord 登入是否過期、目標 bot 是否在線、頻道權限是否正常。\n\n"
+        f"{context}".strip()
+    )
+    await send_email(
+        ecfg, f"[Discord Bot] ⚠️ 警告：bot 可能停擺（連 {fail_count} 次失敗）", body
+    )
+    log.warning("已寄出 bot 停擺警告 email（連 %d 次失敗）", fail_count)
+
+
 async def _maybe_notify_goal(page: Page, state: dict, config_holder: list):
     """
     達成 gambling.goal 時：
@@ -1146,7 +1247,7 @@ async def _maybe_notify_goal(page: Page, state: dict, config_holder: list):
 
         # 2. Email
         ecfg = config.get("email", {})
-        if ecfg.get("enabled"):
+        if ecfg.get("enabled") and ecfg.get("notify_goal", True):
             stats = (
                 f"目前餘額: {bal:,}\n"
                 f"目標餘額: {goal:,}\n"
@@ -1183,6 +1284,21 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
     fail_count = 0           # 連續失敗計數（簡化單一 counter）
     RECOVER_THRESHOLD = 3    # 累積到此值就 reload 頻道並強制重抓餘額
 
+    async def _check_dead(ctx: str):
+        """fail_count 越過 dead_threshold 就寄一次停擺 email；不影響其他流程。"""
+        ecfg = config_holder[0].get("email", {})
+        thr = int(ecfg.get("dead_threshold", DEFAULT_DEAD_THRESHOLD) or 0)
+        if thr > 0 and fail_count >= thr:
+            await _notify_dead(state, config_holder, fail_count, context=ctx)
+
+    def _reset_fail_state():
+        """成功讀到餘額時呼叫：歸零連續失敗計數、允許下次停擺通知再寄。"""
+        nonlocal fail_count
+        fail_count = 0
+        if state.get("dead_notified"):
+            log.info("餘額讀取已恢復，重置 dead_notified")
+        state["dead_notified"] = False
+
     while not state["quit"]:
         await _wait_while_paused(state)
         if state["quit"]:
@@ -1209,10 +1325,11 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                     ensure_gambling_defaults(config_holder[0], new)
                     config_holder[0] = load_config()
                 log.info("已取得餘額: %d 油幣", new)
-                fail_count = 0
+                _reset_fail_state()
                 await _maybe_notify_goal(page, state, config_holder)
             else:
                 fail_count += 1
+                await _check_dead(f"初始 /balance 連 {fail_count} 次失敗")
                 if fail_count >= RECOVER_THRESHOLD:
                     log.warning("連續 %d 次抓不到餘額 → 觸發頻道 reload", fail_count)
                     await recover_page(page, state)
@@ -1220,7 +1337,9 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                     if re_bal is not None:
                         state["balance"] = re_bal
                         log.info("reload 後重抓餘額成功: %d", re_bal)
-                    fail_count = 0
+                        _reset_fail_state()
+                    else:
+                        fail_count = 0   # 防 reload 風暴；dead_notified 仍保留
             continue
 
         if balance <= threshold:
@@ -1230,8 +1349,8 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
             new = await get_balance(page)
             if new is not None:
                 state["balance"] = new
+                _reset_fail_state()
                 await _maybe_notify_goal(page, state, config_holder)
-            fail_count = 0
             continue
 
         bet = calculate_bet(balance, gcfg)
@@ -1263,7 +1382,7 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
             else:
                 state["losses"] += 1
             state["balance"] = new_balance
-            fail_count = 0
+            _reset_fail_state()
             log.info("結果: %s%d | 餘額: %d | 勝/敗: %d/%d",
                      "+" if change >= 0 else "", change, new_balance,
                      state["wins"], state["losses"])
@@ -1275,10 +1394,23 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                 "change": change,
                 "result": "win" if change > 0 else "loss",
             })
+
+            # 中大獎通知（改變餘額成功 + 真的解析到 win 才檢查）
+            if parsed_change is not None and change > 0 and bet > 0:
+                gross_win = change + bet
+                multiplier = gross_win / bet
+                bigwin_threshold = float(
+                    gcfg.get("bigwin_multiplier", DEFAULT_BIGWIN_MULTIPLIER) or 0
+                )
+                if bigwin_threshold > 0 and multiplier >= bigwin_threshold:
+                    await _notify_bigwin(state, config_holder,
+                                         bet, gross_win, multiplier)
+
             await _maybe_notify_goal(page, state, config_holder)
         else:
             fail_count += 1
             log.warning("無法解析餘額（連續第 %d 次失敗）", fail_count)
+            await _check_dead(f"/slot 連 {fail_count} 次失敗")
 
             # 階梯式恢復：第 2 次先試 /balance 補抓；第 3 次直接 reload 頻道
             if fail_count == 2:
@@ -1287,7 +1419,7 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                 if new is not None:
                     state["balance"] = new
                     log.info("/balance 取得餘額: %d", new)
-                    fail_count = 0
+                    _reset_fail_state()
             elif fail_count >= RECOVER_THRESHOLD:
                 log.warning("連續 %d 次失敗 → 觸發頻道 reload", fail_count)
                 ok = await recover_page(page, state)
@@ -1296,7 +1428,11 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                     if re_bal is not None:
                         state["balance"] = re_bal
                         log.info("reload 後重抓餘額成功: %d", re_bal)
-                fail_count = 0
+                        _reset_fail_state()
+                    else:
+                        fail_count = 0   # 防 reload 風暴；dead_notified 仍保留
+                else:
+                    fail_count = 0   # 同上
 
         # 用 config 設定的間距休息
         i_min = float(gcfg.get("interval_min", DEFAULT_INTERVAL_MIN))

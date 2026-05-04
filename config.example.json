@@ -13,6 +13,7 @@
     "goal": 0,
     "goal_action": "pause",
     "goal_step": 10000,
+    "bigwin_multiplier": 5.0,
     "notify_user_id": "YOUR_DISCORD_USER_ID_HERE"
   },
   "email": {
@@ -21,7 +22,12 @@
     "smtp_port": 587,
     "user": "your_email@gmail.com",
     "password": "GMAIL_APP_PASSWORD_HERE",
-    "to": "your_email@gmail.com"
+    "to": "your_email@gmail.com",
+    "notify_goal": true,
+    "notify_bigwin": true,
+    "notify_dead": true,
+    "notify_neko": true,
+    "dead_threshold": 2
   },
   "nekomusume": {
     "enabled": true,

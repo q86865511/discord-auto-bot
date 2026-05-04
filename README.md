@@ -83,21 +83,31 @@ UI 上的快速鍵：
 | `goal` | `0` | 餘額目標；達到時通知，`0` = 不啟用 |
 | `goal_action` | `pause` | 達標後動作：`pause` = 停用賭博；`raise` = 把已達目標當作新門檻、目標 += `goal_step` 後繼續（保護獲利的階梯式策略）|
 | `goal_step` | `10000` | `raise` 模式下，新目標 = 舊目標 + 此值 |
+| `bigwin_multiplier` | `5.0` | 中大獎賠率門檻（總計贏得 / 下注 ≥ 此值就寄 email；需 `email.notify_bigwin` 啟用）|
 | `notify_user_id` | — | 目標達成 / 貓娘完成時要 `@` 的 Discord User ID |
 
 ### Email 通知（選用）
 
 `config.json` → `email`：
 
-| 欄位 | 說明 |
-|------|------|
-| `enabled` | 是否啟用 |
-| `smtp_host` / `smtp_port` | SMTP 伺服器（預設 Gmail）|
-| `user` | 寄件人帳號 |
-| `password` | **Gmail 必須用 [App Password](https://myaccount.google.com/apppasswords)，不是登入密碼** |
-| `to` | 收件人 |
+| 欄位 | 預設 | 說明 |
+|------|------|------|
+| `enabled` | `false` | 主開關，整個 email 功能 |
+| `smtp_host` / `smtp_port` | Gmail | SMTP 伺服器 |
+| `user` | — | 寄件人帳號 |
+| `password` | — | **Gmail 必須用 [App Password](https://myaccount.google.com/apppasswords)，不是登入密碼** |
+| `to` | — | 收件人 |
+| `notify_goal` | `true` | 達成 `goal` 時寄信 |
+| `notify_bigwin` | `true` | /slot 中大獎時寄信（賠率 ≥ `gambling.bigwin_multiplier`）|
+| `notify_dead` | `true` | 連續無法讀取餘額（/slot + /balance）時寄信，提醒 bot 可能掛了 |
+| `notify_neko` | `true` | 貓娘派遣完成時寄信 |
+| `dead_threshold` | `2` | 連續失敗達此次數就視為「bot 停擺」並寄一次警告（每段死亡只寄一次，恢復後重置）|
 
-達成 `goal` 時會寄送一份含當前統計的 email。
+四種事件：
+- **達成目標**：餘額 ≥ `goal`
+- **中大獎**：/slot 結果「總計贏得 / 下注」≥ `bigwin_multiplier`（預設 5x）
+- **bot 停擺**：/slot 或 /balance 連續失敗 ≥ `dead_threshold`
+- **貓娘完成**：派遣狀態從「派遣中」變回「閒置 / 待領取」
 
 ### 貓娘派遣監控
 
