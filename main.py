@@ -809,37 +809,19 @@ def _copy_to_clipboard(text: str) -> bool:
         return False
 
 
-# QR cache — URL 沒變就不重新生成
-_qr_cache: dict[str, str] = {}
-
-
-def _build_terminal_qr(text: str) -> str | None:
+def _save_qr_png(text: str) -> str | None:
     """
-    產生終端機可顯示的 ASCII QR code（用半形塊字元，2 modules per char 高度）。
-    cmd 預設黑底，回傳的字串裡 '█' 在黑底會渲染成白色 → 適合 QR scanner。
-    qrcode 套件沒裝就回 None。
+    把 url 產成 QR PNG 存到 OS temp 目錄；回傳檔案路徑。
+    qrcode 套件沒裝、PIL 沒裝、寫檔失敗都回 None。
     """
-    if text in _qr_cache:
-        return _qr_cache[text]
     try:
         import qrcode
-        import io
-        qr = qrcode.QRCode(
-            version=None,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=1,
-            border=1,            # 最小留白；正常 4，但 1 大多數掃描器仍能讀
-        )
-        qr.add_data(text)
-        qr.make(fit=True)
-        buf = io.StringIO()
-        # invert=True：'█' 代表 light（quiet zone + 0 modules），' ' 代表 dark
-        # 在黑底 cmd 上，'█' 渲染為白方塊、' ' 為黑（背景）—— 對掃描器來說是
-        # 白底黑碼的「正常」極性；scanner 會正確解讀。
-        qr.print_ascii(out=buf, invert=True)
-        result = buf.getvalue().rstrip("\n")
-        _qr_cache[text] = result
-        return result
+        import tempfile
+        # 大白邊界（box_size=10 → 圖大、好掃；border=4 是 QR spec 推薦）
+        img = qrcode.make(text, box_size=10, border=4)
+        path = os.path.join(tempfile.gettempdir(), "discord_bot_qr.png")
+        img.save(path)
+        return path
     except ImportError:
         return None
     except Exception:
@@ -1052,32 +1034,10 @@ def build_layout(state: dict, config: dict) -> Layout:
         f"[bold]E[/bold] 匯出分析結果  "
         f"[bold]S[/bold] 分析賭博機率  "
         f"[bold]W[/bold] 開啟 Dashboard  "
-        f"[bold]K[/bold] 複製 Dashboard URL  "
+        f"[bold]K[/bold] 開啟 QR 圖  "
         f"[bold]F[/bold] 重啟程式[/dim]",
         style="dim", height=3,
     )
-
-    # QR panel — 位於 cfg panel 下方右側（手機掃描用）
-    qr_panel = None
-    if dcfg.get("enabled", True):
-        lan_url = _dashboard_lan_url(config)
-        qr_text = _build_terminal_qr(lan_url)
-        if qr_text:
-            # 用淺白（不是 bright_white）— 在黑底夠亮但不刺眼
-            qr_renderable = Text(qr_text, style="white on black", no_wrap=True)
-            qr_panel = Panel(
-                qr_renderable,
-                title="[bold]📱 手機掃描[/bold]  [dim]同 WiFi 直接開[/dim]",
-                border_style="cyan",
-                padding=(0, 1),
-            )
-        else:
-            qr_panel = Panel(
-                Text("（未安裝 qrcode 套件）\n  pip install qrcode\n  或重跑 setup.bat",
-                     style="dim"),
-                title="[bold]📱 手機掃描[/bold]",
-                border_style="dim",
-            )
 
     layout = Layout()
     layout.split_column(
@@ -1086,22 +1046,10 @@ def build_layout(state: dict, config: dict) -> Layout:
         Layout(log_panel, name="logs",   size=13),
         Layout(footer,    name="footer", size=3),
     )
-    if qr_panel is not None:
-        # 右側拆成 cfg（上）+ qr（下，固定 ~16 行給 v2 QR 25 modules + 邊框 + title）
-        layout["body"].split_row(
-            Layout(stats_panel, name="stats"),
-            Layout(name="right"),
-        )
-        layout["right"].split_column(
-            Layout(cfg_panel, name="cfg"),
-            Layout(qr_panel,  name="qr",  size=18),
-        )
-    else:
-        # qr 沒做出來 → 維持原本的 2 欄
-        layout["body"].split_row(
-            Layout(stats_panel, name="stats"),
-            Layout(cfg_panel,   name="cfg"),
-        )
+    layout["body"].split_row(
+        Layout(stats_panel, name="stats"),
+        Layout(cfg_panel,   name="cfg"),
+    )
     return layout
 
 
@@ -3197,12 +3145,17 @@ async def ui_loop(state: dict, config_holder: list, page: Page | None = None):
                     except Exception as e:
                         _log(state, f"⚠ 開啟瀏覽器失敗: {e}")
                 elif key == "k":
-                    # 複製 dashboard 的 LAN URL 到剪貼簿（給手機用）
+                    # 開啟 QR 圖檔（手機掃 LAN URL 進 dashboard）
                     lan_url = _dashboard_lan_url(config_holder[0])
-                    if _copy_to_clipboard(lan_url):
-                        _log(state, f"📋 已複製: {lan_url}")
+                    path = _save_qr_png(lan_url)
+                    if path is None:
+                        _log(state, "⚠ 產 QR 失敗（請執行 pip install qrcode pillow）")
                     else:
-                        _log(state, f"⚠ 複製失敗（手動複製: {lan_url}）")
+                        try:
+                            os.startfile(path)
+                            _log(state, f"📱 QR 已開啟: {path} ({lan_url})")
+                        except Exception as e:
+                            _log(state, f"⚠ 無法開啟 QR 圖: {e}（手動開啟 {path}）")
 
             live.update(build_layout(state, config_holder[0]))
             await asyncio.sleep(0.5)

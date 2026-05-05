@@ -81,11 +81,18 @@ def _html_shell(title: str, body_html: str, active: str = "overview") -> str:
   h2.section {{ font-size: 14px; color: #8b949e; text-transform: uppercase;
     letter-spacing: 0.5px; margin: 20px 0 8px 0; }}
   .grid {{
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);     /* 桌機固定 4 欄，第一排剛好 4 張卡 */
     gap: 12px;
     align-items: start;        /* 卡片各自高度，不再被同列最高的撐到一樣高 */
   }}
-  /* 4 張或更多卡片時，第一排盡量擠滿 — 把 minmax 降到 220px 讓寬度更彈性 */
+  /* 平板：縮成 2 欄；手機：縮成 1 欄 */
+  @media (max-width: 900px) {{
+    .grid {{ grid-template-columns: repeat(2, 1fr); }}
+  }}
+  @media (max-width: 500px) {{
+    .grid {{ grid-template-columns: 1fr; }}
+  }}
   .card {{
     background: #161b22; border: 1px solid #30363d; border-radius: 8px;
     padding: 12px;
@@ -448,7 +455,7 @@ window.addEventListener('resize', drawChart);
 # ── 頁面：Slot 分析 ────────────────────────────────────────────────────────
 _ANALYSIS_BODY = """
 <div class="grid">
-  <div class="card">
+  <div class="card" style="grid-column: 1/-1;">
     <h3>📊 基本統計</h3>
     <div class="row"><span class="label">總旋轉次數</span><span class="value" id="total_spins">─</span></div>
     <div class="row"><span class="label">勝率</span><span class="value" id="win_rate">─</span></div>

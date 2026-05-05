@@ -1,5 +1,5 @@
 playwright>=1.40
 rich>=13.0
 matplotlib>=3.7
-qrcode>=7.4
+qrcode[pil]>=7.4
 
