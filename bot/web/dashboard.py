@@ -41,6 +41,8 @@ def _html_shell(title: str, body_html: str, active: str = "overview") -> str:
         ("overview", "/",         "📊 概覽"),
         ("analysis", "/analysis", "🎯 Slot 分析"),
         ("control",  "/control",  "🛠️ 控制台"),
+        ("logs",     "/logs",     "📋 Logs"),
+        ("qr",       "/qr",       "📱 QR"),
     ]
     nav_html = "".join(
         f'<a href="{href}" class="nav-link{" active" if key == active else ""}">{label}</a>'
@@ -768,6 +770,152 @@ loadConfig();
 """
 
 
+# ── 頁面：QR Code（給手機掃 LAN URL）────────────────────────────────────
+_QR_BODY = """
+<div class="card" style="text-align: center;">
+  <h3>📱 手機掃描登入</h3>
+  <p class="dim" style="margin: 0 0 16px 0;">用手機相機掃描 → 在同 LAN 直接打開 dashboard</p>
+  <div id="qr-box" style="background: white; padding: 20px; border-radius: 8px;
+       display: inline-block; max-width: 90%;">
+    <object data="/qr.svg" type="image/svg+xml" style="width: 320px; height: 320px;"></object>
+  </div>
+  <div style="margin-top: 16px;">
+    <code id="url-display" class="blue" style="font-size: 14px;
+         background: #0d1117; padding: 6px 12px; border-radius: 4px;
+         display: inline-block;">─</code>
+  </div>
+  <div class="btn-row" style="justify-content: center; margin-top: 16px;">
+    <button class="btn primary" onclick="copyUrl()">📋 複製網址</button>
+    <button class="btn" onclick="window.open(document.getElementById('url-display').textContent)">🌐 在新分頁開</button>
+  </div>
+  <p class="dim" style="margin-top: 16px; font-size: 12px;">
+    若手機掃描後無法連線：確認電腦防火牆有放行 8765 port、手機跟電腦在同一個 WiFi。
+  </p>
+</div>
+<script>
+async function loadUrl() {
+  try {
+    const r = await fetch('/api/qr-url');
+    const d = await r.json();
+    document.getElementById('url-display').textContent = d.url || '無法偵測 LAN IP';
+  } catch(e) {
+    document.getElementById('url-display').textContent = '錯誤: ' + e.message;
+  }
+}
+async function copyUrl() {
+  const url = document.getElementById('url-display').textContent;
+  try {
+    await navigator.clipboard.writeText(url);
+    showToast('已複製: ' + url);
+  } catch(e) {
+    // 後備：用 selection
+    const r = document.createRange();
+    r.selectNode(document.getElementById('url-display'));
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(r);
+    document.execCommand('copy');
+    showToast('已複製');
+  }
+}
+loadUrl();
+</script>
+"""
+
+
+# ── 頁面：Log viewer ───────────────────────────────────────────────────────
+_LOGS_BODY = """
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center;">
+    <h3 style="margin: 0;">📋 Bot Log（最近 200 行）</h3>
+    <div>
+      <label class="dim" style="font-size: 12px;">
+        <input type="checkbox" id="autoscroll" checked> 自動捲到底
+      </label>
+      <button class="btn" onclick="refreshLogs()" style="margin-left: 8px;">↻ 手動刷新</button>
+    </div>
+  </div>
+  <pre id="log-content" style="background: #010409; padding: 12px;
+       border-radius: 6px; margin: 12px 0 0 0; max-height: 70vh;
+       overflow-y: auto; font-size: 12px; line-height: 1.4;
+       white-space: pre-wrap; word-break: break-all;
+       color: #c9d1d9;"></pre>
+</div>
+<script>
+async function refreshLogs() {
+  try {
+    const r = await fetch('/api/logs');
+    const d = await r.json();
+    const pre = document.getElementById('log-content');
+    if (d.error) {
+      pre.textContent = '錯誤: ' + d.error;
+      pre.classList.add('red');
+      return;
+    }
+    pre.classList.remove('red');
+    // 上色：[ERROR] 紅、[WARNING] 黃、[INFO] 預設、[DEBUG] dim
+    const lines = (d.lines || []).map(line => {
+      let cls = '';
+      if (line.includes('[ERROR]')) cls = 'color:#f85149;';
+      else if (line.includes('[WARNING]')) cls = 'color:#d29922;';
+      else if (line.includes('[DEBUG]')) cls = 'color:#6e7681;';
+      // 明顯事件 highlight
+      if (line.includes('🎰') || line.includes('中大獎')) cls = 'color:#3fb950;font-weight:600;';
+      else if (line.includes('⛔') || line.includes('停損')) cls = 'color:#f85149;font-weight:600;';
+      else if (line.includes('🐱') || line.includes('貓娘')) cls = 'color:#a371f7;';
+      return `<span style="${cls}">${escapeHtml(line)}</span>`;
+    });
+    pre.innerHTML = lines.join('\\n');
+    if (document.getElementById('autoscroll').checked) {
+      pre.scrollTop = pre.scrollHeight;
+    }
+  } catch(e) {
+    document.getElementById('log-content').textContent = '無法載入 log: ' + e.message;
+  }
+}
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+refreshLogs();
+setInterval(refreshLogs, 3000);
+</script>
+"""
+
+
+def _build_qr_svg(text: str) -> bytes:
+    """產生 QR code SVG bytes；qrcode 套件沒裝就回 None。"""
+    try:
+        import qrcode
+        import qrcode.image.svg
+        factory = qrcode.image.svg.SvgPathImage
+        img = qrcode.make(text, image_factory=factory, box_size=10, border=2)
+        import io
+        buf = io.BytesIO()
+        img.save(buf)
+        return buf.getvalue()
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _read_log_tail(path: str = "bot.log", max_lines: int = 200,
+                   max_bytes: int = 256 * 1024) -> list[str]:
+    """從 path 讀最後 max_lines 行；不存在或讀失敗回空 list。"""
+    try:
+        if not os.path.exists(path):
+            return []
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()   # 跳掉可能切到一半的行
+            data = f.read().decode("utf-8", errors="replace")
+        lines = data.splitlines()
+        return lines[-max_lines:]
+    except OSError:
+        return []
+
+
 # ── 共用 helpers ───────────────────────────────────────────────────────────
 def _build_state_snapshot(state: dict, config: dict) -> dict:
     """組出 /api/state 的快照（給 overview 頁用）。"""
@@ -963,8 +1111,44 @@ def _make_handler(state: dict, config_holder: list,
         def log_message(self, format, *args):  # noqa: A002, N802
             logging.getLogger("dashboard").debug(format, *args)
 
+        # ── HTTP Basic Auth（dashboard.password 設了才啟用）───────────────
+        def _check_auth(self) -> bool:
+            """設定密碼則檢查 Authorization header；沒設密碼直接放行。"""
+            dcfg = config_holder[0].get("dashboard", {})
+            pwd = (dcfg.get("password") or "").strip()
+            if not pwd:
+                return True   # 沒設密碼 = 不啟用
+            user = (dcfg.get("username") or "admin").strip() or "admin"
+
+            auth_hdr = self.headers.get("Authorization", "")
+            if not auth_hdr.startswith("Basic "):
+                self._send_401()
+                return False
+            import base64
+            try:
+                decoded = base64.b64decode(auth_hdr[6:]).decode("utf-8", "replace")
+                u, _, p = decoded.partition(":")
+            except Exception:
+                self._send_401()
+                return False
+            if u != user or p != pwd:
+                self._send_401()
+                return False
+            return True
+
+        def _send_401(self):
+            body = b"Unauthorized"
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="DiscordBot"')
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # ── 路由 ─────────────────────────────────────────────────────────
         def do_GET(self):  # noqa: N802
+            if not self._check_auth():
+                return
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
                 self._html(_html_shell("概覽", _OVERVIEW_BODY, "overview")
@@ -975,20 +1159,64 @@ def _make_handler(state: dict, config_holder: list,
             elif path == "/control":
                 self._html(_html_shell("控制台", _CONTROL_BODY, "control")
                            + _html_close())
+            elif path == "/qr":
+                self._html(_html_shell("QR Code", _QR_BODY, "qr")
+                           + _html_close())
+            elif path == "/logs":
+                self._html(_html_shell("Logs", _LOGS_BODY, "logs")
+                           + _html_close())
+            elif path == "/qr.svg":
+                # 用 LAN URL 產生 QR；qrcode 套件沒裝就回 placeholder
+                from urllib.parse import urlparse
+                # 偵測 LAN IP（直接重用 _detect_lan_ip）
+                dcfg = config_holder[0].get("dashboard", {})
+                port = int(dcfg.get("port", 8765))
+                host_cfg = dcfg.get("host", "0.0.0.0")
+                ip = _detect_lan_ip() if host_cfg == "0.0.0.0" else host_cfg
+                url = f"http://{ip}:{port}/"
+                svg = _build_qr_svg(url)
+                if svg:
+                    self._respond(200, "image/svg+xml", svg)
+                else:
+                    placeholder = (
+                        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320">'
+                        f'<rect width="320" height="320" fill="#fff"/>'
+                        f'<text x="160" y="150" text-anchor="middle" '
+                        f'font-family="sans-serif" font-size="14" fill="#000">'
+                        f'qrcode 套件未安裝</text>'
+                        f'<text x="160" y="180" text-anchor="middle" '
+                        f'font-family="sans-serif" font-size="12" fill="#666">'
+                        f'pip install qrcode</text>'
+                        f'</svg>'
+                    ).encode("utf-8")
+                    self._respond(200, "image/svg+xml", placeholder)
+            elif path == "/api/qr-url":
+                dcfg = config_holder[0].get("dashboard", {})
+                port = int(dcfg.get("port", 8765))
+                host_cfg = dcfg.get("host", "0.0.0.0")
+                ip = _detect_lan_ip() if host_cfg == "0.0.0.0" else host_cfg
+                self._json({"url": f"http://{ip}:{port}/"})
+            elif path == "/api/logs":
+                lines = _read_log_tail("bot.log", max_lines=200)
+                self._json({"lines": lines, "count": len(lines)})
             elif path == "/api/state":
                 self._json(_build_state_snapshot(state, config_holder[0]))
             elif path == "/api/analysis":
                 self._json(_build_analysis_snapshot(state))
             elif path == "/api/config":
-                # 回傳整份 config（密碼遮罩）
+                # 回傳整份 config（敏感欄位遮罩）
                 cfg = json.loads(json.dumps(config_holder[0]))   # deep copy
                 if "email" in cfg and "password" in cfg["email"]:
                     cfg["email"]["password"] = "***" if cfg["email"].get("password") else ""
+                if "dashboard" in cfg and "password" in cfg["dashboard"]:
+                    cfg["dashboard"]["password"] = "***" if cfg["dashboard"].get("password") else ""
                 self._json(cfg)
             else:
                 self._respond(404, "text/plain", b"Not Found")
 
         def do_POST(self):  # noqa: N802
+            if not self._check_auth():
+                return
             path = self.path.split("?", 1)[0]
 
             if path.startswith("/api/action/"):

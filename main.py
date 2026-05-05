@@ -700,6 +700,8 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     dcfg.setdefault("enabled", True)
     dcfg.setdefault("host",    "0.0.0.0")      # 預設讓同 LAN 手機可看；要鎖本機就改 "127.0.0.1"
     dcfg.setdefault("port",    8765)
+    dcfg.setdefault("username", "admin")       # HTTP Basic Auth 用；password 空 = 不啟用驗證
+    dcfg.setdefault("password", "")            # 空字串 = 不啟用密碼保護
 
     save_config(config)
 
