@@ -642,7 +642,7 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
 
     dcfg = config.setdefault("dashboard", {})
     dcfg.setdefault("enabled", True)
-    dcfg.setdefault("host",    "127.0.0.1")    # 改 0.0.0.0 可讓同 LAN 手機/平板瀏覽
+    dcfg.setdefault("host",    "0.0.0.0")      # 預設讓同 LAN 手機可看；要鎖本機就改 "127.0.0.1"
     dcfg.setdefault("port",    8765)
 
     save_config(config)
@@ -2813,14 +2813,38 @@ async def main():
         if dcfg.get("enabled", True):
             try:
                 from web_dashboard import start_dashboard_thread
+
+                def _dashboard_action(action: str) -> dict:
+                    """從 dashboard 控制台觸發的動作。回傳 {ok, message}。"""
+                    if action == "toggle_pause":
+                        state["paused"] = not state.get("paused", False)
+                        msg = "已暫停" if state["paused"] else "已恢復"
+                        _log(state, f"📡 Dashboard：{msg}")
+                        return {"ok": True, "message": msg}
+                    elif action == "reset_analysis":
+                        n = state.get("slot_analysis", {}).get("total_spins", 0)
+                        state["slot_analysis"] = _make_slot_analysis()
+                        if os.path.exists(ANALYSIS_PATH):
+                            os.remove(ANALYSIS_PATH)
+                        _log(state, f"📡 Dashboard：重置分析（{n} 筆清除）")
+                        return {"ok": True, "message": f"已重置（{n} 筆清除）"}
+                    elif action == "restart":
+                        state["reboot"] = True
+                        state["quit"] = True
+                        _log(state, "📡 Dashboard：請求重啟")
+                        return {"ok": True, "message": "重啟請求已送出，3 秒後重啟"}
+                    else:
+                        return {"ok": False, "message": f"未知動作: {action}"}
+
                 dashboard_thread = start_dashboard_thread(
                     state, config_holder,
-                    host=dcfg.get("host", "127.0.0.1"),
+                    on_action=_dashboard_action,
+                    host=dcfg.get("host", "0.0.0.0"),
                     port=int(dcfg.get("port", 8765)),
                 )
                 if dashboard_thread:
                     log.info("Web dashboard 啟動在 http://%s:%d/",
-                             dcfg.get("host", "127.0.0.1"),
+                             dcfg.get("host", "0.0.0.0"),
                              int(dcfg.get("port", 8765)))
             except Exception as e:
                 log.warning("Web dashboard 啟動失敗: %s", e)
