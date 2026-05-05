@@ -225,6 +225,23 @@ def export_history_chart(state: dict) -> str | None:
     return path
 
 
+# 自訂 emoji 顯示用的 prefix marker（unicode 方塊；終端機都能畫）
+_CUSTOM_EMOJI_MARKER = "🟦"
+_SHORTCODE_NAME_RE = re.compile(r'^:([a-z0-9_]+):$')
+
+
+def _format_symbol_display(sym: str) -> str:
+    """
+    顯示用：把 Discord 自訂 shortcode 轉成「🟦 name」格式（去掉冒號、加 marker）。
+    Unicode emoji（🍒 等）原樣回傳。
+    底層儲存仍維持 :name: 格式，避免和標準 emoji 衝突。
+    """
+    m = _SHORTCODE_NAME_RE.match(sym)
+    if m:
+        return f"{_CUSTOM_EMOJI_MARKER} {m.group(1)}"
+    return sym
+
+
 def export_slot_analysis(state: dict) -> str | None:
     sa = state.get("slot_analysis", {})
     if sa.get("total_spins", 0) == 0:
@@ -260,9 +277,10 @@ def export_slot_analysis(state: dict) -> str | None:
         if si:
             f.write(f"\nSymbol Stats (from winning lines)\n")
             f.write(f"{'-' * 40}\n")
-            f.write(f"  {'Symbol':<6s} {'Hits':>6s} {'AvgMult':>8s} {'TotalPay':>10s}\n")
+            f.write(f"  {'Symbol':<14s} {'Hits':>6s} {'AvgMult':>8s} {'TotalPay':>10s}\n")
             for sym, info in sorted(si.items(), key=lambda x: -x[1]["total_payout"]):
-                f.write(f"  {sym:<6s} {info['win_appearances']:>6d} "
+                disp = _format_symbol_display(sym)
+                f.write(f"  {disp:<14s} {info['win_appearances']:>6d} "
                         f"{info['avg_mult']:>8.2f}x {info['total_payout']:>10,}\n")
 
         gp = stats.get("grid_symbol_prob", {})
@@ -270,7 +288,8 @@ def export_slot_analysis(state: dict) -> str | None:
             f.write(f"\nGrid Symbol Probability\n")
             f.write(f"{'-' * 40}\n")
             for sym, prob in sorted(gp.items(), key=lambda x: -x[1]):
-                f.write(f"  {sym:<6s} {prob:>6.1%}\n")
+                disp = _format_symbol_display(sym)
+                f.write(f"  {disp:<14s} {prob:>6.1%}\n")
 
         li = stats.get("line_info", {})
         if li:
@@ -393,19 +412,20 @@ def _show_slot_analysis(state: dict):
         for sym in sorted(all_symbols, key=_sort_key):
             info = si.get(sym, {})
             wins = info.get("win_appearances", 0)
+            disp_sym = _format_symbol_display(sym)
             if wins > 0:
                 avg_mult = info.get("avg_mult", 0.0)
                 total_pay = info.get("total_payout", 0)
                 rec_rate = total_pay / total_wagered
                 row = [
-                    sym,
+                    disp_sym,
                     f"{wins:,}",
                     f"{avg_mult:.2f}x",
                     f"{total_pay:,}",
                     f"{rec_rate:.1%}",
                 ]
             else:
-                row = [sym, "─", "─", "─", "─"]
+                row = [disp_sym, "─", "─", "─", "─"]
             if gp:
                 row.append(f"{gp[sym]:.1%}" if sym in gp else "─")
             st.add_row(*row)
@@ -616,7 +636,9 @@ def calculate_bet(balance: int, gcfg: dict,
     strategy  = gcfg.get("strategy",  "auto")
 
     excess = balance - threshold
-    if excess <= 0:
+    # 如果可動用的金額不足以下最小注（bot 拒絕 < min_bet 的下注），
+    # 直接放棄這次下注 — 不要硬切到 excess 否則會被 bot 退回
+    if excess < min_bet:
         return 0
 
     if strategy == "kelly" and slot_analysis is not None:
@@ -632,7 +654,12 @@ def calculate_bet(balance: int, gcfg: dict,
 
     if max_bet > 0:
         bet = min(bet, max_bet)
-    return min(bet, excess)
+    # 確保最後 bet 仍 >= min_bet（max_bet 設太低時也不能低於 min_bet）
+    bet = max(bet, min_bet)
+    # 一定要 <= excess 才下注；否則放棄這把
+    if bet > excess:
+        return 0
+    return bet
 
 
 # ── UI 渲染 ───────────────────────────────────────────────────────────────────
@@ -790,7 +817,7 @@ def build_layout(state: dict, config: dict) -> Layout:
         transfer_str = "[dim]停用[/dim]"
     t2.add_row("💸 自動轉帳",  transfer_str)
 
-    cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改[/dim]",
+    cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改系統設定[/dim]",
                       border_style="green")
 
     # 日誌
@@ -799,10 +826,18 @@ def build_layout(state: dict, config: dict) -> Layout:
     log_panel = Panel(log_text, title="[bold]📋 日誌[/bold]", border_style="dim", height=13)
 
     # Footer
-    pause_label = "[yellow]P 恢復[/yellow]" if state.get("paused") else "[bold]P[/bold] 暫停"
+    pause_label = (
+        "[yellow]P 恢復系統[/yellow]"
+        if state.get("paused")
+        else "[bold]P[/bold] 暫停系統"
+    )
     footer = Panel(
-        f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改設定  "
-        f"{pause_label}  [bold]E[/bold] 匯出  [bold]S[/bold] 分析  [bold]L[/bold] 重載頻道  [bold]F[/bold] 重啟程式[/dim]",
+        f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改系統設定  "
+        f"{pause_label}  "
+        f"[bold]E[/bold] 匯出分析結果  "
+        f"[bold]S[/bold] 分析賭博機率  "
+        f"[bold]L[/bold] 重載頻道  "
+        f"[bold]F[/bold] 重啟程式[/dim]",
         style="dim", height=3,
     )
 
@@ -840,6 +875,214 @@ def start_kb_listener(state: dict):
 # ── 設定選單 ──────────────────────────────────────────────────────────────────
 async def ainput(prompt: str) -> str:
     return await asyncio.get_event_loop().run_in_executor(None, input, prompt)
+
+
+def _file_size_str(path: str) -> str:
+    """回傳 path 的人類可讀大小（KB / MB），不存在則回傳 '—'。"""
+    if not os.path.exists(path):
+        return "—"
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return "—"
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / 1024 / 1024:.2f} MB"
+
+
+def _dir_size_str(path: str) -> tuple[str, int]:
+    """回傳 (size_str, file_count)；不存在則 ('—', 0)。"""
+    if not os.path.isdir(path):
+        return "—", 0
+    total = 0
+    count = 0
+    try:
+        for root, _, files in os.walk(path):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    total += os.path.getsize(fp)
+                    count += 1
+                except OSError:
+                    pass
+    except OSError:
+        return "—", 0
+    if total < 1024:
+        sz = f"{total} B"
+    elif total < 1024 * 1024:
+        sz = f"{total / 1024:.1f} KB"
+    else:
+        sz = f"{total / 1024 / 1024:.2f} MB"
+    return sz, count
+
+
+def _delete_file_safe(path: str) -> bool:
+    """安全刪除單一檔案；不存在或失敗回傳 False。"""
+    if not os.path.exists(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError as e:
+        print(f"  ⚠ 刪除失敗 {path}: {e}")
+        return False
+
+
+def _delete_dir_contents(path: str) -> tuple[int, int]:
+    """刪除目錄內所有檔案（不刪目錄本身）；回傳 (刪除數, 失敗數)。"""
+    if not os.path.isdir(path):
+        return 0, 0
+    deleted = 0
+    failed = 0
+    for entry in os.listdir(path):
+        fp = os.path.join(path, entry)
+        if os.path.isfile(fp):
+            try:
+                os.remove(fp)
+                deleted += 1
+            except OSError as e:
+                print(f"  ⚠ 刪除失敗 {fp}: {e}")
+                failed += 1
+    return deleted, failed
+
+
+async def _do_system_update(state: dict) -> bool:
+    """
+    執行 git pull 拉取最新程式碼。
+    成功且有更新 → 設 reboot 旗標讓 run.bat 重新啟動，回傳 True。
+    沒更新或失敗 → 回傳 False。
+
+    需求：本目錄是 git repo，且 git 有 cached credentials（user 已能 push 就 OK）。
+    """
+    import subprocess
+    print("\n  正在執行 git pull origin main ...")
+    try:
+        proc = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            capture_output=True, text=True, encoding="utf-8",
+            timeout=60,
+        )
+    except FileNotFoundError:
+        print("  ⚠ 找不到 git 指令，請確認已安裝 Git 並加入 PATH")
+        return False
+    except subprocess.TimeoutExpired:
+        print("  ⚠ git pull 超過 60 秒未完成（網路或認證問題？）")
+        return False
+    except Exception as e:
+        print(f"  ⚠ git pull 發生錯誤: {e}")
+        return False
+
+    out = (proc.stdout or "") + (proc.stderr or "")
+    print("  --- git output ---")
+    for line in out.strip().splitlines()[-15:]:    # 只印最後 15 行避免洗版
+        print(f"  {line}")
+    print("  ------------------")
+
+    if proc.returncode != 0:
+        print(f"  ⚠ git pull 失敗（exit code {proc.returncode}）")
+        return False
+
+    if "Already up to date" in out or "Already up-to-date" in out:
+        print("  ✓ 已是最新版本")
+        return False
+
+    # 有更新 — 觸發重啟
+    print("  ✓ 更新成功！3 秒後重啟程式...")
+    await asyncio.sleep(3)
+    state["reboot"] = True
+    state["quit"]   = True
+    return True
+
+
+async def run_advanced_menu(state: dict):
+    """進階設定子選單：檔案管理 + 系統更新。"""
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*48}")
+        print("  🛠️  進階設定")
+        print(f"{'═'*48}")
+
+        debug_size = _file_size_str("slot_debug.log")
+        history_size = _file_size_str(HISTORY_PATH)
+        analysis_size = _file_size_str(ANALYSIS_PATH)
+        exports_size, exports_count = _dir_size_str(EXPORT_DIR)
+        sa_spins = state.get("slot_analysis", {}).get("total_spins", 0)
+
+        print("  [檔案管理]")
+        print(f"   [1] 刪除 slot_debug.log              ({debug_size})")
+        print(f"   [2] 刪除 exports/ 內所有檔案         ({exports_count} 檔, {exports_size})")
+        print(f"   [3] 刪除 gambling_history.json       ({history_size})")
+        print(f"   [4] 重置 slot_analysis.json          ({analysis_size}, {sa_spins} 筆)")
+        print(f"   [5] 一鍵清除以上全部")
+        print()
+        print("  [系統]")
+        print(f"   [6] 系統更新（git pull + 重啟）")
+        print()
+        print("  [0] 返回上一頁")
+        print()
+
+        choice = (await ainput("  選擇: ")).strip()
+
+        if choice == "0":
+            break
+        elif choice == "1":
+            confirm = (await ainput("  確認刪除 slot_debug.log？(y/N): ")).strip().lower()
+            if confirm == "y":
+                if _delete_file_safe("slot_debug.log"):
+                    print("  ✓ 已刪除")
+                else:
+                    print("  （檔案不存在）")
+                await ainput("  按 Enter 繼續...")
+        elif choice == "2":
+            confirm = (await ainput(
+                f"  確認刪除 exports/ 內 {exports_count} 個檔案？(y/N): "
+            )).strip().lower()
+            if confirm == "y":
+                d, f = _delete_dir_contents(EXPORT_DIR)
+                print(f"  ✓ 刪除 {d} 個檔案" + (f"，{f} 個失敗" if f else ""))
+                await ainput("  按 Enter 繼續...")
+        elif choice == "3":
+            confirm = (await ainput("  確認刪除 gambling_history.json？(y/N): ")).strip().lower()
+            if confirm == "y":
+                if _delete_file_safe(HISTORY_PATH):
+                    state["history"] = []
+                    print("  ✓ 已刪除（state.history 也清空）")
+                else:
+                    print("  （檔案不存在）")
+                await ainput("  按 Enter 繼續...")
+        elif choice == "4":
+            confirm = (await ainput(
+                f"  確認重置 slot_analysis.json？({sa_spins} 筆紀錄會清除) (y/N): "
+            )).strip().lower()
+            if confirm == "y":
+                state["slot_analysis"] = _make_slot_analysis()
+                _delete_file_safe(ANALYSIS_PATH)
+                print(f"  ✓ 已重置")
+                await ainput("  按 Enter 繼續...")
+        elif choice == "5":
+            confirm = (await ainput(
+                "  ⚠ 確認刪除以上所有檔案＋重置分析？(yes 全字輸入確認): "
+            )).strip().lower()
+            if confirm == "yes":
+                _delete_file_safe("slot_debug.log")
+                d, _ = _delete_dir_contents(EXPORT_DIR)
+                _delete_file_safe(HISTORY_PATH)
+                state["history"] = []
+                state["slot_analysis"] = _make_slot_analysis()
+                _delete_file_safe(ANALYSIS_PATH)
+                print(f"  ✓ 已清除全部（exports 刪 {d} 檔、debug log、history、分析資料）")
+                await ainput("  按 Enter 繼續...")
+        elif choice == "6":
+            confirm = (await ainput(
+                "  將執行 git pull origin main 並可能重啟。確定？(y/N): "
+            )).strip().lower()
+            if confirm == "y":
+                rebooted = await _do_system_update(state)
+                if rebooted:
+                    return    # 直接退出選單，main loop 會看到 quit=True 退出
+                await ainput("  按 Enter 繼續...")
 
 
 async def run_config_menu(state: dict, config_holder: list):
@@ -902,6 +1145,8 @@ async def run_config_menu(state: dict, config_holder: list):
         print(f"   [K] 對象 (名稱/UID): {tr_tg or '(未設定)'}")
         print(f"   [L] 金額:        {tr_amt:,}")
         print(f"   [M] 間距:        {tr_int} 分鐘")
+        print()
+        print("  [X] 進階（檔案管理 / 系統更新）")
         print()
         print("  [0] 儲存並返回")
         print()
@@ -1057,6 +1302,11 @@ async def run_config_menu(state: dict, config_holder: list):
                     print("  無效輸入（最少 1 分鐘）")
             except ValueError:
                 print("  無效輸入")
+        elif choice == "X":
+            await run_advanced_menu(state)
+            if state.get("quit"):
+                # 系統更新觸發了重啟 — 立刻退出設定選單
+                break
 
     config["gambling"]   = gcfg
     config["email"]      = ecfg
@@ -1162,7 +1412,8 @@ _AUX_EMOJIS = {':oi:', ':coin:', ':moneybag:', ':tada:', '🎉', '💰', '💵',
 
 SLOT_LINE_PATTERN = re.compile(
     r'(上排水平|中排水平|下排水平|左列垂直|中列垂直|右列垂直|對角線|反對角線)'
-    r'\s*:\s*'                                # 分隔符 ": "
+    r'\s*[/\\]?\s*'                           # 對角線方向標記 / 或 \（可選）
+    r':\s*'                                   # 分隔符 ":"
     rf'({_SYMBOL_RE_SRC})'                    # 符號（shortcode 或 Unicode）
     r'\s*[×xX]\s*(\d+)'                       # 次數 ×3
     r'\s*=\s*'
