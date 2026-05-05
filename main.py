@@ -1784,7 +1784,39 @@ async def navigate_to_channel(page: Page, guild_id: str, channel_id: str):
     url = f"https://discord.com/channels/{guild_id}/{channel_id}"
     log.info("導航至頻道: %s", url)
     await page.goto(url, wait_until="domcontentloaded")
-    await page.wait_for_selector('[data-slate-editor="true"]', timeout=30_000)
+    try:
+        await page.wait_for_selector('[data-slate-editor="true"]', timeout=30_000)
+    except Exception as e:
+        # 在這裡 timeout 通常是 storage_state 過期 → Discord 把我們導去 /login
+        # 給比較清楚的錯誤訊息，不要讓使用者看那一堆 playwright traceback
+        try:
+            current_url = page.url or ""
+        except Exception:
+            current_url = ""
+        if "/login" in current_url or "/register" in current_url:
+            msg = (
+                "Discord session 已過期（storage_state.json 失效）。"
+                "請執行 login.bat 重新登入後再啟動 run.bat。"
+            )
+        elif "discord.com/channels/" not in current_url:
+            msg = (
+                f"無法載入頻道頁，目前位置: {current_url}。"
+                "可能是 storage_state 過期、guild_id/channel_id 設定錯誤、"
+                "或網路連線問題。請檢查 config.json 的 ID 是否正確；"
+                "若仍然不行，執行 login.bat 重新登入。"
+            )
+        else:
+            msg = (
+                f"頻道頁載入超過 30 秒仍找不到輸入框。網路太慢？Discord 改 UI？"
+                f"目前位置: {current_url}"
+            )
+        log.error(msg)
+        # 提到 stdout 也顯示一次（cmd 視窗會看到）
+        print()
+        print("=" * 70)
+        print(f"[啟動失敗] {msg}")
+        print("=" * 70)
+        raise RuntimeError(msg) from e
     log.info("頻道已載入")
 
 
