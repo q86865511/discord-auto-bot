@@ -34,5 +34,10 @@ Thumbs.db
 playwright-report/
 test-results/
 
+# PyInstaller 打包輸出
+build/
+dist/
+*.spec.bak
+
 # 日誌（含 slot_debug.log — slot 解析失敗時會寫入）
 *.log

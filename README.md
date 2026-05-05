@@ -178,6 +178,8 @@ UI 上的快速鍵：
 ├── setup.bat                安裝環境（venv + 套件 + Chromium）
 ├── login.bat                執行登入
 ├── run.bat                  啟動 bot
+├── build.bat                打包成 dist/DiscordBot.exe
+├── build.spec               PyInstaller 設定檔
 ├── requirements.txt         Python 套件清單
 ├── config.example.json      設定檔範本
 ├── config.json              你的實際設定（已被 .gitignore，不會上傳）
@@ -187,6 +189,27 @@ UI 上的快速鍵：
 ├── bot.log                  Rotating logs（已被 .gitignore；最多 5MB×3 個檔輪替）
 └── exports/                 匯出的賭博紀錄與分析報告（已被 .gitignore）
 ```
+
+### 打包成 `.exe`（不需要 Python 也能跑）
+
+雙擊執行：
+
+```
+build.bat
+```
+
+會用 PyInstaller 把整個程式打包成 `dist\DiscordBot.exe`（約 30~50 MB 的單一檔案）。
+
+#### 部署到沒裝 Python 的電腦
+
+1. 把 `dist\DiscordBot.exe` 複製過去
+2. 放上 `config.json` 與 `storage_state.json`（與 .exe 同目錄）
+3. 雙擊 `DiscordBot.exe`：
+   - **第一次啟動會下載 Chromium（約 300 MB，需要網路、約 5-10 分鐘）**，存到使用者 `%LOCALAPPDATA%\ms-playwright`
+   - 下載完成後直接接著啟動 bot；之後每次啟動就直接開
+4. Windows Defender 可能誤判為病毒（PyInstaller 通病）— 第一次執行時請選「仍要執行」並加白名單
+
+> 為什麼不把 Chromium 一起塞進 .exe？太肥了（會變 400+ MB），冷啟動還要解壓縮 5-10 秒。動態下載一次就好。
 
 ### 日誌與除錯
 
