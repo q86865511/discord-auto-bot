@@ -801,7 +801,7 @@ def _build_state_snapshot(state: dict, config: dict) -> dict:
     n = sa.get("total_spins", 0)
     if n > 0:
         try:
-            from slot_analysis import compute_slot_stats, MIN_KELLY_SAMPLES
+            from bot.slot.analysis import compute_slot_stats, MIN_KELLY_SAMPLES
             stats = compute_slot_stats(sa)
             edge_pct = stats["edge"] * 100
             ev_str = (f'<span class="{"green" if edge_pct >= 0 else "red"}">'
@@ -866,7 +866,7 @@ def _build_analysis_snapshot(state: dict) -> dict:
     if n == 0:
         return {"has_data": False, "total_spins": 0}
 
-    from slot_analysis import (
+    from bot.slot.analysis import (
         compute_slot_stats, _format_symbol_display, _is_noise_symbol,
         PAYOUT_BUCKETS, HIGH_MULT_THRESHOLD, MIN_KELLY_SAMPLES,
     )
@@ -1018,7 +1018,6 @@ def _make_handler(state: dict, config_holder: list,
                     payload["email"].pop("password", None)
                 try:
                     _deep_merge(config_holder[0], payload)
-                    from slot_analysis import save_history  # noqa: F401 — keep cycle clean
                     # 用 main 注入的 save_config callback
                     from main import save_config as _save_config
                     _save_config(config_holder[0])

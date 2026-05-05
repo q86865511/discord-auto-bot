@@ -25,9 +25,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-# ── 模組拆分後的 import ────────────────────────────────────────────────────
+# ── 模組拆分後的 import（package: bot/）─────────────────────────────────────
 # slot embed 解析（regex / DOM 文字擷取）
-from slot_parser import (
+from bot.slot.parsers import (
     SLOT_WIN_PATTERN, SLOT_LOSS_PATTERN,
     SLOT_LINE_PATTERN, SLOT_RESULT_BLOCK, SLOT_FULL_BLOCK,
     _AUX_EMOJIS, _NON_SLOT_SHORTCODES,
@@ -37,7 +37,7 @@ from slot_parser import (
 )
 
 # Slot 分析資料模型 / 計算 / 持久化 / 顯示工具
-from slot_analysis import (
+from bot.slot.analysis import (
     MIN_KELLY_SAMPLES,
     PAYOUT_BUCKETS, HIGH_MULT_THRESHOLD, HIGH_MULT_KEEP,
     ANALYSIS_PATH, HISTORY_PATH, HISTORY_MAX_LEN,
@@ -2812,7 +2812,7 @@ async def main():
         dcfg = config_holder[0].get("dashboard", {})
         if dcfg.get("enabled", True):
             try:
-                from web_dashboard import start_dashboard_thread
+                from bot.web.dashboard import start_dashboard_thread
 
                 def _dashboard_action(action: str) -> dict:
                     """從 dashboard 控制台觸發的動作。回傳 {ok, message}。"""
@@ -2868,7 +2868,7 @@ async def main():
         # 關 dashboard server（在 worker tasks 取消後再做，避免 race）
         if dashboard_thread is not None:
             try:
-                from web_dashboard import stop_dashboard_thread
+                from bot.web.dashboard import stop_dashboard_thread
                 stop_dashboard_thread(dashboard_thread)
             except Exception:
                 pass

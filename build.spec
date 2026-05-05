@@ -28,6 +28,13 @@ a = Analysis(
         "smtplib",
         # Logging rotation file handler
         "logging.handlers",
+        # bot/ package — referenced via dynamic imports in main.py
+        "bot",
+        "bot.slot",
+        "bot.slot.parsers",
+        "bot.slot.analysis",
+        "bot.web",
+        "bot.web.dashboard",
     ],
     hookspath=[],
     hooksconfig={},

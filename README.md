@@ -173,7 +173,7 @@ UI 上的快速鍵：
 
 ```
 .
-├── main.py                  主程式（UI + 自動化迴圈）
+├── main.py                  主程式入口（UI + 自動化迴圈）
 ├── login.py                 第一次登入用
 ├── setup.bat                安裝環境（venv + 套件 + Chromium）
 ├── login.bat                執行登入
@@ -181,6 +181,12 @@ UI 上的快速鍵：
 ├── build.bat                打包成 dist/DiscordBot.exe
 ├── build.spec               PyInstaller 設定檔
 ├── requirements.txt         Python 套件清單
+├── bot/                     模組化 package
+│   ├── slot/                Slot 相關
+│   │   ├── parsers.py       embed regex / DOM 文字擷取
+│   │   └── analysis.py      累計 / 計算 / 持久化 / 符號顯示
+│   └── web/                 Web 相關
+│       └── dashboard.py     localhost / LAN 儀表板
 ├── config.example.json      設定檔範本
 ├── config.json              你的實際設定（已被 .gitignore，不會上傳）
 ├── storage_state.json       Discord session（已被 .gitignore，不會上傳）

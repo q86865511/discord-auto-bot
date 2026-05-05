@@ -7,7 +7,7 @@ Slot 分析資料模型 + 計算 + 持久化 + 符號顯示。
 - 顯示工具（_format_symbol_display、_is_noise_symbol）
 - 持久化（load/save_slot_analysis、load/save_history）
 
-依賴：`slot_parser._NON_SLOT_SHORTCODES`（migration 用）。
+依賴：`bot.slot.parsers._NON_SLOT_SHORTCODES`（migration 用）。
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import json
 import os
 import re
 
-from slot_parser import _NON_SLOT_SHORTCODES
+from bot.slot.parsers import _NON_SLOT_SHORTCODES
 
 
 __all__ = [
