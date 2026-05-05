@@ -27,6 +27,7 @@ __all__ = [
     "_CUSTOM_EMOJI_MARKER", "_SHORTCODE_NAME_RE", "_SHORTCODE_EMOJI_MAP",
     # functions
     "_make_slot_analysis", "_update_slot_analysis", "compute_slot_stats",
+    "compute_hourly_breakdown",
     "_format_symbol_display", "_is_noise_symbol",
     "load_slot_analysis", "save_slot_analysis",
     "load_history", "save_history",
@@ -221,6 +222,55 @@ def compute_slot_stats(sa: dict) -> dict:
         "payout_distribution": sa.get("payout_distribution", {}),
         "high_mults": sa.get("high_mults", []),
     }
+
+
+# ── 時段分析（hour-of-day breakdown）────────────────────────────────────
+def compute_hourly_breakdown(history: list[dict]) -> list[dict]:
+    """
+    把 history 依 hour-of-day（0~23）分組，算每小時的下注次數 / 勝率 / 平均淨變動 /
+    平均賠率（gross_win / bet）。回傳 list 長度 24，每筆有：
+      {hour, bets, wins, win_rate, total_change, avg_change, avg_multiplier}
+    沒下注的 hour 也會在，數字都 0。
+    """
+    from datetime import datetime
+    buckets: list[dict] = [
+        {"hour": h, "bets": 0, "wins": 0, "total_change": 0,
+         "total_wagered": 0, "total_gross_won": 0}
+        for h in range(24)
+    ]
+    for r in history:
+        ts_str = r.get("ts", "")
+        try:
+            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        h = dt.hour
+        if not (0 <= h <= 23):
+            continue
+        b = buckets[h]
+        bet = int(r.get("bet", 0) or 0)
+        change = int(r.get("change", 0) or 0)
+        b["bets"] += 1
+        if change > 0:
+            b["wins"] += 1
+        b["total_change"] += change
+        b["total_wagered"] += bet
+        b["total_gross_won"] += max(0, change + bet)
+
+    out = []
+    for b in buckets:
+        n = b["bets"]
+        out.append({
+            "hour":           b["hour"],
+            "bets":           n,
+            "wins":           b["wins"],
+            "win_rate":       (b["wins"] / n) if n else 0.0,
+            "total_change":   b["total_change"],
+            "avg_change":     (b["total_change"] / n) if n else 0.0,
+            "avg_multiplier": (b["total_gross_won"] / b["total_wagered"])
+                              if b["total_wagered"] > 0 else 0.0,
+        })
+    return out
 
 
 # ── 顯示工具 ──────────────────────────────────────────────────────────────

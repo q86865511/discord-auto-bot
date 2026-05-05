@@ -44,6 +44,7 @@ from bot.slot.analysis import (
     _SYMBOL_DISPLAY_THRESHOLD,
     _SHORTCODE_EMOJI_MAP,
     _make_slot_analysis, _update_slot_analysis, compute_slot_stats,
+    compute_hourly_breakdown,
     _format_symbol_display, _is_noise_symbol,
     load_slot_analysis, save_slot_analysis,
     load_history, save_history,
@@ -111,11 +112,19 @@ def make_state() -> dict:
         "history":      [],   # 每筆 {ts, bet, before, after, change, result}
         "goal_reached": False,
         "loss_triggered": False,    # 停損是否已觸發（避免一直 spam 通知）
+        # Streak 追蹤：current 正數 = 連勝、負數 = 連敗、0 = 沒紀錄；
+        # max_win/max_loss 紀錄歷史最高（不會重置）；cooldown_until_ts 是連敗
+        # 觸發冷靜時段時設定的解封時間
+        "current_streak": 0,
+        "max_win_streak": 0,
+        "max_loss_streak": 0,
+        "cooldown_until_ts": None,
         "neko_status": "unknown",     # dispatching / not_dispatching / unknown
         "neko_deadline_ts": None,     # 派遣完成時間戳；用來本地倒數，避免一直 /check
         "neko_last_check_ts": None,
         "neko_check_ts":     None,  # 上次 /check 讀到剩餘時間的 epoch；用於 UI 即時倒數
         "dead_notified":    False,  # 「bot 停擺」email 是否已寄出，避免重複通知
+        "recover_fail_streak": 0,   # recover_page 連續失敗次數；累積到門檻就觸發 browser 重啟
         "session_start_ts": time.time(),
         # 事件累計（給每日摘要用；reset 在每次寄出後）
         "events": {
@@ -514,6 +523,49 @@ def _show_slot_analysis(state: dict):
                        f"{info['total_payout']:,}")
         console.print(lt)
 
+    # 時段分析（依 hour-of-day 從 history 算）
+    history = state.get("history") or []
+    if history:
+        hourly = compute_hourly_breakdown(history)
+        active = [h for h in hourly if h["bets"] > 0]
+        if active:
+            console.print()
+            console.rule("[bold]🕐 時段分析（每小時）[/]")
+            ht = Table(show_header=True, header_style="bold cyan")
+            ht.add_column("時段", justify="right")
+            ht.add_column("下注次數", justify="right")
+            ht.add_column("勝率", justify="right")
+            ht.add_column("平均賠率", justify="right")
+            ht.add_column("總淨收", justify="right")
+            ht.add_column("平均淨收", justify="right")
+
+            # 找最賺 / 最虧 的時段，標色
+            best_change = max((h["total_change"] for h in active), default=0)
+            worst_change = min((h["total_change"] for h in active), default=0)
+
+            for h in sorted(active, key=lambda r: r["hour"]):
+                tc = h["total_change"]
+                tc_color = "green" if tc > 0 else ("red" if tc < 0 else "dim")
+                # 標出冠軍
+                hr_str = f"{h['hour']:02d}:00"
+                if h["bets"] >= 10 and tc == best_change and tc > 0:
+                    hr_str = f"[bold green]🏆 {hr_str}[/bold green]"
+                elif h["bets"] >= 10 and tc == worst_change and tc < 0:
+                    hr_str = f"[bold red]💀 {hr_str}[/bold red]"
+
+                ht.add_row(
+                    hr_str,
+                    f"{h['bets']:,}",
+                    f"{h['win_rate']:.1%}",
+                    f"{h['avg_multiplier']:.3f}x",
+                    f"[{tc_color}]{tc:+,}[/{tc_color}]",
+                    f"{h['avg_change']:+,.0f}",
+                )
+            console.print(ht)
+            console.print(
+                "  [dim]🏆/💀 標出 ≥10 把的時段裡最賺 / 最虧的（冷門時段不算）[/dim]"
+            )
+
     # 紀錄摘要
     _show_history_summary(state)
 
@@ -609,6 +661,9 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     gcfg.setdefault("loss_floor",      DEFAULT_LOSS_FLOOR)
     gcfg.setdefault("loss_action",     DEFAULT_LOSS_ACTION)
     gcfg.setdefault("loss_step",       DEFAULT_LOSS_STEP)
+    # 連敗冷靜：連敗 N 場後自動暫停 M 分鐘；0 = 不啟用
+    gcfg.setdefault("loss_streak_pause",        0)   # N 場連敗觸發
+    gcfg.setdefault("loss_streak_cooldown_min", 5)   # 觸發後冷靜 M 分鐘
     gcfg.setdefault("bigwin_multiplier", DEFAULT_BIGWIN_MULTIPLIER)
     if "max_bet" not in gcfg:
         excess = max(0, (balance or 0) - gcfg["threshold"])
@@ -633,6 +688,7 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     ncfg = config.setdefault("nekomusume", {})
     ncfg.setdefault("enabled",          True)
     ncfg.setdefault("check_interval_min", DEFAULT_NEKOMUSUME_INTERVAL_MIN)
+    ncfg.setdefault("auto_claim",        False)   # 偵測完成後自動 /nekomusume status + 點「領取並再派遣」
 
     tcfg = config.setdefault("transfer", {})
     tcfg.setdefault("enabled",      False)
@@ -825,6 +881,26 @@ def build_layout(state: dict, config: dict) -> Layout:
     t1.add_row("✅ 獲勝",      f"[green]{state['wins']}[/green]")
     t1.add_row("❌ 失敗",      f"[red]{state['losses']}[/red]")
     t1.add_row("📊 勝率",      f"{win_rate:.1f}%")
+    # Streak：current >0 連勝；<0 連敗；=0 無紀錄
+    cs = state.get("current_streak", 0)
+    if cs > 0:
+        streak_str = f"[green]🔥 {cs} 連勝[/green]   max: {state.get('max_win_streak', 0)} / {state.get('max_loss_streak', 0)}"
+    elif cs < 0:
+        streak_str = f"[red]💀 {abs(cs)} 連敗[/red]   max: {state.get('max_win_streak', 0)} / {state.get('max_loss_streak', 0)}"
+    else:
+        streak_str = f"[dim]─[/dim]   max: {state.get('max_win_streak', 0)} / {state.get('max_loss_streak', 0)}"
+    t1.add_row("🔥 Streak",   streak_str)
+
+    # Profit per hour（用 session_start_ts 算）
+    sess_start = state.get("session_start_ts")
+    pp_str = "─"
+    if sess_start:
+        hrs = max(1/60, (time.time() - sess_start) / 3600)
+        pph = state.get("net_change", 0) / hrs
+        pp_color = "green" if pph >= 0 else "red"
+        pp_str = f"[{pp_color}]{pph:+,.0f}[/{pp_color}] / 小時  ({hrs:.1f}h)"
+    t1.add_row("⏱ 時薪",       pp_str)
+
     t1.add_row("💵 賭博淨收",  net_str)
 
     sa = state.get("slot_analysis", {})
@@ -1719,6 +1795,43 @@ async def do_transfer(page: Page, target: str, amount: int) -> bool:
         return await _click_confirm_transfer(page, timeout=15.0)
 
 
+async def _click_button_with_text(page: Page, text: str, timeout: float = 15.0) -> bool:
+    """通用：等待並點擊含特定文字的按鈕。"""
+    log = logging.getLogger(__name__)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            btn = page.locator(f'button:has-text("{text}")').last
+            if await btn.count() > 0 and await btn.is_visible():
+                await btn.click(timeout=3000)
+                log.info("已點擊「%s」按鈕", text)
+                return True
+        except Exception as e:
+            log.debug("等待「%s」按鈕中: %s", text, e)
+        await asyncio.sleep(0.5)
+    log.warning("等待「%s」按鈕超時 (%.0fs)", text, timeout)
+    return False
+
+
+async def auto_claim_and_redispatch_neko(page: Page) -> bool:
+    """
+    /nekomusume status → 等待 ephemeral embed → 點「領取並再派遣」按鈕。
+    成功 → 領了戰利品 + 自動再派遣一次；不需要再寫 /nekomusume claim。
+    呼叫端必須先取得 command_lock。
+    """
+    log = logging.getLogger(__name__)
+    log.info("貓娘自動領取 + 再派遣 — 送 /nekomusume status")
+    # /nekomusume 是有 sub-command 的指令 — 把整串「/nekomusume status」當 command 一起打，
+    # autocomplete 會 highlight 對應 sub-command；Tab 確認 + Enter 送出
+    await _send_slash_command(page, "/nekomusume status", param="")
+    # /nekomusume status 是 ephemeral，要等一下 embed 渲染
+    await asyncio.sleep(2.5)
+    ok = await _click_button_with_text(page, "領取並再派遣", timeout=15.0)
+    if not ok:
+        log.warning("找不到「領取並再派遣」按鈕 — 可能還在派遣中、或 button 文字變了")
+    return ok
+
+
 async def send_and_capture_balance(
     page: Page, command: str, param: str = "", timeout: float = 30.0,
     stability_sec: float = 2.0,
@@ -1884,10 +1997,17 @@ async def navigate_to_channel(page: Page, guild_id: str, channel_id: str):
     log.info("頻道已載入")
 
 
+RECOVER_PAGE_FAILS_BEFORE_BROWSER_RESTART = 3   # recover_page 連續失敗 N 次就觸發整個 browser 重啟
+
+
 async def recover_page(page: Page, state: dict) -> bool:
     """
     page state 變糟（連續多次 timeout）時重新載入頻道。
     回傳是否復原成功。整段在 command_lock 內，避免和其他 loop 撞。
+
+    若 recover_page 自己連續失敗 N 次（page reload 都救不回來），
+    觸發整個 browser 重啟（透過 reboot exit code 由 run.bat 重 launch）—
+    比直接在 asyncio 裡換 browser 安全（避免 page reference 散落各處）。
     """
     log = logging.getLogger(__name__)
     guild_id = state.get("guild_id")
@@ -1900,10 +2020,36 @@ async def recover_page(page: Page, state: dict) -> bool:
             await navigate_to_channel(page, guild_id, channel_id)
             await asyncio.sleep(3)
             log.info("頻道復原完成")
+            state["recover_fail_streak"] = 0   # 成功 → reset
             return True
         except Exception as e:
             log.error("頻道復原失敗: %s", e)
+            state["recover_fail_streak"] = state.get("recover_fail_streak", 0) + 1
+            if state["recover_fail_streak"] >= RECOVER_PAGE_FAILS_BEFORE_BROWSER_RESTART:
+                log.error(
+                    "recover_page 連續 %d 次失敗 → 觸發整個 browser 重啟 (reboot)",
+                    state["recover_fail_streak"],
+                )
+                _log(state, f"⚠ 連續 {state['recover_fail_streak']} 次 recover 失敗，請求重啟 browser")
+                # 寄通知（如 email 啟用）
+                ecfg = config_holder_ref[0].get("email", {}) if config_holder_ref else {}
+                if ecfg.get("enabled") and ecfg.get("notify_dead", True):
+                    try:
+                        await send_email(
+                            ecfg, "[Discord Bot] ⚠️ Browser 重啟觸發",
+                            f"連續 {state['recover_fail_streak']} 次無法 recover_page，"
+                            "已請求 reboot；run.bat 應該會自動重新啟動 bot。",
+                        )
+                    except Exception:
+                        pass
+                state["reboot"] = True
+                state["quit"] = True
             return False
+
+
+# 全域 config_holder reference — recover_page 會在沒拿到 config_holder 引數時拿來用
+# 在 main() 開始時設成當前的 holder list；不是非常乾淨但避免改 recover_page 的 signature
+config_holder_ref: list | None = None
 
 
 # ── 排程迴圈 ──────────────────────────────────────────────────────────────────
@@ -2113,22 +2259,39 @@ async def nekomusume_loop(page: Page, state: dict, config_holder: list):
 
     async def _notify_completion():
         state["events"]["neko_completes"] += 1
+        ncfg = config_holder[0].get("nekomusume", {})
         user_id = str(config_holder[0].get("gambling", {})
                       .get("notify_user_id", DEFAULT_NOTIFY_USER_ID))
+
+        # 自動領取並再派遣（如啟用）
+        auto_claimed = False
+        if ncfg.get("auto_claim", False):
+            try:
+                async with command_lock:
+                    auto_claimed = await auto_claim_and_redispatch_neko(page)
+                if auto_claimed:
+                    state["events"]["neko_completes"] += 0   # 已計過，不重複
+                    log.info("貓娘已自動領取並再派遣")
+                    _log(state, "🐱 貓娘已自動領取並再派遣")
+            except Exception as e:
+                log.warning("自動領取失敗: %s", e)
+                _log(state, f"⚠ 貓娘自動領取失敗: {e}")
+
+        # 通知訊息：成功自動領取 vs 需要手動
         try:
-            await send_message(
-                page,
-                f"<@{user_id}> 貓娘派遣已完成！記得 `/nekomusume claim` 領取戰利品",
-            )
+            if auto_claimed:
+                msg = f"<@{user_id}> 貓娘派遣已完成 — 已自動領取並再派遣 🎉"
+            else:
+                msg = f"<@{user_id}> 貓娘派遣已完成！記得 `/nekomusume claim` 領取戰利品"
+            await send_message(page, msg)
             log.info("已送出貓娘完成通知")
         except Exception as e:
             log.warning("貓娘完成通知失敗: %s", e)
         ecfg = config_holder[0].get("email", {})
         if ecfg.get("enabled") and ecfg.get("notify_neko", True):
-            await send_email(
-                ecfg, "[Discord Bot] 貓娘派遣已完成",
-                "貓娘派遣已完成，請至 Discord 用 /nekomusume claim 領取。",
-            )
+            body = ("貓娘派遣已完成，已自動領取並再派遣 🎉" if auto_claimed
+                    else "貓娘派遣已完成，請至 Discord 用 /nekomusume claim 領取。")
+            await send_email(ecfg, "[Discord Bot] 貓娘派遣已完成", body)
 
     while not state["quit"]:
         await _wait_while_paused(state)
@@ -2601,6 +2764,18 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                         fail_count = 0   # 防 reload 風暴；dead_notified 仍保留
             continue
 
+        # 連敗冷靜中 → 等到 cooldown_until_ts 之後才繼續
+        cd_until = state.get("cooldown_until_ts")
+        if cd_until is not None:
+            remain = cd_until - time.time()
+            if remain > 0:
+                await interruptible_sleep(state, min(remain, 30))
+                continue
+            else:
+                state["cooldown_until_ts"] = None
+                state["current_streak"] = 0   # 冷靜結束 → reset streak（避免立刻又觸發）
+                _log(state, "😌 冷靜結束，繼續下注")
+
         # 停損檢查：觸發後可能停用 gambling 或下移門檻；下次 loop 再讀新狀態
         if await _maybe_handle_stop_loss(state, config_holder):
             await interruptible_sleep(state, 30)
@@ -2643,8 +2818,38 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
             state["total_bets"] += 1
             if change > 0:
                 state["wins"] += 1
+                # streak 更新：連勝 +1（如果之前在連敗就重置）
+                state["current_streak"] = (
+                    state["current_streak"] + 1
+                    if state["current_streak"] > 0 else 1
+                )
+                state["max_win_streak"] = max(
+                    state["max_win_streak"], state["current_streak"]
+                )
             else:
                 state["losses"] += 1
+                # streak 更新：連敗 -1（如果之前在連勝就重置）
+                state["current_streak"] = (
+                    state["current_streak"] - 1
+                    if state["current_streak"] < 0 else -1
+                )
+                state["max_loss_streak"] = max(
+                    state["max_loss_streak"], abs(state["current_streak"])
+                )
+                # 連敗冷靜檢查
+                pause_n = int(gcfg.get("loss_streak_pause", 0) or 0)
+                if pause_n > 0 and abs(state["current_streak"]) >= pause_n:
+                    cooldown_min = float(
+                        gcfg.get("loss_streak_cooldown_min", 5) or 0
+                    )
+                    if cooldown_min > 0:
+                        until = time.time() + cooldown_min * 60
+                        state["cooldown_until_ts"] = until
+                        log.warning(
+                            "連敗 %d 場 ≥ %d，暫停下注 %.1f 分鐘",
+                            abs(state["current_streak"]), pause_n, cooldown_min,
+                        )
+                        _log(state, f"😤 連敗 {abs(state['current_streak'])} 場 → 冷靜 {cooldown_min:.0f} 分鐘")
             state["balance"] = new_balance
             _reset_fail_state()
             log.info("結果: %s%d | 餘額: %d | 勝/敗: %d/%d",
@@ -2945,6 +3150,8 @@ async def main():
         log_level=initial_cfg.get("log_level", "INFO"),
     )
     config_holder = [initial_cfg]
+    global config_holder_ref
+    config_holder_ref = config_holder    # 給 recover_page 寄信用
     start_kb_listener(state)
 
     config     = config_holder[0]
