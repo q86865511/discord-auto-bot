@@ -883,15 +883,17 @@ def build_layout(state: dict, config: dict) -> Layout:
     t1.add_row("✅ 獲勝",      f"[green]{state['wins']}[/green]")
     t1.add_row("❌ 失敗",      f"[red]{state['losses']}[/red]")
     t1.add_row("📊 勝率",      f"{win_rate:.1f}%")
-    # Streak：current >0 連勝；<0 連敗；=0 無紀錄
+    # 連勝/連敗紀錄：current >0 連勝；<0 連敗；=0 無紀錄
     cs = state.get("current_streak", 0)
+    max_w = state.get('max_win_streak', 0)
+    max_l = state.get('max_loss_streak', 0)
     if cs > 0:
-        streak_str = f"[green]🔥 {cs} 連勝[/green]   max: {state.get('max_win_streak', 0)} / {state.get('max_loss_streak', 0)}"
+        streak_str = f"[green]{cs} 連勝[/green]  (歷史最高 {max_w}勝/{max_l}敗)"
     elif cs < 0:
-        streak_str = f"[red]💀 {abs(cs)} 連敗[/red]   max: {state.get('max_win_streak', 0)} / {state.get('max_loss_streak', 0)}"
+        streak_str = f"[red]{abs(cs)} 連敗[/red]  (歷史最高 {max_w}勝/{max_l}敗)"
     else:
-        streak_str = f"[dim]─[/dim]   max: {state.get('max_win_streak', 0)} / {state.get('max_loss_streak', 0)}"
-    t1.add_row("🔥 Streak",   streak_str)
+        streak_str = f"[dim]─[/dim]  (歷史最高 {max_w}勝/{max_l}敗)"
+    t1.add_row("🔥 連勝紀錄",   streak_str)
 
     # Profit per hour（用 session_start_ts 算）
     sess_start = state.get("session_start_ts")
@@ -901,7 +903,7 @@ def build_layout(state: dict, config: dict) -> Layout:
         pph = state.get("net_change", 0) / hrs
         pp_color = "green" if pph >= 0 else "red"
         pp_str = f"[{pp_color}]{pph:+,.0f}[/{pp_color}] / 小時  ({hrs:.1f}h)"
-    t1.add_row("⏱ 時薪",       pp_str)
+    t1.add_row("💴 平均時薪",   pp_str)
 
     t1.add_row("💵 賭博淨收",  net_str)
 
@@ -984,15 +986,20 @@ def build_layout(state: dict, config: dict) -> Layout:
         transfer_str = "[dim]停用[/dim]"
     t2.add_row("💸 自動轉帳",  transfer_str)
 
-    # Dashboard URL — 同 LAN 手機可以直接開
+    # Dashboard URLs — 同 LAN 手機可以直接開
     dcfg = config.get("dashboard", {})
     if dcfg.get("enabled", True):
-        lan_url = _dashboard_lan_url(config)
-        # Rich Table 的 cell 太窄會被截掉；URL 不太會超過 30 chars
-        dash_str = f"[cyan]{lan_url}[/cyan]"
+        lan_url = _dashboard_lan_url(config).rstrip("/")
+        dash_str    = f"[cyan]{lan_url}/[/cyan]"
+        qr_str      = f"[cyan]{lan_url}/qr[/cyan]"
+        logs_str    = f"[cyan]{lan_url}/logs[/cyan]"
+        control_str = f"[cyan]{lan_url}/control[/cyan]"
     else:
-        dash_str = "[dim]停用[/dim]"
-    t2.add_row("🌐 Dashboard", dash_str)
+        dash_str = qr_str = logs_str = control_str = "[dim]停用[/dim]"
+    t2.add_row("🌐 Dashboard",    dash_str)
+    t2.add_row("📱 手機 QR",      qr_str)
+    t2.add_row("📋 日誌頁面",     logs_str)
+    t2.add_row("🛠️ 控制台",       control_str)
 
     cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改系統設定[/dim]",
                       border_style="green")
@@ -3149,17 +3156,18 @@ def _is_placeholder_or_missing(value: str | None, placeholder_keywords=()) -> bo
 
 
 def _config_needs_setup(cfg: dict) -> list[str]:
-    """檢查 config 哪些欄位還沒填好；回傳待補欄位清單。"""
+    """檢查 config 哪些欄位還沒填好；回傳待補欄位清單。
+    判斷標準：欄位空、或還是「YOUR_xxx_HERE」這類佔位符。
+    純數字（即使剛好等於 DEFAULT_NOTIFY_USER_ID）視為已設定，不再追問。
+    """
     missing = []
     if _is_placeholder_or_missing(cfg.get("guild_id"), ["YOUR_", "HERE"]):
         missing.append("guild_id")
     if _is_placeholder_or_missing(cfg.get("channel_id"), ["YOUR_", "HERE"]):
         missing.append("channel_id")
     g = cfg.get("gambling", {}) or {}
-    if _is_placeholder_or_missing(
-        g.get("notify_user_id"),
-        ["YOUR_", "HERE", DEFAULT_NOTIFY_USER_ID],   # 預設值也算「沒設」
-    ):
+    uid = g.get("notify_user_id")
+    if _is_placeholder_or_missing(uid, ["YOUR_", "HERE"]):
         missing.append("notify_user_id")
     return missing
 
@@ -3215,8 +3223,7 @@ def _ensure_config_via_wizard():
     if "notify_user_id" in missing:
         g = cfg.setdefault("gambling", {})
         cur = g.get("notify_user_id", "")
-        cur_disp = ("未設定" if not cur or "YOUR_" in str(cur)
-                    or cur == DEFAULT_NOTIFY_USER_ID else cur)
+        cur_disp = "未設定" if not cur or "YOUR_" in str(cur) else cur
         print(f"\n  【通知對象 User ID】(目前: {cur_disp})")
         print("    → 達成目標 / 貓娘完成時要 @ 的對象（通常填自己）")
         print("    → 對使用者右鍵 → 複製使用者 ID")

@@ -39,10 +39,10 @@ from typing import Any, Callable
 def _html_shell(title: str, body_html: str, active: str = "overview") -> str:
     nav_items = [
         ("overview", "/",         "📊 概覽"),
-        ("analysis", "/analysis", "🎯 Slot 分析"),
+        ("analysis", "/analysis", "🎯 拉霸分析"),
         ("control",  "/control",  "🛠️ 控制台"),
-        ("logs",     "/logs",     "📋 Logs"),
-        ("qr",       "/qr",       "📱 QR"),
+        ("logs",     "/logs",     "📋 即時日誌"),
+        ("qr",       "/qr",       "📱 手機 QR"),
     ]
     nav_html = "".join(
         f'<a href="{href}" class="nav-link{" active" if key == active else ""}">{label}</a>'
@@ -229,6 +229,8 @@ _OVERVIEW_BODY = """
     <div class="row"><span class="label">總下注</span><span class="value" id="total_bets">─</span></div>
     <div class="row"><span class="label">勝 / 敗</span><span class="value" id="wins_losses">─</span></div>
     <div class="row"><span class="label">勝率</span><span class="value" id="win_rate">─</span></div>
+    <div class="row"><span class="label">連勝紀錄</span><span class="value" id="streak">─</span></div>
+    <div class="row"><span class="label">平均時薪</span><span class="value" id="profit_per_hour">─</span></div>
     <div class="row"><span class="label">EV (期望值)</span><span class="value" id="ev">─</span></div>
     <div class="row"><span class="label">Kelly f*</span><span class="value" id="kelly">─</span></div>
   </div>
@@ -405,6 +407,8 @@ async function refresh() {
       `<span class="green">${d.wins}</span> / <span class="red">${d.losses}</span>`;
     document.getElementById('win_rate').textContent =
       (d.total_bets > 0 ? (d.wins / d.total_bets * 100).toFixed(1) : '0.0') + '%';
+    document.getElementById('streak').innerHTML = d.streak_str || '─';
+    document.getElementById('profit_per_hour').innerHTML = d.pph_str || '─';
     document.getElementById('ev').innerHTML = d.ev_str || '─';
     document.getElementById('kelly').textContent = d.kelly_str || '─';
     document.getElementById('hourly_next').textContent = fmtRemaining(d.hourly_next);
@@ -982,6 +986,31 @@ def _build_state_snapshot(state: dict, config: dict) -> dict:
     history_last_15 = history[-15:]
     history_recent = [{"change": r.get("change", 0)} for r in history[-100:]]
 
+    # 連勝/連敗 字串
+    cs = state.get("current_streak", 0)
+    max_w = state.get("max_win_streak", 0)
+    max_l = state.get("max_loss_streak", 0)
+    if cs > 0:
+        streak_str = (f'<span class="green">🔥 {cs} 連勝</span>'
+                      f' <span class="dim">(最高 {max_w}勝/{max_l}敗)</span>')
+    elif cs < 0:
+        streak_str = (f'<span class="red">💀 {abs(cs)} 連敗</span>'
+                      f' <span class="dim">(最高 {max_w}勝/{max_l}敗)</span>')
+    else:
+        streak_str = (f'<span class="dim">─</span>'
+                      f' <span class="dim">(最高 {max_w}勝/{max_l}敗)</span>')
+
+    # 平均時薪
+    sess_start = state.get("session_start_ts")
+    pph_str = "─"
+    if sess_start:
+        hrs = max(1/60, (time.time() - sess_start) / 3600)
+        pph = state.get("net_change", 0) / hrs
+        cls = "green" if pph >= 0 else "red"
+        sign = "+" if pph >= 0 else ""
+        pph_str = (f'<span class="{cls}">{sign}{int(pph):,}</span>'
+                   f' / 小時 <span class="dim">({hrs:.1f}h)</span>')
+
     return {
         "ts":            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "status":        state.get("status", "─"),
@@ -997,6 +1026,8 @@ def _build_state_snapshot(state: dict, config: dict) -> dict:
         "loss_str":      loss_str,
         "ev_str":        ev_str,
         "kelly_str":     kelly_str,
+        "streak_str":    streak_str,
+        "pph_str":       pph_str,
         "hourly_next":   state.get("hourly_next"),
         "daily_next":    state.get("daily_next"),
         "neko_str":      neko_str,
