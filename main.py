@@ -25,6 +25,29 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+# ── 模組拆分後的 import ────────────────────────────────────────────────────
+# slot embed 解析（regex / DOM 文字擷取）
+from slot_parser import (
+    SLOT_WIN_PATTERN, SLOT_LOSS_PATTERN,
+    SLOT_LINE_PATTERN, SLOT_RESULT_BLOCK, SLOT_FULL_BLOCK,
+    _AUX_EMOJIS, _NON_SLOT_SHORTCODES,
+    _parse_balance_int, _parse_slot_change,
+    _parse_slot_lines, _parse_slot_grid,
+    _get_page_text, _debug_dump_slot_text,
+)
+
+# Slot 分析資料模型 / 計算 / 持久化 / 顯示工具
+from slot_analysis import (
+    MIN_KELLY_SAMPLES,
+    PAYOUT_BUCKETS, HIGH_MULT_THRESHOLD, HIGH_MULT_KEEP,
+    ANALYSIS_PATH, HISTORY_PATH, HISTORY_MAX_LEN,
+    _SHORTCODE_EMOJI_MAP,
+    _make_slot_analysis, _update_slot_analysis, compute_slot_stats,
+    _format_symbol_display, _is_noise_symbol,
+    load_slot_analysis, save_slot_analysis,
+    load_history, save_history,
+)
+
 # ── 常數 ──────────────────────────────────────────────────────────────────────
 CONFIG_PATH = "config.json"
 STORAGE_STATE_PATH = "storage_state.json"
@@ -56,10 +79,6 @@ DEFAULT_NEKOMUSUME_INTERVAL_MIN = 30   # /check 監控間距
 DEFAULT_BIGWIN_MULTIPLIER = 5.0  # 中大獎賠率門檻（總計贏得 / 下注）
 DEFAULT_DEAD_THRESHOLD    = 2    # 連續讀取餘額失敗幾次算「bot 停擺」
 REBOOT_EXIT_CODE = 42     # main 退出時用這個碼通知 run.bat 重新啟動
-ANALYSIS_PATH     = "slot_analysis.json"
-HISTORY_PATH      = "gambling_history.json"
-MIN_KELLY_SAMPLES = 50    # Kelly 策略需要的最少轉數才生效
-HISTORY_MAX_LEN   = 5000  # 最近 N 筆紀錄（避免檔案無限長大）
 
 # 自動轉帳預設值
 DEFAULT_TRANSFER_INTERVAL_MIN = 60   # 預設每 60 分鐘轉一次
@@ -69,31 +88,6 @@ DEFAULT_DIGEST_HOUR = 0
 
 command_lock = asyncio.Lock()
 console = Console()
-
-
-# 賠率分布的 bucket key 順序（同步用於 _update_slot_analysis 與顯示）
-PAYOUT_BUCKETS = ["0", "0~2", "2~5", "5~8", "8~10", "10~20", "以上"]
-HIGH_MULT_THRESHOLD = 20.0    # 賠率 >= 此值就計入 high_mults（並落在「以上」桶）
-HIGH_MULT_KEEP      = 50      # 最多保留多少筆 high_mults（避免無限長大）
-
-
-# ── 共享狀態 ──────────────────────────────────────────────────────────────────
-def _make_slot_analysis() -> dict:
-    return {
-        "total_spins": 0,
-        "total_wins": 0,
-        "total_losses": 0,
-        "total_wagered": 0,
-        "total_gross_won": 0,
-        "sum_return_ratio": 0.0,
-        "sum_return_ratio_sq": 0.0,
-        "symbol_stats": {},
-        "line_stats": {},
-        "grid_symbol_freq": {},
-        "grid_total_cells": 0,
-        "payout_distribution": {k: 0 for k in PAYOUT_BUCKETS},
-        "high_mults": [],   # >=HIGH_MULT_THRESHOLD 的 return ratio（最多保留 HIGH_MULT_KEEP 筆）
-    }
 
 
 def make_state() -> dict:
@@ -284,67 +278,7 @@ def export_history_chart(state: dict) -> str | None:
     return path
 
 
-# 顯示閾值：低於這個格子機率且沒中過獎的符號 → 隱藏（視為解析雜訊）
-_SYMBOL_DISPLAY_THRESHOLD = 0.001   # 0.1%
-
-# 自訂 emoji 沒對應到時用的 fallback marker
-_CUSTOM_EMOJI_MARKER = "🟦"
-_SHORTCODE_NAME_RE = re.compile(r'^:([a-z0-9_]+):$')
-
-# Slot 常見符號 shortcode → 視覺化的 Unicode emoji。
-# 找不到對應時用 _CUSTOM_EMOJI_MARKER 當 fallback。
-_SHORTCODE_EMOJI_MAP: dict[str, str] = {
-    # 水果
-    "cherry":     "🍒",
-    "grapes":     "🍇",
-    "lemon":      "🍋",
-    "watermelon": "🍉",
-    "apple":      "🍎",
-    "orange":     "🍊",
-    "banana":     "🍌",
-    "strawberry": "🍓",
-    "peach":      "🍑",
-    "pineapple":  "🍍",
-    # 經典 slot 符號
-    "bell":       "🔔",
-    "diamond":    "💎",
-    "clover":     "🍀",
-    "seven":      "7️⃣",
-    "star":       "⭐",
-    "fire":       "🔥",
-    "crown":      "👑",
-    "gem":        "💠",
-    "rocket":     "🚀",
-    "money":      "💰",
-    "moneybag":   "💰",
-    "coin":       "🪙",
-    "heart":      "❤️",
-    "horseshoe":  "🧲",
-    "rainbow":    "🌈",
-    "lucky":      "🎰",
-    "slot":       "🎰",
-    # 該伺服器有時出現的（從 grid 看不出含義）— 用 fallback marker，不刻意對應
-}
-
-
-def _format_symbol_display(sym: str) -> str:
-    """
-    顯示用：把 Discord 自訂 shortcode 轉成「emoji name」格式
-    （去掉冒號、加上對應的 emoji；找不到對應就用 🟦 當 fallback）。
-    Unicode emoji（🍒 等）原樣回傳。
-    底層儲存仍維持 :name: 格式，避免和標準 emoji 衝突。
-    """
-    m = _SHORTCODE_NAME_RE.match(sym)
-    if not m:
-        return sym
-    name = m.group(1)
-    icon = _SHORTCODE_EMOJI_MAP.get(name, _CUSTOM_EMOJI_MARKER)
-    return f"{icon} {name}"
-
-
-def _is_noise_symbol(sym: str, win_count: int, grid_prob: float) -> bool:
-    """符號被視為雜訊（隱藏）：沒中過獎 且 格子機率低於閾值。"""
-    return win_count == 0 and grid_prob < _SYMBOL_DISPLAY_THRESHOLD
+# （符號顯示工具搬到 slot_analysis 模組；本檔頂端已 from slot_analysis import）
 
 
 def export_slot_analysis(state: dict) -> str | None:
@@ -647,76 +581,8 @@ def load_config() -> dict:
         return json.load(f)
 
 
-def load_slot_analysis() -> dict | None:
-    if not os.path.exists(ANALYSIS_PATH):
-        return None
-    try:
-        with open(ANALYSIS_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return None
-
-    # 遷移：若 payout_distribution 是舊版 bucket 結構，重置為新版
-    # （舊版逐筆 return ratio 沒留下，無法精確映射，只好歸零；
-    #  其他統計欄位完整保留）
-    pd = data.get("payout_distribution", {})
-    if not all(k in pd for k in PAYOUT_BUCKETS):
-        data["payout_distribution"] = {k: 0 for k in PAYOUT_BUCKETS}
-
-    # 遷移：補上新增的 high_mults 欄位
-    data.setdefault("high_mults", [])
-
-    # 遷移：清掉貨幣 emoji（:fh: 油票、:ti: 小魚干、:oi: 油幣 …）
-    # 這些是 /balance 文字裡的 emoji，被 grid 解析誤算進去；移除並對應扣回
-    # grid_total_cells，讓真實符號的格子機率回到正確值
-    gsf = data.get("grid_symbol_freq", {})
-    removed_total = 0
-    for non_slot in _NON_SLOT_SHORTCODES:
-        c = gsf.pop(non_slot, 0)
-        if isinstance(c, int) and c > 0:
-            removed_total += c
-    if removed_total > 0:
-        data["grid_total_cells"] = max(
-            0, data.get("grid_total_cells", 0) - removed_total
-        )
-    # symbol_stats 也清一下（如果有貨幣 emoji 跑進來，雖然線路解析不太可能誤觸）
-    ss = data.get("symbol_stats", {})
-    for non_slot in _NON_SLOT_SHORTCODES:
-        ss.pop(non_slot, None)
-
-    return data
-
-
-def save_slot_analysis(state: dict):
-    with open(ANALYSIS_PATH, "w", encoding="utf-8") as f:
-        json.dump(state["slot_analysis"], f, ensure_ascii=False, indent=2)
-
-
-def load_history() -> list | None:
-    """從 gambling_history.json 載入歷史下注紀錄。"""
-    if not os.path.exists(HISTORY_PATH):
-        return None
-    try:
-        with open(HISTORY_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return data
-            return None
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def save_history(state: dict):
-    """寫入歷史下注紀錄；只保留最近 HISTORY_MAX_LEN 筆。"""
-    history = state.get("history") or []
-    if len(history) > HISTORY_MAX_LEN:
-        history = history[-HISTORY_MAX_LEN:]
-        state["history"] = history
-    try:
-        with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+# （load/save_slot_analysis、load/save_history 搬到 slot_analysis 模組；
+#  本檔頂端已 from slot_analysis import）
 
 
 def save_config(config: dict):
@@ -1594,11 +1460,7 @@ BALANCE_PATTERNS = [
 ]
 
 
-def _parse_balance_int(s: str) -> int | None:
-    try:
-        return int(s.replace(',', '').replace('，', ''))
-    except ValueError:
-        return None
+# _parse_balance_int 搬到 slot_parser；本檔頂端已 import 進來
 
 
 def _count_balance_mentions(text: str) -> int:
@@ -1646,304 +1508,12 @@ def _new_reply_detected(before_text: str, current_text: str) -> bool:
     return _count_balance_mentions(ct) > _count_balance_mentions(bt)
 
 
-# slot 勝/負 marker（從 embed 文字直接判定這局結果，避免和 hourly/daily 的餘額變動混淆）
-SLOT_WIN_PATTERN  = re.compile(r'總計贏得[\s:：]*([0-9,，]+)')
-SLOT_LOSS_PATTERN = re.compile(r'損失\s*([0-9,，]+)')
-
-# ── Slot 結果詳細解析 ──────────────────────────────────────────────────────────
-# 中獎線路範例：「中排水平: :cherry:×3 = 864 :oi: (7.0x × 0.5x)」
-#
-# 重要：Discord textContent **不會** 包含 <img> 元素的 alt 屬性，但 emoji 都是
-# <img> 元素（自訂 emoji alt 是 :shortcode:；標準 emoji alt 通常是 unicode 字元）。
-# 解法：在 JS 端手動 walk DOM，把 img.alt 也納入 → 見 _get_page_text()。
-# 因此 symbol 在解析後可能是 ":cherry:" 也可能是 "🍒"，regex 兩種都要支援。
-
-# 一個 emoji symbol：自訂 shortcode 或 Unicode 圖形字元（含可選 VS-16 / keycap）
-_SYMBOL_RE_SRC = (
-    r'(?:'
-    r':[a-z0-9_]+:'                                      # 自訂 shortcode
-    r'|[0-9#*]️⃣'                              # 鍵帽 7️⃣
-    r'|[\U0001F000-\U0001FAFF⌀-➿⬀-⯿]'
-    r'️?(?:‍[\U0001F000-\U0001FAFF⌀-➿])*'
-    r')'
-)
-_SYMBOL_RE = re.compile(_SYMBOL_RE_SRC)
-
-# 視為「非格子」的輔助 emoji（貨幣、特效…）— 解析格子時要過濾掉
-# :fh: 油票 / :ti: 小魚干 / :oi: 油幣 — 都是這個 server 的「貨幣顯示」用 emoji，
-# 不是真正的拉霸符號；它們會出現在 /balance 文字裡（剛好落在 slot 視窗內）導致誤計
-_AUX_EMOJIS = {
-    ':oi:', ':fh:', ':ti:',                              # 此 server 的貨幣 emoji
-    ':coin:', ':moneybag:', ':tada:', ':sparkles:',
-    '🎉', '💰', '💵', '🪙', '✨',
-}
-# 持久化資料中需要清掉的 shortcode（migration 用）— 跟 _AUX_EMOJIS 同步
-_NON_SLOT_SHORTCODES = {':oi:', ':fh:', ':ti:', ':coin:', ':moneybag:'}
-
-SLOT_LINE_PATTERN = re.compile(
-    r'(上排水平|中排水平|下排水平|左列垂直|中列垂直|右列垂直|對角線|反對角線)'
-    r'\s*[/\\]?\s*'                           # 對角線方向標記 / 或 \（可選）
-    r':\s*'                                   # 分隔符 ":"
-    rf'({_SYMBOL_RE_SRC})'                    # 符號（shortcode 或 Unicode）
-    r'\s*[×xX]\s*(\d+)'                       # 次數 ×3
-    r'\s*=\s*'
-    r'([0-9,，]+)'                             # 金額 742
-    rf'(?:\s*{_SYMBOL_RE_SRC})*'              # 可選 :oi: 等貨幣 emoji
-    r'\s*\('
-    r'([0-9.]+)\s*[xX]'                       # 符號倍率 7.0x
-    r'\s*[×xX]\s*'
-    r'([0-9.]+)\s*[xX]'                       # 線路倍率 0.5x
-    r'\s*\)'
-)
-
-# 涵蓋線路描述區塊（到 總計贏得/什麼都沒中 為止）
-SLOT_RESULT_BLOCK = re.compile(r'拉霸機結果([\s\S]*?)(?:總計贏得|什麼都沒中)')
-
-# 涵蓋整個 slot 訊息（含結果文字之後的 9 格符號）
-# 不再依賴「下注:」結尾，loss 場合該 footer 可能不在；改用固定長度視窗
-SLOT_FULL_BLOCK = re.compile(r'拉霸機結果([\s\S]{0,500})')
-
-
-def _parse_slot_lines(text: str) -> list[dict]:
-    """解析最後一個 slot embed 裡的中獎線路。"""
-    blocks = list(SLOT_RESULT_BLOCK.finditer(text))
-    if not blocks:
-        return []
-    block_text = blocks[-1].group(1)
-    lines = []
-    for m in SLOT_LINE_PATTERN.finditer(block_text):
-        lines.append({
-            "line_name":   m.group(1),
-            "symbol":      m.group(2),           # :cherry: 或 🍒
-            "count":       int(m.group(3)),
-            "payout":      int(m.group(4).replace(',', '').replace('，', '')),
-            "symbol_mult": float(m.group(5)),
-            "line_mult":   float(m.group(6)),
-        })
-    return lines
-
-
-def _parse_slot_grid(text: str) -> list[str] | None:
-    """
-    從 slot embed 的 textContent 擷取 3×3 九宮格符號。
-    9 格固定出現在最尾端（總計贏得 / 損失 文字之後），策略：
-      1. 取 拉霸機結果 之後最多 500 字元的視窗
-      2. 把線路描述移除（避免中獎符號被誤計）
-      3. 找所有 emoji symbol，過濾貨幣等輔助 emoji
-      4. 取「最後 9 個」（grid 必定在尾端）
-    回傳長度 9 的 list 或 None。
-    """
-    log = logging.getLogger(__name__)
-
-    full_blocks = list(SLOT_FULL_BLOCK.finditer(text))
-    if not full_blocks:
-        return None
-    block_text = full_blocks[-1].group(1)
-
-    # 移除線路描述，避免把「中獎符號」也計入格子
-    cleaned = SLOT_LINE_PATTERN.sub(' ', block_text)
-
-    # 找所有 emoji symbol
-    all_syms = _SYMBOL_RE.findall(cleaned)
-
-    # 過濾貨幣／特效等輔助 emoji
-    grid_candidates = [s for s in all_syms if s not in _AUX_EMOJIS]
-
-    if len(grid_candidates) >= 9:
-        # 取最後 9 個 — grid 永遠在尾端（總計贏得 / 損失 文字之後）
-        grid = grid_candidates[-9:]
-        log.debug("Grid parsed: %s", grid)
-        return grid
-
-    log.debug("Grid parse insufficient: found %d (filtered=%s, all=%s)",
-              len(grid_candidates), grid_candidates[:15], all_syms[:15])
-    return None
-
-
-# ── 頁面文字擷取（含 <img> alt）─────────────────────────────────────────────
-# Discord 用 <img> 渲染 emoji（自訂 emoji alt = :shortcode:；標準 emoji alt =
-# unicode 字元），純 textContent **不會** 取到 alt。
-# 在 JS 端 walk DOM 自己處理 img.alt → 取代既有的 textContent 讀法。
-_PAGE_TEXT_JS = """
-() => {
-    function walk(node) {
-        if (node.nodeType === 3) return node.nodeValue || '';
-        if (node.nodeType !== 1) return '';
-        const tag = node.tagName;
-        if (tag === 'IMG') {
-            return node.getAttribute('alt')
-                || node.getAttribute('aria-label')
-                || node.getAttribute('data-name')
-                || '';
-        }
-        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return '';
-        let text = '';
-        for (const child of node.childNodes) text += walk(child);
-        return text;
-    }
-    return walk(document.body);
-}
-"""
-
-
-async def _get_page_text(page: Page) -> str:
-    """讀整頁文字，含 <img> 的 alt（emoji 用）。"""
-    return await page.evaluate(_PAGE_TEXT_JS)
-
-
-def _debug_dump_slot_text(text: str, reason: str):
-    """解析失敗時把 拉霸機結果 區塊文字寫到 slot_debug.log 方便排查。"""
-    try:
-        block = ""
-        m = SLOT_FULL_BLOCK.search(text)
-        if m:
-            block = m.group(0)
-        with open("slot_debug.log", "a", encoding="utf-8") as f:
-            f.write(f"=== {datetime.now():%Y-%m-%d %H:%M:%S}  {reason} ===\n")
-            f.write(repr(block) + "\n\n")
-    except OSError:
-        pass
+# （slot embed 解析的 regex / 函式都搬到 slot_parser 模組；本檔頂端已 import）
 
 
 # ── Slot 分析累加器 ────────────────────────────────────────────────────────────
-def _update_slot_analysis(state: dict, bet: int, change: int,
-                          lines: list[dict], grid: list[str] | None):
-    sa = state["slot_analysis"]
-    sa["total_spins"] += 1
-    sa["total_wagered"] += bet
-
-    gross_win = max(0, change + bet)
-    sa["total_gross_won"] += gross_win
-
-    rr = gross_win / bet if bet > 0 else 0.0
-    sa["sum_return_ratio"] += rr
-    sa["sum_return_ratio_sq"] += rr * rr
-
-    if change > 0:
-        sa["total_wins"] += 1
-    else:
-        sa["total_losses"] += 1
-
-    pd = sa["payout_distribution"]
-    if rr == 0:
-        pd["0"] += 1
-    elif rr < 2:
-        pd["0~2"] += 1
-    elif rr < 5:
-        pd["2~5"] += 1
-    elif rr < 8:
-        pd["5~8"] += 1
-    elif rr < 10:
-        pd["8~10"] += 1
-    elif rr < HIGH_MULT_THRESHOLD:
-        pd["10~20"] += 1
-    else:
-        pd["以上"] += 1
-        hm = sa.setdefault("high_mults", [])
-        hm.append(round(rr, 2))
-        if len(hm) > HIGH_MULT_KEEP:
-            del hm[:len(hm) - HIGH_MULT_KEEP]
-
-    for line in lines:
-        sym = line["symbol"]
-        ss = sa["symbol_stats"].setdefault(
-            sym, {"win_appearances": 0, "total_payout": 0, "total_mult_sum": 0.0}
-        )
-        ss["win_appearances"] += 1
-        ss["total_payout"] += line["payout"]
-        ss["total_mult_sum"] += line["symbol_mult"]
-
-        ln = line["line_name"]
-        ls = sa["line_stats"].setdefault(ln, {"hits": 0, "total_payout": 0})
-        ls["hits"] += 1
-        ls["total_payout"] += line["payout"]
-
-    if grid is not None and len(grid) >= 9:
-        for sym in grid[:9]:
-            sa["grid_symbol_freq"][sym] = sa["grid_symbol_freq"].get(sym, 0) + 1
-        sa["grid_total_cells"] += 9
-
-
-def compute_slot_stats(sa: dict) -> dict:
-    n = sa.get("total_spins", 0)
-    if n == 0:
-        return {"sufficient_data": False, "total_spins": 0}
-
-    ev = sa["sum_return_ratio"] / n
-    mean_sq = sa["sum_return_ratio_sq"] / n
-    variance = max(0.0, mean_sq - ev * ev)
-    std_dev = variance ** 0.5
-
-    win_rate = sa["total_wins"] / n
-    avg_win_mult = (sa["total_gross_won"] / sa["total_wagered"]
-                    if sa["total_wagered"] > 0 else 0.0)
-
-    kelly_fraction = ((ev - 1.0) / variance) if (variance > 0 and ev > 1.0) else 0.0
-
-    symbol_info = {}
-    for sym, ss in sa.get("symbol_stats", {}).items():
-        cnt = ss["win_appearances"]
-        symbol_info[sym] = {
-            "win_appearances": cnt,
-            "avg_mult": ss["total_mult_sum"] / cnt if cnt > 0 else 0.0,
-            "total_payout": ss["total_payout"],
-        }
-
-    grid_total = sa.get("grid_total_cells", 0)
-    grid_symbol_prob = {}
-    if grid_total > 0:
-        for sym, cnt in sa.get("grid_symbol_freq", {}).items():
-            grid_symbol_prob[sym] = cnt / grid_total
-
-    line_info = {}
-    for ln, ls in sa.get("line_stats", {}).items():
-        line_info[ln] = {
-            "hits": ls["hits"],
-            "hit_rate": ls["hits"] / n,
-            "total_payout": ls["total_payout"],
-        }
-
-    return {
-        "sufficient_data": n >= MIN_KELLY_SAMPLES,
-        "total_spins": n,
-        "ev": ev,
-        "edge": ev - 1.0,
-        "variance": variance,
-        "std_dev": std_dev,
-        "win_rate": win_rate,
-        "avg_win_mult": avg_win_mult,
-        "kelly_fraction": kelly_fraction,
-        "symbol_info": symbol_info,
-        "grid_symbol_prob": grid_symbol_prob,
-        "line_info": line_info,
-        "payout_distribution": sa.get("payout_distribution", {}),
-        "high_mults": sa.get("high_mults", []),
-    }
-
-
-def _parse_slot_change(text: str, bet: int) -> int | None:
-    """
-    從整頁文字找最後一個 slot 結果並計算這局淨變動：
-      - 「總計贏得：X」→ change = X - bet（X 是 gross win，包含原本下注）
-      - 「什麼都沒中 損失 X」→ change = -X
-    回傳 None 表示沒解析到（embed 還沒渲染，或格式變了）。
-    用「最後出現位置」鎖定最新一局，避免讀到舊紀錄。
-    """
-    last_change = None
-    last_pos = -1
-    for m in SLOT_WIN_PATTERN.finditer(text):
-        if m.start() > last_pos:
-            v = _parse_balance_int(m.group(1))
-            if v is not None:
-                last_change = v - bet
-                last_pos = m.start()
-    for m in SLOT_LOSS_PATTERN.finditer(text):
-        if m.start() > last_pos:
-            v = _parse_balance_int(m.group(1))
-            if v is not None:
-                last_change = -v
-                last_pos = m.start()
-    return last_change
+# （_update_slot_analysis、compute_slot_stats、_parse_slot_change、_parse_balance_int
+#  搬到 slot_analysis / slot_parser 模組；本檔頂端已 import）
 
 
 async def read_initial_balance_from_history(page: Page) -> int | None:

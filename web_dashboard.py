@@ -320,7 +320,7 @@ def _build_state_snapshot(state: dict, config: dict) -> dict:
     n = sa.get("total_spins", 0)
     if n > 0:
         try:
-            from main import compute_slot_stats, MIN_KELLY_SAMPLES
+            from slot_analysis import compute_slot_stats, MIN_KELLY_SAMPLES
             stats = compute_slot_stats(sa)
             edge_pct = stats["edge"] * 100
             ev_str = (f"{stats['ev']:.3f}x ({'+' if edge_pct >= 0 else ''}"
