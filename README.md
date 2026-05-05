@@ -190,6 +190,27 @@ UI 上的快速鍵：
 └── exports/                 匯出的賭博紀錄與分析報告（已被 .gitignore）
 ```
 
+### Web Dashboard
+
+預設啟動後會在 `http://127.0.0.1:8765/` 開一個網頁儀表板：
+- 即時餘額 / 損益 / EV / Kelly
+- 目標 / 停損狀態
+- /hourly / /daily 倒數
+- 累計淨收 ASCII canvas 折線圖（最近 100 筆）
+- 最近 15 筆下注表格
+- 每 2 秒自動刷新
+
+`config.json` → `dashboard`：
+
+| 欄位 | 預設 | 說明 |
+|------|------|------|
+| `enabled` | `true` | 啟用 / 停用 |
+| `host` | `"127.0.0.1"` | 預設只本機可連；改 `"0.0.0.0"` 可讓同 LAN 手機/平板看 |
+| `port` | `8765` | 監聽 port |
+
+> **要從手機看？** 把 `host` 改成 `"0.0.0.0"`，然後手機開 `http://<電腦的 LAN IP>:8765/`。LAN IP 用 `ipconfig` 查 IPv4 地址。
+> **沒有 FastAPI 等套件依賴**：只用 Python 內建 `http.server`，所以打包成 `.exe` 也不用額外處理。
+
 ### 打包成 `.exe`（不需要 Python 也能跑）
 
 雙擊執行：

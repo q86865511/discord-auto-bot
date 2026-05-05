@@ -773,6 +773,11 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     tcfg.setdefault("amount",       100)       # 每次轉帳金額
     tcfg.setdefault("interval_min", DEFAULT_TRANSFER_INTERVAL_MIN)  # 多久一次（分鐘）
 
+    dcfg = config.setdefault("dashboard", {})
+    dcfg.setdefault("enabled", True)
+    dcfg.setdefault("host",    "127.0.0.1")    # 改 0.0.0.0 可讓同 LAN 手機/平板瀏覽
+    dcfg.setdefault("port",    8765)
+
     save_config(config)
 
 
@@ -3231,6 +3236,24 @@ async def main():
 
         state["status"] = "運行中"
 
+        # Web dashboard — 開在背景 thread（不是 asyncio task；用 stdlib http.server）
+        dashboard_thread = None
+        dcfg = config_holder[0].get("dashboard", {})
+        if dcfg.get("enabled", True):
+            try:
+                from web_dashboard import start_dashboard_thread
+                dashboard_thread = start_dashboard_thread(
+                    state, config_holder,
+                    host=dcfg.get("host", "127.0.0.1"),
+                    port=int(dcfg.get("port", 8765)),
+                )
+                if dashboard_thread:
+                    log.info("Web dashboard 啟動在 http://%s:%d/",
+                             dcfg.get("host", "127.0.0.1"),
+                             int(dcfg.get("port", 8765)))
+            except Exception as e:
+                log.warning("Web dashboard 啟動失敗: %s", e)
+
         ui_task = asyncio.create_task(ui_loop(state, config_holder, page))
         worker_tasks = [
             asyncio.create_task(hourly_loop(page, state, config_holder)),
@@ -3246,6 +3269,15 @@ async def main():
         for t in worker_tasks:
             t.cancel()
         await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+        # 關 dashboard server（在 worker tasks 取消後再做，避免 race）
+        if dashboard_thread is not None:
+            try:
+                from web_dashboard import stop_dashboard_thread
+                stop_dashboard_thread(dashboard_thread)
+            except Exception:
+                pass
+
         await browser.close()
         save_slot_analysis(state)
         save_history(state)

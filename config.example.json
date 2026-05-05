@@ -45,5 +45,10 @@
     "target": "",
     "amount": 100,
     "interval_min": 60
+  },
+  "dashboard": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8765
   }
 }
