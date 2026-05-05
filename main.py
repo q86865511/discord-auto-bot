@@ -13,7 +13,7 @@ import smtplib
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 
 from playwright.async_api import async_playwright, Page
@@ -28,8 +28,11 @@ from rich.text import Text
 CONFIG_PATH = "config.json"
 STORAGE_STATE_PATH = "storage_state.json"
 EXPORT_DIR = "exports"
-HOURLY_BASE_SEC   = 3600
-HOURLY_JITTER_SEC = 8 * 60
+# /hourly 採「時鐘整點錨定」策略：等到下個整點 :MM:SS（MM=0~3 隨機）才送，
+# 避免「上次 13:01 領 → +60min jitter → 14:08」之類的錯位（reset 在 :00），
+# 也不會因為跑得比一小時快而連續送兩次（領取週期由真實 hour boundary 決定）。
+HOURLY_POST_BOUNDARY_MIN_SEC =  30   # 過了整點後最快多久送
+HOURLY_POST_BOUNDARY_MAX_SEC = 180   # 過了整點後最慢多久送（隨機在 [min,max] 之間）
 DAILY_BASE_SEC    = 86400
 DAILY_JITTER_SEC  = 45 * 60
 DAILY_STARTUP_DELAY_SEC = 300
@@ -2148,12 +2151,47 @@ async def _wait_while_paused(state: dict):
         await asyncio.sleep(0.5)
 
 
+def _seconds_until_next_hour_boundary(now: datetime | None = None) -> float:
+    """從現在到下個整點 (HH:00:00) 的秒數。"""
+    now = now or datetime.now()
+    next_hour = (now.replace(minute=0, second=0, microsecond=0)
+                 + timedelta(hours=1))
+    return max(0.0, (next_hour - now).total_seconds())
+
+
 async def hourly_loop(page: Page, state: dict, config_holder: list):
+    """
+    /hourly 領取迴圈 — 錨定到時鐘整點。
+
+    Discord bot 的 /hourly 在每個整點重置（reset 是時鐘 hour boundary，不是
+    上次領取的 +60 min）。所以不能用 60min ± 8min jitter — 那會錯位。
+    新策略：
+      1. 等到下個整點 + [30s, 180s] 隨機，送 /hourly
+      2. 之後每次都重新算「離下個整點還多久」，再睡到那個時間點
+    這樣每個小時都剛好領一次，不會錯過、也不會超送。
+    """
     log = logging.getLogger(__name__)
+
     while not state["quit"]:
         await _wait_while_paused(state)
         if state["quit"]:
             break
+
+        # 等到下個整點 + 隨機 jitter
+        wait_to_boundary = _seconds_until_next_hour_boundary()
+        jitter = random.uniform(HOURLY_POST_BOUNDARY_MIN_SEC,
+                                HOURLY_POST_BOUNDARY_MAX_SEC)
+        delay = wait_to_boundary + jitter
+        state["hourly_next"] = time.time() + delay
+        log.info("下次 /hourly 在 %.0f 秒後（過下個整點 +%.0fs jitter）",
+                 delay, jitter)
+        await interruptible_sleep(state, delay)
+        if state["quit"]:
+            break
+        await _wait_while_paused(state)
+        if state["quit"]:
+            break
+
         # 用 send_and_capture_balance 順便把回應裡的「當前餘額」抓下來更新 state，
         # 避免 gambling_loop 用過期 balance 計算下注，也避免 hourly 加的點數
         # 被誤算進 slot 勝負
@@ -2164,13 +2202,23 @@ async def hourly_loop(page: Page, state: dict, config_holder: list):
             state["balance"] = new_bal
             state["events"]["hourly_claims"] += 1
             log.info("/hourly 完成，餘額更新為 %d", new_bal)
-            # hourly 也可能讓餘額到達目標（例如使用者停用賭博、靠領取慢慢累積）
             await _maybe_notify_goal(page, state, config_holder)
         else:
-            log.info("/hourly 已送出（未取得新餘額，可能尚未到時間）")
-        delay = HOURLY_BASE_SEC + random.uniform(-HOURLY_JITTER_SEC, HOURLY_JITTER_SEC)
-        state["hourly_next"] = time.time() + delay
-        await interruptible_sleep(state, delay)
+            # 偶發失敗：可能 bot 還沒 reset、或 race 沒抓到。短時間內重試一次
+            log.info("/hourly 已送出但未取得新餘額，5 分鐘後再試一次")
+            await interruptible_sleep(state, 300)
+            if state["quit"]:
+                break
+            new_bal = await send_and_capture_balance(
+                page, "/hourly", timeout=20.0, stability_sec=2.0
+            )
+            if new_bal is not None:
+                state["balance"] = new_bal
+                state["events"]["hourly_claims"] += 1
+                log.info("/hourly 重試成功，餘額 %d", new_bal)
+                await _maybe_notify_goal(page, state, config_holder)
+            else:
+                log.warning("/hourly 重試仍失敗，跳過此小時，等下個整點")
 
 
 async def transfer_loop(page: Page, state: dict, config_holder: list):
