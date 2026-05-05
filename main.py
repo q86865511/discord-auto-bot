@@ -225,21 +225,67 @@ def export_history_chart(state: dict) -> str | None:
     return path
 
 
-# 自訂 emoji 顯示用的 prefix marker（unicode 方塊；終端機都能畫）
+# 顯示閾值：低於這個格子機率且沒中過獎的符號 → 隱藏（視為解析雜訊）
+_SYMBOL_DISPLAY_THRESHOLD = 0.001   # 0.1%
+
+# 自訂 emoji 沒對應到時用的 fallback marker
 _CUSTOM_EMOJI_MARKER = "🟦"
 _SHORTCODE_NAME_RE = re.compile(r'^:([a-z0-9_]+):$')
+
+# Slot 常見符號 shortcode → 視覺化的 Unicode emoji。
+# 找不到對應時用 _CUSTOM_EMOJI_MARKER 當 fallback。
+_SHORTCODE_EMOJI_MAP: dict[str, str] = {
+    # 水果
+    "cherry":     "🍒",
+    "grapes":     "🍇",
+    "lemon":      "🍋",
+    "watermelon": "🍉",
+    "apple":      "🍎",
+    "orange":     "🍊",
+    "banana":     "🍌",
+    "strawberry": "🍓",
+    "peach":      "🍑",
+    "pineapple":  "🍍",
+    # 經典 slot 符號
+    "bell":       "🔔",
+    "diamond":    "💎",
+    "clover":     "🍀",
+    "seven":      "7️⃣",
+    "star":       "⭐",
+    "fire":       "🔥",
+    "crown":      "👑",
+    "gem":        "💠",
+    "rocket":     "🚀",
+    "money":      "💰",
+    "moneybag":   "💰",
+    "coin":       "🪙",
+    "heart":      "❤️",
+    "horseshoe":  "🧲",
+    "rainbow":    "🌈",
+    "lucky":      "🎰",
+    "slot":       "🎰",
+    # 該伺服器有時出現的（從 grid 看不出含義）— 用 fallback marker，不刻意對應
+}
 
 
 def _format_symbol_display(sym: str) -> str:
     """
-    顯示用：把 Discord 自訂 shortcode 轉成「🟦 name」格式（去掉冒號、加 marker）。
+    顯示用：把 Discord 自訂 shortcode 轉成「emoji name」格式
+    （去掉冒號、加上對應的 emoji；找不到對應就用 🟦 當 fallback）。
     Unicode emoji（🍒 等）原樣回傳。
     底層儲存仍維持 :name: 格式，避免和標準 emoji 衝突。
     """
     m = _SHORTCODE_NAME_RE.match(sym)
-    if m:
-        return f"{_CUSTOM_EMOJI_MARKER} {m.group(1)}"
-    return sym
+    if not m:
+        return sym
+    name = m.group(1)
+    icon = _SHORTCODE_EMOJI_MAP.get(name, _CUSTOM_EMOJI_MARKER)
+    return f"{icon} {name}"
+
+
+def _is_noise_symbol(sym: str, win_count: int, grid_prob: float) -> bool:
+    """符號被視為雜訊（隱藏）：沒中過獎 且 格子機率低於閾值。"""
+    return win_count == 0 and grid_prob < _SYMBOL_DISPLAY_THRESHOLD
 
 
 def export_slot_analysis(state: dict) -> str | None:
@@ -274,22 +320,31 @@ def export_slot_analysis(state: dict) -> str | None:
                     + ", ".join(f"{m:.2f}x" for m in top) + "\n")
 
         si = stats.get("symbol_info", {})
+        gp = stats.get("grid_symbol_prob", {})
         if si:
             f.write(f"\nSymbol Stats (from winning lines)\n")
             f.write(f"{'-' * 40}\n")
             f.write(f"  {'Symbol':<14s} {'Hits':>6s} {'AvgMult':>8s} {'TotalPay':>10s}\n")
             for sym, info in sorted(si.items(), key=lambda x: -x[1]["total_payout"]):
+                # win_appearances > 0，這裡所有 row 都會通過 noise filter
                 disp = _format_symbol_display(sym)
                 f.write(f"  {disp:<14s} {info['win_appearances']:>6d} "
                         f"{info['avg_mult']:>8.2f}x {info['total_payout']:>10,}\n")
 
-        gp = stats.get("grid_symbol_prob", {})
         if gp:
             f.write(f"\nGrid Symbol Probability\n")
             f.write(f"{'-' * 40}\n")
+            hidden = 0
             for sym, prob in sorted(gp.items(), key=lambda x: -x[1]):
+                wins = si.get(sym, {}).get("win_appearances", 0)
+                if _is_noise_symbol(sym, wins, prob):
+                    hidden += 1
+                    continue
                 disp = _format_symbol_display(sym)
                 f.write(f"  {disp:<14s} {prob:>6.1%}\n")
+            if hidden > 0:
+                f.write(f"  ({hidden} noise symbols hidden: no wins, "
+                        f"grid prob < {_SYMBOL_DISPLAY_THRESHOLD:.1%})\n")
 
         li = stats.get("line_info", {})
         if li:
@@ -409,9 +464,15 @@ def _show_slot_analysis(state: dict):
         def _sort_key(s):
             return -(si.get(s, {}).get("total_payout", 0))
 
+        hidden_count = 0
         for sym in sorted(all_symbols, key=_sort_key):
             info = si.get(sym, {})
             wins = info.get("win_appearances", 0)
+            prob = gp.get(sym, 0.0)
+            # 過濾雜訊：沒中獎 + 格子機率低於閾值（如 :ti: :fh: 這類解析誤觸）
+            if _is_noise_symbol(sym, wins, prob):
+                hidden_count += 1
+                continue
             disp_sym = _format_symbol_display(sym)
             if wins > 0:
                 avg_mult = info.get("avg_mult", 0.0)
@@ -427,9 +488,14 @@ def _show_slot_analysis(state: dict):
             else:
                 row = [disp_sym, "─", "─", "─", "─"]
             if gp:
-                row.append(f"{gp[sym]:.1%}" if sym in gp else "─")
+                row.append(f"{prob:.1%}" if sym in gp else "─")
             st.add_row(*row)
         console.print(st)
+        if hidden_count > 0:
+            console.print(
+                f"  [dim]（已隱藏 {hidden_count} 個雜訊符號：未中獎且格子機率 < "
+                f"{_SYMBOL_DISPLAY_THRESHOLD:.1%}）[/dim]"
+            )
     else:
         console.print()
         console.print(
@@ -540,6 +606,24 @@ def load_slot_analysis() -> dict | None:
 
     # 遷移：補上新增的 high_mults 欄位
     data.setdefault("high_mults", [])
+
+    # 遷移：清掉貨幣 emoji（:fh: 油票、:ti: 小魚干、:oi: 油幣 …）
+    # 這些是 /balance 文字裡的 emoji，被 grid 解析誤算進去；移除並對應扣回
+    # grid_total_cells，讓真實符號的格子機率回到正確值
+    gsf = data.get("grid_symbol_freq", {})
+    removed_total = 0
+    for non_slot in _NON_SLOT_SHORTCODES:
+        c = gsf.pop(non_slot, 0)
+        if isinstance(c, int) and c > 0:
+            removed_total += c
+    if removed_total > 0:
+        data["grid_total_cells"] = max(
+            0, data.get("grid_total_cells", 0) - removed_total
+        )
+    # symbol_stats 也清一下（如果有貨幣 emoji 跑進來，雖然線路解析不太可能誤觸）
+    ss = data.get("symbol_stats", {})
+    for non_slot in _NON_SLOT_SHORTCODES:
+        ss.pop(non_slot, None)
 
     return data
 
@@ -1408,7 +1492,15 @@ _SYMBOL_RE_SRC = (
 _SYMBOL_RE = re.compile(_SYMBOL_RE_SRC)
 
 # 視為「非格子」的輔助 emoji（貨幣、特效…）— 解析格子時要過濾掉
-_AUX_EMOJIS = {':oi:', ':coin:', ':moneybag:', ':tada:', '🎉', '💰', '💵', '🪙'}
+# :fh: 油票 / :ti: 小魚干 / :oi: 油幣 — 都是這個 server 的「貨幣顯示」用 emoji，
+# 不是真正的拉霸符號；它們會出現在 /balance 文字裡（剛好落在 slot 視窗內）導致誤計
+_AUX_EMOJIS = {
+    ':oi:', ':fh:', ':ti:',                              # 此 server 的貨幣 emoji
+    ':coin:', ':moneybag:', ':tada:', ':sparkles:',
+    '🎉', '💰', '💵', '🪙', '✨',
+}
+# 持久化資料中需要清掉的 shortcode（migration 用）— 跟 _AUX_EMOJIS 同步
+_NON_SLOT_SHORTCODES = {':oi:', ':fh:', ':ti:', ':coin:', ':moneybag:'}
 
 SLOT_LINE_PATTERN = re.compile(
     r'(上排水平|中排水平|下排水平|左列垂直|中列垂直|右列垂直|對角線|反對角線)'
