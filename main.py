@@ -809,6 +809,43 @@ def _copy_to_clipboard(text: str) -> bool:
         return False
 
 
+# QR cache — URL 沒變就不重新生成
+_qr_cache: dict[str, str] = {}
+
+
+def _build_terminal_qr(text: str) -> str | None:
+    """
+    產生終端機可顯示的 ASCII QR code（用半形塊字元，2 modules per char 高度）。
+    cmd 預設黑底，回傳的字串裡 '█' 在黑底會渲染成白色 → 適合 QR scanner。
+    qrcode 套件沒裝就回 None。
+    """
+    if text in _qr_cache:
+        return _qr_cache[text]
+    try:
+        import qrcode
+        import io
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=1,
+            border=1,            # 最小留白；正常 4，但 1 大多數掃描器仍能讀
+        )
+        qr.add_data(text)
+        qr.make(fit=True)
+        buf = io.StringIO()
+        # invert=True：'█' 代表 light（quiet zone + 0 modules），' ' 代表 dark
+        # 在黑底 cmd 上，'█' 渲染為白方塊、' ' 為黑（背景）—— 對掃描器來說是
+        # 白底黑碼的「正常」極性；scanner 會正確解讀。
+        qr.print_ascii(out=buf, invert=True)
+        result = buf.getvalue().rstrip("\n")
+        _qr_cache[text] = result
+        return result
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
 def build_layout(state: dict, config: dict) -> Layout:
     gcfg        = config.get("gambling", {})
     balance     = state["balance"]
@@ -986,20 +1023,14 @@ def build_layout(state: dict, config: dict) -> Layout:
         transfer_str = "[dim]停用[/dim]"
     t2.add_row("💸 自動轉帳",  transfer_str)
 
-    # Dashboard URLs — 同 LAN 手機可以直接開
+    # Dashboard URL — 同 LAN 手機可以直接開（QR 在右下角獨立 panel 顯示）
     dcfg = config.get("dashboard", {})
     if dcfg.get("enabled", True):
         lan_url = _dashboard_lan_url(config).rstrip("/")
-        dash_str    = f"[cyan]{lan_url}/[/cyan]"
-        qr_str      = f"[cyan]{lan_url}/qr[/cyan]"
-        logs_str    = f"[cyan]{lan_url}/logs[/cyan]"
-        control_str = f"[cyan]{lan_url}/control[/cyan]"
+        dash_str = f"[cyan]{lan_url}/[/cyan]"
     else:
-        dash_str = qr_str = logs_str = control_str = "[dim]停用[/dim]"
-    t2.add_row("🌐 Dashboard",    dash_str)
-    t2.add_row("📱 手機 QR",      qr_str)
-    t2.add_row("📋 日誌頁面",     logs_str)
-    t2.add_row("🛠️ 控制台",       control_str)
+        dash_str = "[dim]停用[/dim]"
+    t2.add_row("🌐 Dashboard", dash_str)
 
     cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改系統設定[/dim]",
                       border_style="green")
@@ -1026,6 +1057,28 @@ def build_layout(state: dict, config: dict) -> Layout:
         style="dim", height=3,
     )
 
+    # QR panel — 位於 cfg panel 下方右側（手機掃描用）
+    qr_panel = None
+    if dcfg.get("enabled", True):
+        lan_url = _dashboard_lan_url(config)
+        qr_text = _build_terminal_qr(lan_url)
+        if qr_text:
+            # 用淺白（不是 bright_white）— 在黑底夠亮但不刺眼
+            qr_renderable = Text(qr_text, style="white on black", no_wrap=True)
+            qr_panel = Panel(
+                qr_renderable,
+                title="[bold]📱 手機掃描[/bold]  [dim]同 WiFi 直接開[/dim]",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        else:
+            qr_panel = Panel(
+                Text("（未安裝 qrcode 套件）\n  pip install qrcode\n  或重跑 setup.bat",
+                     style="dim"),
+                title="[bold]📱 手機掃描[/bold]",
+                border_style="dim",
+            )
+
     layout = Layout()
     layout.split_column(
         Layout(header,    name="header", size=3),
@@ -1033,10 +1086,22 @@ def build_layout(state: dict, config: dict) -> Layout:
         Layout(log_panel, name="logs",   size=13),
         Layout(footer,    name="footer", size=3),
     )
-    layout["body"].split_row(
-        Layout(stats_panel, name="stats"),
-        Layout(cfg_panel,   name="cfg"),
-    )
+    if qr_panel is not None:
+        # 右側拆成 cfg（上）+ qr（下，固定 ~16 行給 v2 QR 25 modules + 邊框 + title）
+        layout["body"].split_row(
+            Layout(stats_panel, name="stats"),
+            Layout(name="right"),
+        )
+        layout["right"].split_column(
+            Layout(cfg_panel, name="cfg"),
+            Layout(qr_panel,  name="qr",  size=18),
+        )
+    else:
+        # qr 沒做出來 → 維持原本的 2 欄
+        layout["body"].split_row(
+            Layout(stats_panel, name="stats"),
+            Layout(cfg_panel,   name="cfg"),
+        )
     return layout
 
 

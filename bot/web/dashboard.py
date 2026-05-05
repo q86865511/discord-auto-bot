@@ -40,9 +40,8 @@ def _html_shell(title: str, body_html: str, active: str = "overview") -> str:
     nav_items = [
         ("overview", "/",         "📊 概覽"),
         ("analysis", "/analysis", "🎯 拉霸分析"),
-        ("control",  "/control",  "🛠️ 控制台"),
         ("logs",     "/logs",     "📋 即時日誌"),
-        ("qr",       "/qr",       "📱 手機 QR"),
+        ("control",  "/control",  "🛠️ 系統設定"),
     ]
     nav_html = "".join(
         f'<a href="{href}" class="nav-link{" active" if key == active else ""}">{label}</a>'
@@ -82,9 +81,11 @@ def _html_shell(title: str, body_html: str, active: str = "overview") -> str:
   h2.section {{ font-size: 14px; color: #8b949e; text-transform: uppercase;
     letter-spacing: 0.5px; margin: 20px 0 8px 0; }}
   .grid {{
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 12px;
+    align-items: start;        /* 卡片各自高度，不再被同列最高的撐到一樣高 */
   }}
+  /* 4 張或更多卡片時，第一排盡量擠滿 — 把 minmax 降到 220px 讓寬度更彈性 */
   .card {{
     background: #161b22; border: 1px solid #30363d; border-radius: 8px;
     padding: 12px;
@@ -774,56 +775,7 @@ loadConfig();
 """
 
 
-# ── 頁面：QR Code（給手機掃 LAN URL）────────────────────────────────────
-_QR_BODY = """
-<div class="card" style="text-align: center;">
-  <h3>📱 手機掃描登入</h3>
-  <p class="dim" style="margin: 0 0 16px 0;">用手機相機掃描 → 在同 LAN 直接打開 dashboard</p>
-  <div id="qr-box" style="background: white; padding: 20px; border-radius: 8px;
-       display: inline-block; max-width: 90%;">
-    <object data="/qr.svg" type="image/svg+xml" style="width: 320px; height: 320px;"></object>
-  </div>
-  <div style="margin-top: 16px;">
-    <code id="url-display" class="blue" style="font-size: 14px;
-         background: #0d1117; padding: 6px 12px; border-radius: 4px;
-         display: inline-block;">─</code>
-  </div>
-  <div class="btn-row" style="justify-content: center; margin-top: 16px;">
-    <button class="btn primary" onclick="copyUrl()">📋 複製網址</button>
-    <button class="btn" onclick="window.open(document.getElementById('url-display').textContent)">🌐 在新分頁開</button>
-  </div>
-  <p class="dim" style="margin-top: 16px; font-size: 12px;">
-    若手機掃描後無法連線：確認電腦防火牆有放行 8765 port、手機跟電腦在同一個 WiFi。
-  </p>
-</div>
-<script>
-async function loadUrl() {
-  try {
-    const r = await fetch('/api/qr-url');
-    const d = await r.json();
-    document.getElementById('url-display').textContent = d.url || '無法偵測 LAN IP';
-  } catch(e) {
-    document.getElementById('url-display').textContent = '錯誤: ' + e.message;
-  }
-}
-async function copyUrl() {
-  const url = document.getElementById('url-display').textContent;
-  try {
-    await navigator.clipboard.writeText(url);
-    showToast('已複製: ' + url);
-  } catch(e) {
-    // 後備：用 selection
-    const r = document.createRange();
-    r.selectNode(document.getElementById('url-display'));
-    window.getSelection().removeAllRanges();
-    window.getSelection().addRange(r);
-    document.execCommand('copy');
-    showToast('已複製');
-  }
-}
-loadUrl();
-</script>
-"""
+# （QR 頁面已移除 — QR code 改在 cmd UI 直接顯示）
 
 
 # ── 頁面：Log viewer ───────────────────────────────────────────────────────
@@ -1188,45 +1140,11 @@ def _make_handler(state: dict, config_holder: list,
                 self._html(_html_shell("Slot 分析", _ANALYSIS_BODY, "analysis")
                            + _html_close())
             elif path == "/control":
-                self._html(_html_shell("控制台", _CONTROL_BODY, "control")
-                           + _html_close())
-            elif path == "/qr":
-                self._html(_html_shell("QR Code", _QR_BODY, "qr")
+                self._html(_html_shell("系統設定", _CONTROL_BODY, "control")
                            + _html_close())
             elif path == "/logs":
-                self._html(_html_shell("Logs", _LOGS_BODY, "logs")
+                self._html(_html_shell("即時日誌", _LOGS_BODY, "logs")
                            + _html_close())
-            elif path == "/qr.svg":
-                # 用 LAN URL 產生 QR；qrcode 套件沒裝就回 placeholder
-                from urllib.parse import urlparse
-                # 偵測 LAN IP（直接重用 _detect_lan_ip）
-                dcfg = config_holder[0].get("dashboard", {})
-                port = int(dcfg.get("port", 8765))
-                host_cfg = dcfg.get("host", "0.0.0.0")
-                ip = _detect_lan_ip() if host_cfg == "0.0.0.0" else host_cfg
-                url = f"http://{ip}:{port}/"
-                svg = _build_qr_svg(url)
-                if svg:
-                    self._respond(200, "image/svg+xml", svg)
-                else:
-                    placeholder = (
-                        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320">'
-                        f'<rect width="320" height="320" fill="#fff"/>'
-                        f'<text x="160" y="150" text-anchor="middle" '
-                        f'font-family="sans-serif" font-size="14" fill="#000">'
-                        f'qrcode 套件未安裝</text>'
-                        f'<text x="160" y="180" text-anchor="middle" '
-                        f'font-family="sans-serif" font-size="12" fill="#666">'
-                        f'pip install qrcode</text>'
-                        f'</svg>'
-                    ).encode("utf-8")
-                    self._respond(200, "image/svg+xml", placeholder)
-            elif path == "/api/qr-url":
-                dcfg = config_holder[0].get("dashboard", {})
-                port = int(dcfg.get("port", 8765))
-                host_cfg = dcfg.get("host", "0.0.0.0")
-                ip = _detect_lan_ip() if host_cfg == "0.0.0.0" else host_cfg
-                self._json({"url": f"http://{ip}:{port}/"})
             elif path == "/api/logs":
                 lines = _read_log_tail("bot.log", max_lines=200)
                 self._json({"lines": lines, "count": len(lines)})
