@@ -42,6 +42,9 @@ DEFAULT_INTERVAL_MAX = 10
 DEFAULT_GOAL = 0          # 0 = 未設定目標
 DEFAULT_GOAL_ACTION = "pause"   # "pause" 或 "raise"
 DEFAULT_GOAL_STEP   = 10000     # raise 模式：新目標 = 舊目標 + step
+DEFAULT_LOSS_FLOOR  = 0         # 0 = 未設定停損
+DEFAULT_LOSS_ACTION = "pause"   # "pause" 或 "lower_threshold"
+DEFAULT_LOSS_STEP   = 5000      # lower_threshold 模式：新門檻 = 當前餘額 - step
 DEFAULT_NEKOMUSUME_INTERVAL_MIN = 30   # /check 監控間距
 DEFAULT_BIGWIN_MULTIPLIER = 5.0  # 中大獎賠率門檻（總計贏得 / 下注）
 DEFAULT_DEAD_THRESHOLD    = 2    # 連續讀取餘額失敗幾次算「bot 停擺」
@@ -102,6 +105,7 @@ def make_state() -> dict:
         "pending_key":  None,
         "history":      [],   # 每筆 {ts, bet, before, after, change, result}
         "goal_reached": False,
+        "loss_triggered": False,    # 停損是否已觸發（避免一直 spam 通知）
         "neko_status": "unknown",     # dispatching / not_dispatching / unknown
         "neko_deadline_ts": None,     # 派遣完成時間戳；用來本地倒數，避免一直 /check
         "neko_last_check_ts": None,
@@ -679,6 +683,9 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     gcfg.setdefault("notify_user_id",  DEFAULT_NOTIFY_USER_ID)
     gcfg.setdefault("goal_action",     DEFAULT_GOAL_ACTION)
     gcfg.setdefault("goal_step",       DEFAULT_GOAL_STEP)
+    gcfg.setdefault("loss_floor",      DEFAULT_LOSS_FLOOR)
+    gcfg.setdefault("loss_action",     DEFAULT_LOSS_ACTION)
+    gcfg.setdefault("loss_step",       DEFAULT_LOSS_STEP)
     gcfg.setdefault("bigwin_multiplier", DEFAULT_BIGWIN_MULTIPLIER)
     if "max_bet" not in gcfg:
         excess = max(0, (balance or 0) - gcfg["threshold"])
@@ -692,6 +699,7 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     ecfg.setdefault("password",  "")
     ecfg.setdefault("to",        "")
     ecfg.setdefault("notify_goal",   True)   # 達標 email
+    ecfg.setdefault("notify_loss",   True)   # 停損觸發 email
     ecfg.setdefault("notify_bigwin", True)   # 中大獎 email
     ecfg.setdefault("notify_dead",   True)   # bot 停擺 email
     ecfg.setdefault("notify_neko",   True)   # 貓娘完成 email
@@ -808,6 +816,19 @@ def build_layout(state: dict, config: dict) -> Layout:
     else:
         goal_str = "[dim]未設定[/dim]"
 
+    # 停損狀態
+    loss_floor = int(gcfg.get("loss_floor", 0) or 0)
+    if loss_floor > 0 and isinstance(balance, int):
+        if balance <= loss_floor:
+            loss_str = f"[red]{balance:,} ≤ {loss_floor:,}（已觸發）[/red]"
+        else:
+            buffer = balance - loss_floor
+            loss_str = f"[green]{balance:,} > {loss_floor:,}  (+{buffer:,} 緩衝)[/green]"
+    elif loss_floor > 0:
+        loss_str = f"─ > {loss_floor:,}"
+    else:
+        loss_str = "[dim]未設定[/dim]"
+
     t1 = Table(box=None, show_header=False, padding=(0, 2), expand=True)
     t1.add_column(style="dim", width=14)
     t1.add_column()
@@ -815,6 +836,7 @@ def build_layout(state: dict, config: dict) -> Layout:
     t1.add_row("📌 起始餘額",  start_str)
     t1.add_row("📈 本次盈虧",  diff_str)
     t1.add_row("🏁 目標進度",  goal_str)
+    t1.add_row("⛔ 停損狀態",  loss_str)
     t1.add_row("", "")
     t1.add_row("🎲 總下注",    str(total_bets))
     t1.add_row("✅ 獲勝",      f"[green]{state['wins']}[/green]")
@@ -1185,6 +1207,9 @@ async def run_config_menu(state: dict, config_holder: list):
         uid    = gcfg.get('notify_user_id', DEFAULT_NOTIFY_USER_ID)
         action = gcfg.get('goal_action', DEFAULT_GOAL_ACTION)
         step   = gcfg.get('goal_step', DEFAULT_GOAL_STEP)
+        loss_f  = int(gcfg.get('loss_floor', DEFAULT_LOSS_FLOOR) or 0)
+        loss_a  = gcfg.get('loss_action', DEFAULT_LOSS_ACTION)
+        loss_s  = int(gcfg.get('loss_step', DEFAULT_LOSS_STEP) or 0)
         em_on  = ecfg.get('enabled', False)
         em_to  = ecfg.get('to', '')
         nk_on  = ncfg.get('enabled', True)
@@ -1192,6 +1217,7 @@ async def run_config_menu(state: dict, config_holder: list):
         bw_mul = float(gcfg.get('bigwin_multiplier', DEFAULT_BIGWIN_MULTIPLIER))
         dd_on  = ecfg.get('notify_dead', True)
         dd_thr = int(ecfg.get('dead_threshold', DEFAULT_DEAD_THRESHOLD))
+        ls_on  = ecfg.get('notify_loss', True)
 
         print(f"\n{'═'*48}")
         print("  ⚙️  Discord Bot — 設定修改")
@@ -1209,11 +1235,16 @@ async def run_config_menu(state: dict, config_holder: list):
         print(f"   [9] 通知 UID:    {uid}")
         print(f"   [A] 達標行為:    {action}  (pause = 停用; raise = 提升門檻續跑)")
         print(f"   [B] raise 步進:  {step:,}  (達標後 新目標 = 舊目標 + 步進)")
+        print("  [停損]")
+        print(f"   [N] 停損點:      {loss_f:,}  (0 = 不設停損)")
+        print(f"   [O] 停損行為:    {loss_a}  (pause = 停用; lower_threshold = 下移門檻續跑)")
+        print(f"   [R] 階梯下移步進: {loss_s:,}  (lower_threshold 模式：新門檻 = 餘額 - 步進)")
         print("  [Email 通知]")
         print(f"   [C] Email:       {'啟用' if em_on else '停用'}  收件人={em_to or '(未設定)'}")
         print(f"   [D] SMTP 設定 (host / port / user / password)")
         print(f"   [G] 中大獎通知:  {'啟用' if bw_on else '停用'}  賠率門檻={bw_mul:.1f}x")
         print(f"   [H] 停擺通知:    {'啟用' if dd_on else '停用'}  連續失敗門檻={dd_thr}")
+        print(f"   [P] 停損通知:    {'啟用' if ls_on else '停用'}")
         print("  [貓娘監控]")
         print(f"   [E] 貓娘監控:    {'啟用' if nk_on else '停用'}  (派遣完成自動 @ 通知)")
         print(f"   [F] 檢查間距:    {ncfg.get('check_interval_min', DEFAULT_NEKOMUSUME_INTERVAL_MIN)} 分鐘")
@@ -1298,6 +1329,25 @@ async def run_config_menu(state: dict, config_holder: list):
             if raw.isdigit():
                 gcfg["goal_step"] = int(raw)
                 print(f"  ✓ 步進 → {int(raw):,}")
+        elif choice == "N":
+            raw = (await ainput("  停損點 (0=取消): ")).strip()
+            if raw.isdigit():
+                gcfg["loss_floor"] = int(raw)
+                state["loss_triggered"] = False    # 重設停損狀態
+                print(f"  ✓ 停損點 → {int(raw):,}")
+        elif choice == "O":
+            raw = (await ainput("  停損行為 (pause / lower_threshold): ")).strip().lower()
+            if raw in ("pause", "lower_threshold"):
+                gcfg["loss_action"] = raw
+                print(f"  ✓ 停損行為 → {raw}")
+        elif choice == "R":
+            raw = (await ainput(f"  階梯下移步進 (目前 {loss_s:,}): ")).strip()
+            if raw.isdigit():
+                gcfg["loss_step"] = int(raw)
+                print(f"  ✓ 步進 → {int(raw):,}")
+        elif choice == "P":
+            ecfg["notify_loss"] = not ecfg.get("notify_loss", True)
+            print(f"  ✓ 停損通知 → {'啟用' if ecfg['notify_loss'] else '停用'}")
         elif choice == "C":
             ecfg["enabled"] = not ecfg.get("enabled", False)
             print(f"  ✓ Email → {'啟用' if ecfg['enabled'] else '停用'}")
@@ -2415,6 +2465,87 @@ async def _maybe_notify_goal(page: Page, state: dict, config_holder: list):
         state["goal_reached"] = False
 
 
+async def _maybe_handle_stop_loss(state: dict, config_holder: list) -> bool:
+    """
+    觸發 gambling.loss_floor 時：
+      1. 若 email 啟用，寄停損通知
+      2. 依 loss_action 處理：
+         - "pause"：停用 gambling，等使用者再啟用
+         - "lower_threshold"：把 threshold 拉到「當前餘額 - loss_step」（保留緩衝），
+                              停損點同步下降到 loss_floor - loss_step。再次跌破才會
+                              觸發；不停用 gambling，讓 bot 在低基期繼續嘗試
+    回傳 True 表示這次有觸發停損，呼叫端可決定是否跳過下注。
+    避免 spam：每次跌破 → 觸發一次 → 餘額回到 loss_floor 之上才 reset。
+    """
+    log = logging.getLogger(__name__)
+    config = config_holder[0]
+    gcfg   = config.get("gambling", {})
+    floor  = int(gcfg.get("loss_floor", 0) or 0)
+    if floor <= 0:
+        return False
+    bal = state["balance"]
+    if bal is None:
+        return False
+
+    # 還沒跌破 → 若之前有觸發過、現在已恢復就 reset
+    if bal > floor:
+        if state.get("loss_triggered"):
+            state["loss_triggered"] = False
+            log.info("餘額 %d 已回到停損點 %d 以上，loss_triggered 重置", bal, floor)
+        return False
+
+    # 已經觸發過、餘額還在停損點以下 → 不重複處理
+    if state.get("loss_triggered"):
+        return True
+
+    # 第一次觸發
+    state["loss_triggered"] = True
+    action = (gcfg.get("loss_action") or DEFAULT_LOSS_ACTION).lower()
+    step   = int(gcfg.get("loss_step", DEFAULT_LOSS_STEP) or 0)
+    log.warning("觸發停損 %d（餘額 %d），動作=%s", floor, bal, action)
+    _log(state, f"⛔ 觸發停損 {floor:,}（餘額 {bal:,}），動作={action}")
+
+    # 1. Email
+    ecfg = config.get("email", {})
+    if ecfg.get("enabled") and ecfg.get("notify_loss", True):
+        body = (
+            f"目前餘額: {bal:,}\n"
+            f"停損點:   {floor:,}\n"
+            f"起始餘額: {state.get('start_balance')}\n"
+            f"本次盈虧: {(bal - (state.get('start_balance') or bal)):+,}\n"
+            f"總下注: {state['total_bets']}（勝 {state['wins']} / 負 {state['losses']}）\n"
+            f"後續動作: {action}"
+        )
+        try:
+            await send_email(ecfg, f"[Discord Bot] 觸發停損 {floor:,}", body)
+        except Exception as e:
+            log.warning("停損 email 寄出失敗: %s", e)
+
+    # 2. 處理後續動作
+    if action == "lower_threshold" and step > 0:
+        # 把 threshold 拉到「當前餘額 - step」、停損點同步下移
+        # 維持「停損點 < threshold」的相對關係，避免立刻又被觸發
+        new_threshold = max(0, bal - step)
+        new_floor     = max(0, floor - step)
+        gcfg["threshold"]  = new_threshold
+        gcfg["loss_floor"] = new_floor
+        save_config(config)
+        config_holder[0] = load_config()
+        state["loss_triggered"] = False   # 階梯下移後重置，等再次跌破
+        log.info("lower_threshold 模式：門檻 → %d、停損 → %d",
+                 new_threshold, new_floor)
+        _log(state, f"⛔ 階梯下移：門檻={new_threshold:,} 停損={new_floor:,}")
+    else:
+        # pause 模式：停用 gambling
+        gcfg["enabled"] = False
+        save_config(config)
+        config_holder[0] = load_config()
+        log.info("pause 模式：賭博已停用")
+        _log(state, "⛔ 賭博已停用")
+
+    return True
+
+
 async def gambling_loop(page: Page, state: dict, config_holder: list):
     log = logging.getLogger(__name__)
     fail_count = 0           # 連續失敗計數（簡化單一 counter）
@@ -2476,6 +2607,11 @@ async def gambling_loop(page: Page, state: dict, config_holder: list):
                         _reset_fail_state()
                     else:
                         fail_count = 0   # 防 reload 風暴；dead_notified 仍保留
+            continue
+
+        # 停損檢查：觸發後可能停用 gambling 或下移門檻；下次 loop 再讀新狀態
+        if await _maybe_handle_stop_loss(state, config_holder):
+            await interruptible_sleep(state, 30)
             continue
 
         if balance <= threshold:

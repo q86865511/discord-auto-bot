@@ -13,6 +13,9 @@
     "goal": 0,
     "goal_action": "pause",
     "goal_step": 10000,
+    "loss_floor": 0,
+    "loss_action": "pause",
+    "loss_step": 5000,
     "bigwin_multiplier": 5.0,
     "notify_user_id": "YOUR_DISCORD_USER_ID_HERE"
   },
@@ -24,6 +27,7 @@
     "password": "GMAIL_APP_PASSWORD_HERE",
     "to": "your_email@gmail.com",
     "notify_goal": true,
+    "notify_loss": true,
     "notify_bigwin": true,
     "notify_dead": true,
     "notify_neko": true,

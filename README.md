@@ -83,8 +83,16 @@ UI 上的快速鍵：
 | `goal` | `0` | 餘額目標；達到時通知，`0` = 不啟用 |
 | `goal_action` | `pause` | 達標後動作：`pause` = 停用賭博；`raise` = 把已達目標當作新門檻、目標 += `goal_step` 後繼續（保護獲利的階梯式策略）|
 | `goal_step` | `10000` | `raise` 模式下，新目標 = 舊目標 + 此值 |
+| `loss_floor` | `0` | 停損點：餘額跌到這個值就觸發停損動作，`0` = 不啟用 |
+| `loss_action` | `pause` | 觸發停損後動作：`pause` = 停用賭博；`lower_threshold` = 把門檻拉到「當前餘額 - `loss_step`」、停損點同步下移後繼續（階梯式停損）|
+| `loss_step` | `5000` | `lower_threshold` 模式下，新門檻 = 餘額 - 此值；新停損點 = 舊停損點 - 此值 |
 | `bigwin_multiplier` | `5.0` | 中大獎賠率門檻（總計贏得 / 下注 ≥ 此值就寄 email；需 `email.notify_bigwin` 啟用）|
 | `notify_user_id` | — | 目標達成 / 貓娘完成時要 `@` 的 Discord User ID |
+
+> **停損 vs 保底門檻**：
+> - `threshold`（保底）= 餘額低於此就「等待」（不下注、不通知，只是觀望）
+> - `loss_floor`（停損）= 餘額低於此就「觸發動作」（停用 bot 或下移門檻 + 寄信）
+> - 通常 `loss_floor < threshold` 才合理（先停下注，跌得更慘才停損）
 
 ### Email 通知（選用）
 
@@ -98,13 +106,15 @@ UI 上的快速鍵：
 | `password` | — | **Gmail 必須用 [App Password](https://myaccount.google.com/apppasswords)，不是登入密碼** |
 | `to` | — | 收件人 |
 | `notify_goal` | `true` | 達成 `goal` 時寄信 |
+| `notify_loss` | `true` | 觸發 `loss_floor` 停損時寄信 |
 | `notify_bigwin` | `true` | /slot 中大獎時寄信（賠率 ≥ `gambling.bigwin_multiplier`）|
 | `notify_dead` | `true` | 連續無法讀取餘額（/slot + /balance）時寄信，提醒 bot 可能掛了 |
 | `notify_neko` | `true` | 貓娘派遣完成時寄信 |
 | `dead_threshold` | `2` | 連續失敗達此次數就視為「bot 停擺」並寄一次警告（每段死亡只寄一次，恢復後重置）|
 
-四種事件：
+五種事件：
 - **達成目標**：餘額 ≥ `goal`
+- **觸發停損**：餘額 ≤ `loss_floor`（每段下跌只寄一次，回升後重置）
 - **中大獎**：/slot 結果「總計贏得 / 下注」≥ `bigwin_multiplier`（預設 5x）
 - **bot 停擺**：/slot 或 /balance 連續失敗 ≥ `dead_threshold`
 - **貓娘完成**：派遣狀態從「派遣中」變回「閒置 / 待領取」
