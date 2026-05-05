@@ -1,6 +1,7 @@
 {
   "guild_id": "YOUR_GUILD_ID_HERE",
   "channel_id": "YOUR_CHANNEL_ID_HERE",
+  "log_level": "INFO",
   "gambling": {
     "enabled": false,
     "threshold": 5000,

@@ -5,6 +5,7 @@ import asyncio
 import csv
 import json
 import logging
+import logging.handlers
 import msvcrt
 import os
 import random
@@ -28,6 +29,9 @@ from rich.text import Text
 CONFIG_PATH = "config.json"
 STORAGE_STATE_PATH = "storage_state.json"
 EXPORT_DIR = "exports"
+LOG_FILE_PATH = "bot.log"
+LOG_FILE_MAX_BYTES = 5 * 1024 * 1024   # 5MB / 個
+LOG_FILE_BACKUP_COUNT = 3              # 保留 3 個輪替檔（bot.log.1 .2 .3）
 # /hourly 採「時鐘整點錨定」策略：等到下個整點 :MM:SS（MM=0~3 隨機）才送，
 # 避免「上次 13:01 領 → +60min jitter → 14:08」之類的錯位（reset 在 :00），
 # 也不會因為跑得比一小時快而連續送兩次（領取週期由真實 hour boundary 決定）。
@@ -149,13 +153,47 @@ class UILogHandler(logging.Handler):
             self.handleError(record)
 
 
-def setup_logging(state: dict) -> logging.Logger:
+def setup_logging(state: dict, log_level: str = "INFO") -> logging.Logger:
+    """
+    設定統一的 logging：
+      1. UILogHandler — 將 INFO+ 訊息推到 state["log_lines"]，給 UI 面板顯示
+      2. RotatingFileHandler — 將 DEBUG+ 訊息寫到 bot.log（最多 5MB×3 個檔案）
+    第三方套件（playwright / asyncio / urllib3 等）的 noise 拉到 WARNING 以上。
+    """
+    level_name = (log_level or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
     root = logging.getLogger()
     root.handlers.clear()
-    h = UILogHandler(state)
-    h.setLevel(logging.INFO)
-    root.addHandler(h)
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG)   # root 最寬，handler 各自決定要不要過
+
+    # UI handler — 走 INFO 以上（避免 DEBUG 洗版）
+    ui = UILogHandler(state)
+    ui.setLevel(logging.INFO)
+    root.addHandler(ui)
+
+    # File handler — 走使用者設定的 level（預設 INFO；可調 DEBUG）
+    try:
+        fh = logging.handlers.RotatingFileHandler(
+            LOG_FILE_PATH,
+            maxBytes=LOG_FILE_MAX_BYTES,
+            backupCount=LOG_FILE_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        root.addHandler(fh)
+    except OSError as e:
+        # 寫不了檔（權限／磁碟滿）— 不要因此整個 bot 不能啟動
+        print(f"⚠ 無法開啟 {LOG_FILE_PATH}（{e}），只用 UI 日誌")
+
+    # 把第三方 module 的 noise 拉到 WARNING 以上
+    for noisy in ("urllib3", "asyncio", "playwright", "websockets"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     return logging.getLogger(__name__)
 
 
@@ -688,6 +726,7 @@ def save_config(config: dict):
 
 def ensure_gambling_defaults(config: dict, balance: int | None = None):
     """補齊 gambling / email / nekomusume 欄位預設值（只填未設定的欄位）。"""
+    config.setdefault("log_level", "INFO")    # DEBUG / INFO / WARNING / ERROR
     gcfg = config.setdefault("gambling", {})
     gcfg.setdefault("enabled",         True)
     gcfg.setdefault("threshold",       5000)
@@ -1132,6 +1171,7 @@ async def run_advanced_menu(state: dict):
         debug_size = _file_size_str("slot_debug.log")
         history_size = _file_size_str(HISTORY_PATH)
         analysis_size = _file_size_str(ANALYSIS_PATH)
+        bot_log_size = _file_size_str(LOG_FILE_PATH)
         exports_size, exports_count = _dir_size_str(EXPORT_DIR)
         sa_spins = state.get("slot_analysis", {}).get("total_spins", 0)
 
@@ -1141,6 +1181,10 @@ async def run_advanced_menu(state: dict):
         print(f"   [3] 刪除 gambling_history.json       ({history_size})")
         print(f"   [4] 重置 slot_analysis.json          ({analysis_size}, {sa_spins} 筆)")
         print(f"   [5] 一鍵清除以上全部")
+        print()
+        print("  [日誌]")
+        print(f"   [7] 開啟 bot.log                     ({bot_log_size})")
+        print(f"   [8] 清空 bot.log + 輪替檔")
         print()
         print("  [系統]")
         print(f"   [6] 系統更新（git pull + 重啟）")
@@ -1207,6 +1251,52 @@ async def run_advanced_menu(state: dict):
                 rebooted = await _do_system_update(state)
                 if rebooted:
                     return    # 直接退出選單，main loop 會看到 quit=True 退出
+                await ainput("  按 Enter 繼續...")
+        elif choice == "7":
+            if os.path.exists(LOG_FILE_PATH):
+                try:
+                    os.startfile(LOG_FILE_PATH)
+                    print(f"  ✓ 已用預設應用程式開啟 {LOG_FILE_PATH}")
+                except OSError as e:
+                    print(f"  ⚠ 無法開啟: {e}")
+            else:
+                print(f"  （{LOG_FILE_PATH} 不存在）")
+            await ainput("  按 Enter 繼續...")
+        elif choice == "8":
+            confirm = (await ainput(
+                "  確認清空 bot.log 與所有輪替檔（bot.log.1 .2 .3）？(y/N): "
+            )).strip().lower()
+            if confirm == "y":
+                # 關掉檔案 handler 後再刪，否則 Windows 會檔案鎖
+                root = logging.getLogger()
+                file_handlers = [h for h in root.handlers
+                                 if isinstance(h, logging.handlers.RotatingFileHandler)]
+                for h in file_handlers:
+                    h.close()
+                    root.removeHandler(h)
+                cleared = 0
+                for path in [LOG_FILE_PATH] + [
+                    f"{LOG_FILE_PATH}.{i}" for i in range(1, LOG_FILE_BACKUP_COUNT + 1)
+                ]:
+                    if _delete_file_safe(path):
+                        cleared += 1
+                # 重建 file handler
+                try:
+                    fh = logging.handlers.RotatingFileHandler(
+                        LOG_FILE_PATH,
+                        maxBytes=LOG_FILE_MAX_BYTES,
+                        backupCount=LOG_FILE_BACKUP_COUNT,
+                        encoding="utf-8",
+                    )
+                    fh.setLevel(logging.INFO)
+                    fh.setFormatter(logging.Formatter(
+                        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S",
+                    ))
+                    root.addHandler(fh)
+                except OSError as e:
+                    print(f"  ⚠ 重建 file handler 失敗: {e}")
+                print(f"  ✓ 清空 {cleared} 個 log 檔案")
                 await ainput("  按 Enter 繼續...")
 
 
@@ -3035,8 +3125,12 @@ async def main():
         return
 
     state         = make_state()
-    log           = setup_logging(state)
-    config_holder = [load_config()]
+    initial_cfg   = load_config()
+    log           = setup_logging(
+        state,
+        log_level=initial_cfg.get("log_level", "INFO"),
+    )
+    config_holder = [initial_cfg]
     start_kb_listener(state)
 
     config     = config_holder[0]

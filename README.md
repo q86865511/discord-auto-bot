@@ -184,8 +184,16 @@ UI 上的快速鍵：
 ├── storage_state.json       Discord session（已被 .gitignore，不會上傳）
 ├── slot_analysis.json       Slot 分析累計資料（已被 .gitignore，runtime 產生）
 ├── gambling_history.json    下注歷史紀錄（已被 .gitignore，runtime 產生）
+├── bot.log                  Rotating logs（已被 .gitignore；最多 5MB×3 個檔輪替）
 └── exports/                 匯出的賭博紀錄與分析報告（已被 .gitignore）
 ```
+
+### 日誌與除錯
+
+- `bot.log`：所有 INFO 以上訊息都會寫到這。檔案達 5 MB 自動輪替（保留 `bot.log.1/.2/.3` 共 3 份）
+- 想看 DEBUG 等級訊息：把 `config.json` 加 `"log_level": "DEBUG"`，重啟生效
+- 想清掉所有 log：按 `C` → `[X] 進階` → `[8] 清空 bot.log + 輪替檔`
+- `slot_debug.log` 只在 slot 解析失敗時才寫（line/grid 沒抓到），用於 regex 排查
 
 ## 技術說明
 
