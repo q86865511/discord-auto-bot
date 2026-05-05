@@ -1,19 +1,9 @@
 @echo off
 REM Run main.py. Exit code 42 = user pressed F to reboot; this script auto-relaunches.
+REM First-run setup (config wizard + Discord login) is handled by main.py itself,
+REM so we don't pre-check config.json / storage_state.json here.
 chcp 65001 >nul
 cd /d "%~dp0"
-
-if not exist "config.json" (
-    echo [ERROR] config.json not found. Run setup.bat first.
-    pause
-    exit /b 1
-)
-
-if not exist "storage_state.json" (
-    echo [ERROR] storage_state.json not found. Run login.bat first.
-    pause
-    exit /b 1
-)
 
 if exist ".venv\Scripts\python.exe" (
     set "PY=.venv\Scripts\python.exe"

@@ -700,6 +700,57 @@ def fmt_remaining(ts: float | None) -> str:
     return f"{s}s"
 
 
+# ── Dashboard URL helpers（給 W / K 鍵與 UI 顯示用）─────────────────────────
+_lan_ip_cache: list[str] = []   # [ip] — 算過就不要每幀都重抓
+
+
+def _detect_lan_ip() -> str:
+    """嘗試找本機 LAN IPv4；連不上回 'localhost'。Cache 結果避免重複呼叫。"""
+    if _lan_ip_cache:
+        return _lan_ip_cache[0]
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.1)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "localhost"
+    _lan_ip_cache.append(ip)
+    return ip
+
+
+def _dashboard_local_url(config: dict) -> str:
+    dcfg = config.get("dashboard", {})
+    port = int(dcfg.get("port", 8765))
+    return f"http://127.0.0.1:{port}/"
+
+
+def _dashboard_lan_url(config: dict) -> str:
+    dcfg = config.get("dashboard", {})
+    host = dcfg.get("host", "0.0.0.0")
+    port = int(dcfg.get("port", 8765))
+    if host == "0.0.0.0":
+        ip = _detect_lan_ip()
+    else:
+        ip = host
+    return f"http://{ip}:{port}/"
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Windows 用內建 clip.exe；其他平台失敗回 False（使用者可看 log 手動複製）。"""
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["clip"], input=text, text=True, encoding="utf-8",
+            timeout=2, capture_output=True,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
 def build_layout(state: dict, config: dict) -> Layout:
     gcfg        = config.get("gambling", {})
     balance     = state["balance"]
@@ -715,10 +766,12 @@ def build_layout(state: dict, config: dict) -> Layout:
         status_text  = state["status"]
         status_color = "green" if status_text == "運行中" else "yellow"
 
-    # Header
+    # Header — 用 Text.from_markup 才會解析 [green] tags；直接 Text(...) 會當字面值
     header = Panel(
-        Text(f"🤖 Discord Auto Bot  |  [{status_color}]{status_text}[/{status_color}]",
-             justify="center"),
+        Text.from_markup(
+            f"🤖 Discord Auto Bot  |  [{status_color}]{status_text}[/{status_color}]",
+            justify="center",
+        ),
         style="bold cyan", height=3,
     )
 
@@ -853,6 +906,16 @@ def build_layout(state: dict, config: dict) -> Layout:
         transfer_str = "[dim]停用[/dim]"
     t2.add_row("💸 自動轉帳",  transfer_str)
 
+    # Dashboard URL — 同 LAN 手機可以直接開
+    dcfg = config.get("dashboard", {})
+    if dcfg.get("enabled", True):
+        lan_url = _dashboard_lan_url(config)
+        # Rich Table 的 cell 太窄會被截掉；URL 不太會超過 30 chars
+        dash_str = f"[cyan]{lan_url}[/cyan]"
+    else:
+        dash_str = "[dim]停用[/dim]"
+    t2.add_row("🌐 Dashboard", dash_str)
+
     cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改系統設定[/dim]",
                       border_style="green")
 
@@ -872,7 +935,8 @@ def build_layout(state: dict, config: dict) -> Layout:
         f"{pause_label}  "
         f"[bold]E[/bold] 匯出分析結果  "
         f"[bold]S[/bold] 分析賭博機率  "
-        f"[bold]L[/bold] 重載頻道  "
+        f"[bold]W[/bold] 開啟 Dashboard  "
+        f"[bold]K[/bold] 複製 Dashboard URL  "
         f"[bold]F[/bold] 重啟程式[/dim]",
         style="dim", height=3,
     )
@@ -2710,27 +2774,169 @@ async def ui_loop(state: dict, config_holder: list, page: Page | None = None):
                     state["reboot"] = True
                     state["quit"]   = True
                     break
-                elif key == "l":
-                    # 只重新載入頻道頁面
-                    if page is None:
-                        _log(state, "頁面參考遺失，無法 reload")
+                elif key == "w":
+                    # 在預設瀏覽器打開 dashboard
+                    url = _dashboard_local_url(config_holder[0])
+                    try:
+                        import webbrowser
+                        webbrowser.open(url)
+                        _log(state, f"🌐 已在瀏覽器打開 {url}")
+                    except Exception as e:
+                        _log(state, f"⚠ 開啟瀏覽器失敗: {e}")
+                elif key == "k":
+                    # 複製 dashboard 的 LAN URL 到剪貼簿（給手機用）
+                    lan_url = _dashboard_lan_url(config_holder[0])
+                    if _copy_to_clipboard(lan_url):
+                        _log(state, f"📋 已複製: {lan_url}")
                     else:
-                        live.stop()
-                        try:
-                            ok = await recover_page(page, state)
-                            _log(state, "頻道已重新載入" if ok else "頻道重新載入失敗")
-                        finally:
-                            live.start()
+                        _log(state, f"⚠ 複製失敗（手動複製: {lan_url}）")
 
             live.update(build_layout(state, config_holder[0]))
             await asyncio.sleep(0.5)
 
 
 # ── 主程式 ────────────────────────────────────────────────────────────────────
+# ── 首次設定 / 登入精靈 ────────────────────────────────────────────────────
+def _is_placeholder_or_missing(value: str | None, placeholder_keywords=()) -> bool:
+    """判斷 config 欄位是否為空 / 還是範本佔位符。"""
+    if not value:
+        return True
+    s = str(value)
+    if not s.strip():
+        return True
+    return any(k in s for k in placeholder_keywords)
+
+
+def _config_needs_setup(cfg: dict) -> list[str]:
+    """檢查 config 哪些欄位還沒填好；回傳待補欄位清單。"""
+    missing = []
+    if _is_placeholder_or_missing(cfg.get("guild_id"), ["YOUR_", "HERE"]):
+        missing.append("guild_id")
+    if _is_placeholder_or_missing(cfg.get("channel_id"), ["YOUR_", "HERE"]):
+        missing.append("channel_id")
+    g = cfg.get("gambling", {}) or {}
+    if _is_placeholder_or_missing(
+        g.get("notify_user_id"),
+        ["YOUR_", "HERE", DEFAULT_NOTIFY_USER_ID],   # 預設值也算「沒設」
+    ):
+        missing.append("notify_user_id")
+    return missing
+
+
+def _ensure_config_via_wizard():
+    """
+    若 config.json 不存在 → 從 config.example.json 複製。
+    若有缺欄位 → 互動式提示使用者輸入。
+    """
+    if not os.path.exists(CONFIG_PATH):
+        if os.path.exists("config.example.json"):
+            print(f"\n首次啟動 — 從 config.example.json 複製為 {CONFIG_PATH}")
+            with open("config.example.json", encoding="utf-8") as src, \
+                 open(CONFIG_PATH, "w", encoding="utf-8") as dst:
+                dst.write(src.read())
+        else:
+            print(f"⚠ 找不到 {CONFIG_PATH} 也找不到 config.example.json")
+            print("  請手動建立 config.json 後重啟。")
+            return False
+
+    cfg = load_config()
+    missing = _config_needs_setup(cfg)
+    if not missing:
+        return True
+
+    print()
+    print("=" * 64)
+    print("  🛠️  首次設定 — 請填入下列資訊（按 Enter 跳過保留現值）")
+    print("=" * 64)
+    print()
+    print("  📌 開啟 Discord 開發者模式：使用者設定 → 進階 → 啟用「開發者模式」")
+    print("      之後右鍵伺服器/頻道/使用者就會多出「複製 ID」選項")
+    print()
+
+    if "guild_id" in missing:
+        cur = cfg.get("guild_id", "")
+        cur_disp = "未設定" if not cur or "YOUR_" in str(cur) else cur
+        print(f"  【伺服器 ID】(目前: {cur_disp})")
+        print("    → 對伺服器右鍵 → 複製伺服器 ID")
+        raw = input("    伺服器 ID: ").strip()
+        if raw.isdigit():
+            cfg["guild_id"] = raw
+
+    if "channel_id" in missing:
+        cur = cfg.get("channel_id", "")
+        cur_disp = "未設定" if not cur or "YOUR_" in str(cur) else cur
+        print(f"\n  【頻道 ID】(目前: {cur_disp}) — bot 會在此頻道送指令")
+        print("    → 對要操作的頻道右鍵 → 複製頻道 ID")
+        raw = input("    頻道 ID: ").strip()
+        if raw.isdigit():
+            cfg["channel_id"] = raw
+
+    if "notify_user_id" in missing:
+        g = cfg.setdefault("gambling", {})
+        cur = g.get("notify_user_id", "")
+        cur_disp = ("未設定" if not cur or "YOUR_" in str(cur)
+                    or cur == DEFAULT_NOTIFY_USER_ID else cur)
+        print(f"\n  【通知對象 User ID】(目前: {cur_disp})")
+        print("    → 達成目標 / 貓娘完成時要 @ 的對象（通常填自己）")
+        print("    → 對使用者右鍵 → 複製使用者 ID")
+        raw = input("    User ID: ").strip()
+        if raw.isdigit():
+            g["notify_user_id"] = raw
+
+    save_config(cfg)
+    print("\n  ✓ 設定已儲存。")
+
+    # 再檢查一次，若仍有空欄位提醒
+    cfg = load_config()
+    still = _config_needs_setup(cfg)
+    if still:
+        print(f"\n  ⚠ 仍有未填欄位: {', '.join(still)}")
+        print("  bot 可能無法正常啟動。可隨時編輯 config.json 後重新執行 run.bat。")
+    print("=" * 64)
+    return True
+
+
+async def _run_login_wizard():
+    """
+    沒有 storage_state.json → 開啟 Chromium 引導使用者手動登入 Discord。
+    把原本 login.py 的邏輯內嵌進來，省得使用者要先跑 login.bat。
+    """
+    print()
+    print("=" * 64)
+    print("  🔐 Discord 登入 — 找不到或 storage_state.json 已過期")
+    print("=" * 64)
+    print()
+    print("  即將開啟 Chromium 視窗，請手動完成 Discord 登入（含 2FA）。")
+    print("  網址跳轉到 /channels/... 時會自動關閉並儲存登入狀態。")
+    print("  （登入逾時 5 分鐘）")
+    print()
+    input("  按 Enter 繼續...")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.goto("https://discord.com/login")
+        try:
+            await page.wait_for_url("**/channels/**", timeout=300_000)
+            print("\n  ✓ 登入成功！儲存 session 中...")
+            await context.storage_state(path=STORAGE_STATE_PATH)
+            print(f"  ✓ 已儲存至 {STORAGE_STATE_PATH}")
+        finally:
+            await browser.close()
+
+
 async def main():
-    if not os.path.exists(STORAGE_STATE_PATH):
-        print("找不到 storage_state.json！請先執行 login.py 完成登入。")
+    # 第一次啟動或 config 不完整 → 引導設定
+    if not _ensure_config_via_wizard():
         return
+
+    # 沒有 storage_state.json → 引導登入
+    if not os.path.exists(STORAGE_STATE_PATH):
+        await _run_login_wizard()
+        if not os.path.exists(STORAGE_STATE_PATH):
+            print("\n⚠ 登入流程未完成，程式中止。")
+            return
 
     state         = make_state()
     initial_cfg   = load_config()
@@ -2752,7 +2958,24 @@ async def main():
         context = await browser.new_context(storage_state=STORAGE_STATE_PATH)
         page    = await context.new_page()
 
-        await navigate_to_channel(page, guild_id, channel_id)
+        try:
+            await navigate_to_channel(page, guild_id, channel_id)
+        except RuntimeError as e:
+            # session 過期或頻道載不到 → 關掉 browser，引導重新登入
+            await browser.close()
+            if "session 已過期" in str(e):
+                # 砍掉舊 session，引導重新登入再重啟
+                if os.path.exists(STORAGE_STATE_PATH):
+                    os.remove(STORAGE_STATE_PATH)
+                await _run_login_wizard()
+                # 登入完讓使用者用 F 鍵或重新跑 run.bat。直接 sys.exit(REBOOT_EXIT_CODE)
+                # 通知 run.bat 重新啟動
+                print("\n  ✓ 重新登入完成，3 秒後自動重啟 bot...")
+                await asyncio.sleep(3)
+                sys.exit(REBOOT_EXIT_CODE)
+            else:
+                # 其他錯誤（網路 / ID 設定錯）— 讓使用者看到訊息後退出
+                raise
 
         # 序列化啟動：先讀初始餘額，避免和其他 loop 的指令搶 lock 造成 race
         log.info("等待聊天歷史載入...")
