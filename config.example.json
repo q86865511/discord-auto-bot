@@ -17,6 +17,8 @@
     "loss_floor": 0,
     "loss_action": "pause",
     "loss_step": 5000,
+    "loss_streak_pause": 0,
+    "loss_streak_cooldown_min": 5,
     "bigwin_multiplier": 5.0,
     "notify_user_id": "YOUR_DISCORD_USER_ID_HERE"
   },
@@ -38,7 +40,8 @@
   },
   "nekomusume": {
     "enabled": true,
-    "check_interval_min": 30
+    "check_interval_min": 30,
+    "auto_claim": false
   },
   "transfer": {
     "enabled": false,
@@ -49,6 +52,8 @@
   "dashboard": {
     "enabled": true,
     "host": "0.0.0.0",
-    "port": 8765
+    "port": 8765,
+    "username": "admin",
+    "password": ""
   }
 }

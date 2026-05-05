@@ -1314,275 +1314,409 @@ async def run_advanced_menu(state: dict):
                 await ainput("  按 Enter 繼續...")
 
 
-async def run_config_menu(state: dict, config_holder: list):
-    os.system("cls")
-    config = config_holder[0]
-    gcfg   = config.setdefault("gambling", {})
+async def _ask_int(prompt: str, current: int | None = None) -> int | None:
+    """互動式詢問整數；空白或無效回傳 None（保留現值）。"""
+    cur = f"目前 {current:,}" if current is not None else ""
+    raw = (await ainput(f"  {prompt} {cur}: ".rstrip())).strip()
+    if not raw:
+        return None
+    if raw.isdigit() or (raw.startswith("-") and raw[1:].isdigit()):
+        return int(raw)
+    print("  ⚠ 無效輸入（需要整數）")
+    return None
 
-    ecfg = config.setdefault("email",       {})
-    ncfg = config.setdefault("nekomusume",  {})
-    tcfg = config.setdefault("transfer",    {})
+
+async def _ask_float(prompt: str, current: float | None = None) -> float | None:
+    cur = f"目前 {current}" if current is not None else ""
+    raw = (await ainput(f"  {prompt} {cur}: ".rstrip())).strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        print("  ⚠ 無效輸入（需要數字）")
+        return None
+
+
+async def _ask_choice(prompt: str, options: list[str], current: str = "") -> str | None:
+    cur = f" [目前: {current}]" if current else ""
+    raw = (await ainput(f"  {prompt} ({'/'.join(options)}){cur}: ")).strip().lower()
+    if not raw:
+        return None
+    if raw in [o.lower() for o in options]:
+        return raw
+    print(f"  ⚠ 無效輸入（必須是 {'/'.join(options)} 之一）")
+    return None
+
+
+async def _wait_enter(msg: str = "按 Enter 繼續..."):
+    await ainput(f"  {msg}")
+
+
+# ── 子選單：賭博基本 ─────────────────────────────────────────────────────
+async def _sub_menu_gambling(state: dict, gcfg: dict):
+    while True:
+        os.system("cls")
+        i_min = gcfg.get('interval_min', DEFAULT_INTERVAL_MIN)
+        i_max = gcfg.get('interval_max', DEFAULT_INTERVAL_MAX)
+        print(f"\n{'═'*48}\n  🎰 賭博基本設定\n{'═'*48}")
+        print(f"   [1] 賭博啟用:      {'✓ 啟用' if gcfg.get('enabled') else '✗ 停用'}")
+        print(f"   [2] 策略:          {gcfg.get('strategy', 'auto')}  (auto/fixed/kelly)")
+        print(f"   [3] 保底門檻:      {gcfg.get('threshold', 5000):,}")
+        print(f"   [4] 最小下注:      {gcfg.get('min_bet', 100):,}")
+        print(f"   [5] 最大下注:      {gcfg.get('max_bet', 500):,}  (0=自動)")
+        print(f"   [6] auto 押注比例: {gcfg.get('bet_fraction', 0.02)*100:.1f}%")
+        print(f"   [7] 下注間距:      {i_min}-{i_max} 秒")
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip()
+        if choice == "0":
+            return
+        elif choice == "1":
+            gcfg["enabled"] = not gcfg.get("enabled", True)
+            print(f"  ✓ 賭博 → {'啟用' if gcfg['enabled'] else '停用'}")
+            await _wait_enter()
+        elif choice == "2":
+            v = await _ask_choice("策略", ["auto", "fixed", "kelly"], gcfg.get('strategy', 'auto'))
+            if v: gcfg["strategy"] = v; print(f"  ✓ 策略 → {v}")
+            await _wait_enter()
+        elif choice == "3":
+            v = await _ask_int("保底門檻", gcfg.get('threshold', 5000))
+            if v is not None: gcfg["threshold"] = v; print(f"  ✓ 門檻 → {v:,}")
+            await _wait_enter()
+        elif choice == "4":
+            v = await _ask_int("最小下注", gcfg.get('min_bet', 100))
+            if v is not None: gcfg["min_bet"] = v; print(f"  ✓ 最小下注 → {v:,}")
+            await _wait_enter()
+        elif choice == "5":
+            v = await _ask_int("最大下注（0=自動）", gcfg.get('max_bet', 500))
+            if v is not None: gcfg["max_bet"] = v; print(f"  ✓ 最大下注 → {v:,}")
+            await _wait_enter()
+        elif choice == "6":
+            v = await _ask_float("押注比例（%，例 2 = 2%）", gcfg.get('bet_fraction', 0.02) * 100)
+            if v is not None: gcfg["bet_fraction"] = v / 100; print(f"  ✓ 比例 → {v:.1f}%")
+            await _wait_enter()
+        elif choice == "7":
+            print(f"  目前: {i_min}-{i_max} 秒")
+            mn = await _ask_float("最小間距秒數", i_min)
+            mx = await _ask_float("最大間距秒數", i_max)
+            if mn is not None: gcfg["interval_min"] = max(0.0, mn)
+            if mx is not None: gcfg["interval_max"] = max(0.0, mx)
+            if gcfg.get("interval_max", 0) < gcfg.get("interval_min", 0):
+                gcfg["interval_max"] = gcfg["interval_min"]
+            print(f"  ✓ 間距 → {gcfg['interval_min']}-{gcfg['interval_max']} 秒")
+            await _wait_enter()
+
+
+# ── 子選單：目標 / 停損 / 連敗冷靜 ────────────────────────────────────
+async def _sub_menu_goals(state: dict, gcfg: dict):
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*48}\n  🏁 目標 / 停損 / 連敗冷靜\n{'═'*48}")
+        print("  [停利]")
+        print(f"   [1] 目標餘額:        {gcfg.get('goal', 0):,}  (0=不設目標)")
+        print(f"   [2] 達標行為:        {gcfg.get('goal_action', 'pause')}  (pause/raise)")
+        print(f"   [3] raise 步進:      {gcfg.get('goal_step', 10000):,}")
+        print()
+        print("  [停損]")
+        print(f"   [4] 停損點:          {gcfg.get('loss_floor', 0):,}  (0=不設停損)")
+        print(f"   [5] 停損行為:        {gcfg.get('loss_action', 'pause')}  (pause/lower_threshold)")
+        print(f"   [6] 階梯下移步進:    {gcfg.get('loss_step', 5000):,}")
+        print()
+        print("  [連敗冷靜]")
+        sp = int(gcfg.get('loss_streak_pause', 0) or 0)
+        print(f"   [7] 連敗 N 場觸發:   {sp if sp else '停用'}  (0=停用)")
+        print(f"   [8] 冷靜分鐘:        {gcfg.get('loss_streak_cooldown_min', 5)}")
+        print()
+        print("   [9] 通知 UID:        {}".format(gcfg.get('notify_user_id', DEFAULT_NOTIFY_USER_ID)))
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip()
+        if choice == "0":
+            return
+        elif choice == "1":
+            v = await _ask_int("目標餘額（0=取消）", gcfg.get('goal', 0))
+            if v is not None:
+                gcfg["goal"] = v; state["goal_reached"] = False
+                print(f"  ✓ 目標 → {v:,}")
+            await _wait_enter()
+        elif choice == "2":
+            v = await _ask_choice("達標行為", ["pause", "raise"], gcfg.get('goal_action', 'pause'))
+            if v: gcfg["goal_action"] = v; print(f"  ✓ 行為 → {v}")
+            await _wait_enter()
+        elif choice == "3":
+            v = await _ask_int("raise 步進", gcfg.get('goal_step', 10000))
+            if v is not None: gcfg["goal_step"] = v; print(f"  ✓ 步進 → {v:,}")
+            await _wait_enter()
+        elif choice == "4":
+            v = await _ask_int("停損點（0=取消）", gcfg.get('loss_floor', 0))
+            if v is not None:
+                gcfg["loss_floor"] = v; state["loss_triggered"] = False
+                print(f"  ✓ 停損點 → {v:,}")
+            await _wait_enter()
+        elif choice == "5":
+            v = await _ask_choice("停損行為", ["pause", "lower_threshold"], gcfg.get('loss_action', 'pause'))
+            if v: gcfg["loss_action"] = v; print(f"  ✓ 行為 → {v}")
+            await _wait_enter()
+        elif choice == "6":
+            v = await _ask_int("階梯下移步進", gcfg.get('loss_step', 5000))
+            if v is not None: gcfg["loss_step"] = v; print(f"  ✓ 步進 → {v:,}")
+            await _wait_enter()
+        elif choice == "7":
+            v = await _ask_int("連敗 N 場後暫停（0=停用）", sp)
+            if v is not None: gcfg["loss_streak_pause"] = max(0, v); print(f"  ✓ → {v}")
+            await _wait_enter()
+        elif choice == "8":
+            v = await _ask_float("冷靜分鐘", gcfg.get('loss_streak_cooldown_min', 5))
+            if v is not None: gcfg["loss_streak_cooldown_min"] = max(0, v); print(f"  ✓ → {v} 分鐘")
+            await _wait_enter()
+        elif choice == "9":
+            raw = (await ainput("  Discord User ID（純數字）: ")).strip()
+            if raw.isdigit():
+                gcfg["notify_user_id"] = raw; print(f"  ✓ UID → {raw}")
+            await _wait_enter()
+
+
+# ── 子選單：Email / 通知 ──────────────────────────────────────────────────
+async def _sub_menu_email(state: dict, ecfg: dict, gcfg: dict):
+    while True:
+        os.system("cls")
+        bw_mul = float(gcfg.get('bigwin_multiplier', DEFAULT_BIGWIN_MULTIPLIER))
+        print(f"\n{'═'*48}\n  📧 Email / 通知\n{'═'*48}")
+        print(f"   [1] Email 主開關:    {'✓ 啟用' if ecfg.get('enabled') else '✗ 停用'}")
+        print(f"   [2] 收件人:          {ecfg.get('to', '') or '(未設定)'}")
+        print(f"   [3] SMTP 設定        host={ecfg.get('smtp_host','')} port={ecfg.get('smtp_port', 587)}")
+        print(f"   [4] 寄件人帳密       user={ecfg.get('user','') or '(未設定)'}")
+        print()
+        print("  [通知種類]")
+        print(f"   [5] 達標通知:        {'✓' if ecfg.get('notify_goal', True) else '✗'}")
+        print(f"   [6] 停損通知:        {'✓' if ecfg.get('notify_loss', True) else '✗'}")
+        print(f"   [7] 中大獎通知:      {'✓' if ecfg.get('notify_bigwin', True) else '✗'}  賠率門檻={bw_mul:.1f}x")
+        print(f"   [8] 停擺通知:        {'✓' if ecfg.get('notify_dead', True) else '✗'}  失敗門檻={ecfg.get('dead_threshold', 2)}")
+        print(f"   [9] 貓娘完成通知:    {'✓' if ecfg.get('notify_neko', True) else '✗'}")
+        print(f"   [A] 每日摘要:        {'✓' if ecfg.get('notify_digest', True) else '✗'}  時段={int(ecfg.get('digest_hour', 0)):02d}:00")
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip().upper()
+        if choice == "0":
+            return
+        elif choice == "1":
+            ecfg["enabled"] = not ecfg.get("enabled", False)
+            print(f"  ✓ Email → {'啟用' if ecfg['enabled'] else '停用'}")
+            await _wait_enter()
+        elif choice == "2":
+            raw = (await ainput(f"  收件人 (目前 {ecfg.get('to', '') or '(未設定)'}): ")).strip()
+            if raw: ecfg["to"] = raw; print(f"  ✓ → {raw}")
+            await _wait_enter()
+        elif choice == "3":
+            host = (await ainput(f"  SMTP host (目前 {ecfg.get('smtp_host', 'smtp.gmail.com')}): ")).strip()
+            port = (await ainput(f"  SMTP port (目前 {ecfg.get('smtp_port', 587)}): ")).strip()
+            if host: ecfg["smtp_host"] = host
+            if port.isdigit(): ecfg["smtp_port"] = int(port)
+            print("  ✓ SMTP 已更新")
+            await _wait_enter()
+        elif choice == "4":
+            user = (await ainput(f"  寄件人 user (目前 {ecfg.get('user', '') or '(未設定)'}): ")).strip()
+            pwd  = (await ainput("  寄件人 password (Gmail 用 App Password；Enter 跳過): ")).strip()
+            if user: ecfg["user"] = user
+            if pwd:  ecfg["password"] = pwd
+            print("  ✓ 帳密已更新")
+            await _wait_enter()
+        elif choice == "5":
+            ecfg["notify_goal"] = not ecfg.get("notify_goal", True)
+            print(f"  ✓ → {'✓' if ecfg['notify_goal'] else '✗'}")
+            await _wait_enter()
+        elif choice == "6":
+            ecfg["notify_loss"] = not ecfg.get("notify_loss", True)
+            print(f"  ✓ → {'✓' if ecfg['notify_loss'] else '✗'}")
+            await _wait_enter()
+        elif choice == "7":
+            ecfg["notify_bigwin"] = not ecfg.get("notify_bigwin", True)
+            print(f"  ✓ 中大獎通知 → {'✓' if ecfg['notify_bigwin'] else '✗'}")
+            v = await _ask_float("賠率門檻 (>=幾倍才寄信)", bw_mul)
+            if v is not None: gcfg["bigwin_multiplier"] = max(1.0, v); print(f"  ✓ 門檻 → {v:.1f}x")
+            await _wait_enter()
+        elif choice == "8":
+            ecfg["notify_dead"] = not ecfg.get("notify_dead", True)
+            print(f"  ✓ 停擺通知 → {'✓' if ecfg['notify_dead'] else '✗'}")
+            v = await _ask_int("連續失敗幾次算停擺", ecfg.get('dead_threshold', 2))
+            if v is not None and v >= 1: ecfg["dead_threshold"] = v; print(f"  ✓ 門檻 → {v}")
+            await _wait_enter()
+        elif choice == "9":
+            ecfg["notify_neko"] = not ecfg.get("notify_neko", True)
+            print(f"  ✓ → {'✓' if ecfg['notify_neko'] else '✗'}")
+            await _wait_enter()
+        elif choice == "A":
+            ecfg["notify_digest"] = not ecfg.get("notify_digest", True)
+            print(f"  ✓ 每日摘要 → {'✓' if ecfg['notify_digest'] else '✗'}")
+            v = await _ask_int("摘要時段（0~23 整點）", ecfg.get('digest_hour', 0))
+            if v is not None and 0 <= v <= 23:
+                ecfg["digest_hour"] = v; print(f"  ✓ → {v:02d}:00")
+            await _wait_enter()
+
+
+# ── 子選單：貓娘 ─────────────────────────────────────────────────────────
+async def _sub_menu_neko(state: dict, ncfg: dict):
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*48}\n  🐱 貓娘監控\n{'═'*48}")
+        print(f"   [1] 監控啟用:        {'✓' if ncfg.get('enabled', True) else '✗'}")
+        print(f"   [2] 檢查間距:        {ncfg.get('check_interval_min', 30)} 分鐘")
+        print(f"   [3] 自動領取再派遣:  {'✓' if ncfg.get('auto_claim', False) else '✗'}  (完成後自動點「領取並再派遣」)")
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip()
+        if choice == "0":
+            return
+        elif choice == "1":
+            ncfg["enabled"] = not ncfg.get("enabled", True)
+            print(f"  ✓ → {'啟用' if ncfg['enabled'] else '停用'}")
+            await _wait_enter()
+        elif choice == "2":
+            v = await _ask_float("檢查間距分鐘 (建議 15-60)", ncfg.get('check_interval_min', 30))
+            if v is not None and v >= 1: ncfg["check_interval_min"] = v; print(f"  ✓ → {v}")
+            await _wait_enter()
+        elif choice == "3":
+            ncfg["auto_claim"] = not ncfg.get("auto_claim", False)
+            print(f"  ✓ 自動領取 → {'啟用' if ncfg['auto_claim'] else '停用'}")
+            if ncfg["auto_claim"]:
+                print("  ⚠ 注意：自動領取會送 /nekomusume status 並點「領取並再派遣」按鈕")
+            await _wait_enter()
+
+
+# ── 子選單：自動轉帳 ─────────────────────────────────────────────────────
+async def _sub_menu_transfer(state: dict, tcfg: dict):
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*48}\n  💸 自動轉帳\n{'═'*48}")
+        print(f"   [1] 啟用:            {'✓' if tcfg.get('enabled', False) else '✗'}")
+        print(f"   [2] 對象:            {tcfg.get('target', '') or '(未設定)'}")
+        print(f"   [3] 金額:            {tcfg.get('amount', 0):,}")
+        print(f"   [4] 間距分鐘:        {tcfg.get('interval_min', 60)}")
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip()
+        if choice == "0":
+            return
+        elif choice == "1":
+            tcfg["enabled"] = not tcfg.get("enabled", False)
+            print(f"  ✓ → {'啟用' if tcfg['enabled'] else '停用'}")
+            await _wait_enter()
+        elif choice == "2":
+            print("  注意：對象用於觸發 Discord user picker 的搜尋字串。")
+            print("        可填顯示名稱片段或 user ID（純數字）。")
+            raw = (await ainput(f"  對象 (目前 {tcfg.get('target', '') or '(未設定)'}): ")).strip()
+            if raw: tcfg["target"] = raw; print(f"  ✓ → {raw}")
+            await _wait_enter()
+        elif choice == "3":
+            v = await _ask_int("金額", tcfg.get('amount', 0))
+            if v is not None and v > 0: tcfg["amount"] = v; print(f"  ✓ → {v:,}")
+            await _wait_enter()
+        elif choice == "4":
+            v = await _ask_float("間距分鐘", tcfg.get('interval_min', 60))
+            if v is not None and v >= 1: tcfg["interval_min"] = v; print(f"  ✓ → {v}")
+            await _wait_enter()
+
+
+# ── 子選單：Dashboard ─────────────────────────────────────────────────────
+async def _sub_menu_dashboard(state: dict, dcfg: dict):
+    while True:
+        os.system("cls")
+        pwd_set = bool((dcfg.get('password') or '').strip())
+        print(f"\n{'═'*48}\n  🌐 Web Dashboard\n{'═'*48}")
+        print(f"   [1] 啟用:            {'✓' if dcfg.get('enabled', True) else '✗'}")
+        print(f"   [2] 監聽位址:        {dcfg.get('host', '0.0.0.0')}")
+        print("                        (0.0.0.0=同 LAN 都能看；127.0.0.1=只本機)")
+        print(f"   [3] Port:            {dcfg.get('port', 8765)}")
+        print(f"   [4] 帳號:            {dcfg.get('username', 'admin')}")
+        print(f"   [5] 密碼:            {'已設定' if pwd_set else '(未設) — 任何人 LAN 都能存取！'}")
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip()
+        if choice == "0":
+            return
+        elif choice == "1":
+            dcfg["enabled"] = not dcfg.get("enabled", True)
+            print(f"  ✓ → {'啟用' if dcfg['enabled'] else '停用'}")
+            await _wait_enter()
+        elif choice == "2":
+            raw = (await ainput("  監聽位址 (0.0.0.0 / 127.0.0.1): ")).strip()
+            if raw: dcfg["host"] = raw; print(f"  ✓ → {raw}（重啟後生效）")
+            await _wait_enter()
+        elif choice == "3":
+            v = await _ask_int("Port (1024~65535)", dcfg.get('port', 8765))
+            if v is not None and 1 <= v <= 65535:
+                dcfg["port"] = v; print(f"  ✓ → {v}（重啟後生效）")
+            await _wait_enter()
+        elif choice == "4":
+            raw = (await ainput("  帳號 (預設 admin): ")).strip()
+            if raw: dcfg["username"] = raw; print(f"  ✓ → {raw}")
+            await _wait_enter()
+        elif choice == "5":
+            print("  輸入空白 → 移除密碼（不啟用驗證）")
+            raw = (await ainput("  新密碼: ")).strip()
+            dcfg["password"] = raw
+            print(f"  ✓ {'已設定' if raw else '已移除（任何人 LAN 都能進）'}")
+            await _wait_enter()
+
+
+async def run_config_menu(state: dict, config_holder: list):
+    """主選單：分類進入子選單。"""
+    config = config_holder[0]
+    gcfg = config.setdefault("gambling", {})
+    ecfg = config.setdefault("email",      {})
+    ncfg = config.setdefault("nekomusume", {})
+    tcfg = config.setdefault("transfer",   {})
+    dcfg = config.setdefault("dashboard",  {})
 
     while True:
-        i_min  = gcfg.get('interval_min', DEFAULT_INTERVAL_MIN)
-        i_max  = gcfg.get('interval_max', DEFAULT_INTERVAL_MAX)
-        goal   = gcfg.get('goal', DEFAULT_GOAL)
-        uid    = gcfg.get('notify_user_id', DEFAULT_NOTIFY_USER_ID)
-        action = gcfg.get('goal_action', DEFAULT_GOAL_ACTION)
-        step   = gcfg.get('goal_step', DEFAULT_GOAL_STEP)
-        loss_f  = int(gcfg.get('loss_floor', DEFAULT_LOSS_FLOOR) or 0)
-        loss_a  = gcfg.get('loss_action', DEFAULT_LOSS_ACTION)
-        loss_s  = int(gcfg.get('loss_step', DEFAULT_LOSS_STEP) or 0)
-        em_on  = ecfg.get('enabled', False)
-        em_to  = ecfg.get('to', '')
-        nk_on  = ncfg.get('enabled', True)
-        bw_on  = ecfg.get('notify_bigwin', True)
-        bw_mul = float(gcfg.get('bigwin_multiplier', DEFAULT_BIGWIN_MULTIPLIER))
-        dd_on  = ecfg.get('notify_dead', True)
-        dd_thr = int(ecfg.get('dead_threshold', DEFAULT_DEAD_THRESHOLD))
-        ls_on  = ecfg.get('notify_loss', True)
-        dg_on  = ecfg.get('notify_digest', True)
-        dg_hr  = int(ecfg.get('digest_hour', DEFAULT_DIGEST_HOUR))
-
-        print(f"\n{'═'*48}")
-        print("  ⚙️  Discord Bot — 設定修改")
-        print(f"{'═'*48}")
-        print("  [賭博]")
-        print(f"   [1] 保底門檻:    {gcfg.get('threshold', 5000):,}")
-        print(f"   [2] 最小下注:    {gcfg.get('min_bet', 100):,}")
-        print(f"   [3] 最大下注:    {gcfg.get('max_bet', 500):,}  (0 = 自動)")
-        print(f"   [4] 押注比例:    {gcfg.get('bet_fraction', 0.02)*100:.1f}%  (auto策略用)")
-        print(f"   [5] 策略:        {gcfg.get('strategy', 'auto')}  (auto / fixed / kelly)")
-        print(f"   [6] 賭博:        {'啟用' if gcfg.get('enabled') else '停用'}")
-        print(f"   [7] 下注間距:    {i_min}-{i_max} 秒")
-        print("  [目標]")
-        print(f"   [8] 目標餘額:    {goal:,}  (0 = 不設目標)")
-        print(f"   [9] 通知 UID:    {uid}")
-        print(f"   [A] 達標行為:    {action}  (pause = 停用; raise = 提升門檻續跑)")
-        print(f"   [B] raise 步進:  {step:,}  (達標後 新目標 = 舊目標 + 步進)")
-        print("  [停損]")
-        print(f"   [N] 停損點:      {loss_f:,}  (0 = 不設停損)")
-        print(f"   [O] 停損行為:    {loss_a}  (pause = 停用; lower_threshold = 下移門檻續跑)")
-        print(f"   [R] 階梯下移步進: {loss_s:,}  (lower_threshold 模式：新門檻 = 餘額 - 步進)")
-        print("  [Email 通知]")
-        print(f"   [C] Email:       {'啟用' if em_on else '停用'}  收件人={em_to or '(未設定)'}")
-        print(f"   [D] SMTP 設定 (host / port / user / password)")
-        print(f"   [G] 中大獎通知:  {'啟用' if bw_on else '停用'}  賠率門檻={bw_mul:.1f}x")
-        print(f"   [H] 停擺通知:    {'啟用' if dd_on else '停用'}  連續失敗門檻={dd_thr}")
-        print(f"   [P] 停損通知:    {'啟用' if ls_on else '停用'}")
-        print(f"   [T] 每日摘要:    {'啟用' if dg_on else '停用'}  寄送時段={dg_hr:02d}:00-{dg_hr:02d}:59")
-        print(f"   [U] 摘要時段:    {dg_hr:02d}:00  (0~23 整點)")
-        print("  [貓娘監控]")
-        print(f"   [E] 貓娘監控:    {'啟用' if nk_on else '停用'}  (派遣完成自動 @ 通知)")
-        print(f"   [F] 檢查間距:    {ncfg.get('check_interval_min', DEFAULT_NEKOMUSUME_INTERVAL_MIN)} 分鐘")
+        os.system("cls")
         sa_spins = state.get("slot_analysis", {}).get("total_spins", 0)
-        print("  [Slot 分析]")
-        print(f"   [I] 重置分析:    {sa_spins} 筆紀錄")
-        tr_on  = tcfg.get('enabled', False)
-        tr_tg  = tcfg.get('target', '')
-        tr_amt = tcfg.get('amount', 0)
-        tr_int = tcfg.get('interval_min', DEFAULT_TRANSFER_INTERVAL_MIN)
-        print("  [自動轉帳]")
-        print(f"   [J] 自動轉帳:    {'啟用' if tr_on else '停用'}")
-        print(f"   [K] 對象 (名稱/UID): {tr_tg or '(未設定)'}")
-        print(f"   [L] 金額:        {tr_amt:,}")
-        print(f"   [M] 間距:        {tr_int} 分鐘")
+        print(f"\n{'═'*52}")
+        print("  ⚙️  Discord Bot — 系統設定")
+        print(f"{'═'*52}")
+        print(f"   [1] 🎰 賭博基本     ({gcfg.get('strategy', 'auto')}, "
+              f"{'啟用' if gcfg.get('enabled') else '停用'})")
+        print(f"   [2] 🏁 目標 / 停損 / 連敗冷靜")
+        print(f"   [3] 📧 Email / 通知 ({'啟用' if ecfg.get('enabled') else '停用'})")
+        print(f"   [4] 🐱 貓娘監控     ({'啟用' if ncfg.get('enabled', True) else '停用'}, "
+              f"自動領取={'✓' if ncfg.get('auto_claim') else '✗'})")
+        print(f"   [5] 💸 自動轉帳     ({'啟用' if tcfg.get('enabled') else '停用'})")
+        print(f"   [6] 🌐 Dashboard    ({'啟用' if dcfg.get('enabled', True) else '停用'}, "
+              f"密碼={'已設' if dcfg.get('password') else '未設'})")
+        print(f"   [7] 🛠️  進階（檔案管理 / 系統更新）")
         print()
-        print("  [X] 進階（檔案管理 / 系統更新）")
+        print(f"   📊 Slot 分析:       {sa_spins:,} 筆紀錄")
         print()
-        print("  [0] 儲存並返回")
+        print("   [0] 儲存並返回")
         print()
 
-        choice = (await ainput("  選擇: ")).strip().upper()
+        choice = (await ainput("  選擇: ")).strip()
 
         if choice == "0":
             break
         elif choice == "1":
-            raw = (await ainput(f"  保底門檻 (目前 {gcfg.get('threshold',5000):,}): ")).strip()
-            if raw.isdigit():
-                gcfg["threshold"] = int(raw); print(f"  ✓ 門檻 → {int(raw):,}")
+            await _sub_menu_gambling(state, gcfg)
         elif choice == "2":
-            raw = (await ainput(f"  最小下注 (目前 {gcfg.get('min_bet',100):,}): ")).strip()
-            if raw.isdigit():
-                gcfg["min_bet"] = int(raw); print(f"  ✓ 最小下注 → {int(raw):,}")
+            await _sub_menu_goals(state, gcfg)
         elif choice == "3":
-            raw = (await ainput("  最大下注 (0=自動): ")).strip()
-            if raw.isdigit():
-                gcfg["max_bet"] = int(raw)
-                print(f"  ✓ 最大下注 → {int(raw):,}" if int(raw) else "  ✓ 最大下注 → 自動")
+            await _sub_menu_email(state, ecfg, gcfg)
         elif choice == "4":
-            raw = (await ainput("  押注比例 % (例: 2 = 2%): ")).strip()
-            try:
-                gcfg["bet_fraction"] = float(raw) / 100
-                print(f"  ✓ 押注比例 → {float(raw):.1f}%")
-            except ValueError:
-                print("  無效輸入")
+            await _sub_menu_neko(state, ncfg)
         elif choice == "5":
-            raw = (await ainput("  策略 (auto / fixed / kelly): ")).strip().lower()
-            if raw in ("auto", "fixed", "kelly"):
-                gcfg["strategy"] = raw; print(f"  ✓ 策略 → {raw}")
+            await _sub_menu_transfer(state, tcfg)
         elif choice == "6":
-            gcfg["enabled"] = not gcfg.get("enabled", True)
-            print(f"  ✓ 賭博 → {'啟用' if gcfg['enabled'] else '停用'}")
+            await _sub_menu_dashboard(state, dcfg)
         elif choice == "7":
-            raw_min = (await ainput(f"  最小間距秒數 (目前 {i_min}): ")).strip()
-            raw_max = (await ainput(f"  最大間距秒數 (目前 {i_max}): ")).strip()
-            try:
-                if raw_min: gcfg["interval_min"] = max(0.0, float(raw_min))
-                if raw_max: gcfg["interval_max"] = max(0.0, float(raw_max))
-                if gcfg["interval_max"] < gcfg["interval_min"]:
-                    gcfg["interval_max"] = gcfg["interval_min"]
-                print(f"  ✓ 間距 → {gcfg['interval_min']}-{gcfg['interval_max']} 秒")
-            except ValueError:
-                print("  無效輸入")
-        elif choice == "8":
-            raw = (await ainput("  目標餘額 (0=取消): ")).strip()
-            if raw.isdigit():
-                gcfg["goal"] = int(raw)
-                state["goal_reached"] = False
-                print(f"  ✓ 目標 → {int(raw):,}")
-        elif choice == "9":
-            raw = (await ainput("  Discord User ID (數字串): ")).strip()
-            if raw.isdigit():
-                gcfg["notify_user_id"] = raw
-                print(f"  ✓ 通知對象 → {raw}")
-        elif choice == "A":
-            raw = (await ainput("  達標行為 (pause / raise): ")).strip().lower()
-            if raw in ("pause", "raise"):
-                gcfg["goal_action"] = raw
-                print(f"  ✓ 達標行為 → {raw}")
-        elif choice == "B":
-            raw = (await ainput(f"  raise 步進 (目前 {step:,}): ")).strip()
-            if raw.isdigit():
-                gcfg["goal_step"] = int(raw)
-                print(f"  ✓ 步進 → {int(raw):,}")
-        elif choice == "N":
-            raw = (await ainput("  停損點 (0=取消): ")).strip()
-            if raw.isdigit():
-                gcfg["loss_floor"] = int(raw)
-                state["loss_triggered"] = False    # 重設停損狀態
-                print(f"  ✓ 停損點 → {int(raw):,}")
-        elif choice == "O":
-            raw = (await ainput("  停損行為 (pause / lower_threshold): ")).strip().lower()
-            if raw in ("pause", "lower_threshold"):
-                gcfg["loss_action"] = raw
-                print(f"  ✓ 停損行為 → {raw}")
-        elif choice == "R":
-            raw = (await ainput(f"  階梯下移步進 (目前 {loss_s:,}): ")).strip()
-            if raw.isdigit():
-                gcfg["loss_step"] = int(raw)
-                print(f"  ✓ 步進 → {int(raw):,}")
-        elif choice == "P":
-            ecfg["notify_loss"] = not ecfg.get("notify_loss", True)
-            print(f"  ✓ 停損通知 → {'啟用' if ecfg['notify_loss'] else '停用'}")
-        elif choice == "T":
-            ecfg["notify_digest"] = not ecfg.get("notify_digest", True)
-            print(f"  ✓ 每日摘要 → {'啟用' if ecfg['notify_digest'] else '停用'}")
-        elif choice == "U":
-            raw = (await ainput(f"  摘要時段 (0~23，目前 {dg_hr}): ")).strip()
-            if raw.isdigit() and 0 <= int(raw) <= 23:
-                ecfg["digest_hour"] = int(raw)
-                print(f"  ✓ 摘要時段 → {int(raw):02d}:00")
-            else:
-                print("  無效輸入（必須是 0~23）")
-        elif choice == "C":
-            ecfg["enabled"] = not ecfg.get("enabled", False)
-            print(f"  ✓ Email → {'啟用' if ecfg['enabled'] else '停用'}")
-            if ecfg["enabled"]:
-                raw = (await ainput(f"  收件人 (目前 {em_to or '(未設定)'}): ")).strip()
-                if raw:
-                    ecfg["to"] = raw
-                    print(f"  ✓ 收件人 → {raw}")
-        elif choice == "D":
-            print(f"   目前 host={ecfg.get('smtp_host','smtp.gmail.com')} "
-                  f"port={ecfg.get('smtp_port',587)} user={ecfg.get('user','')}")
-            host = (await ainput("  SMTP host (Enter 跳過): ")).strip()
-            port = (await ainput("  SMTP port (Enter 跳過): ")).strip()
-            user = (await ainput("  SMTP user (Enter 跳過): ")).strip()
-            pwd  = (await ainput("  SMTP password (Enter 跳過; Gmail 用 App Password): ")).strip()
-            if host: ecfg["smtp_host"] = host
-            if port.isdigit(): ecfg["smtp_port"] = int(port)
-            if user: ecfg["user"] = user
-            if pwd:  ecfg["password"] = pwd
-            print("  ✓ SMTP 已更新")
-        elif choice == "E":
-            ncfg["enabled"] = not ncfg.get("enabled", True)
-            print(f"  ✓ 貓娘監控 → {'啟用' if ncfg['enabled'] else '停用'}")
-        elif choice == "F":
-            raw = (await ainput("  檢查間距分鐘 (建議 15-60): ")).strip()
-            try:
-                ncfg["check_interval_min"] = max(1.0, float(raw))
-                print(f"  ✓ 檢查間距 → {ncfg['check_interval_min']} 分鐘")
-            except ValueError:
-                print("  無效輸入")
-        elif choice == "G":
-            ecfg["notify_bigwin"] = not ecfg.get("notify_bigwin", True)
-            print(f"  ✓ 中大獎通知 → {'啟用' if ecfg['notify_bigwin'] else '停用'}")
-            if ecfg["notify_bigwin"]:
-                raw = (await ainput(
-                    f"  賠率門檻 (例: 5 = 5x；目前 {bw_mul:.1f}x): "
-                )).strip()
-                try:
-                    if raw:
-                        gcfg["bigwin_multiplier"] = max(1.0, float(raw))
-                        print(f"  ✓ 賠率門檻 → {gcfg['bigwin_multiplier']:.1f}x")
-                except ValueError:
-                    print("  無效輸入")
-        elif choice == "H":
-            ecfg["notify_dead"] = not ecfg.get("notify_dead", True)
-            print(f"  ✓ 停擺通知 → {'啟用' if ecfg['notify_dead'] else '停用'}")
-            if ecfg["notify_dead"]:
-                raw = (await ainput(
-                    f"  連續失敗幾次算停擺 (目前 {dd_thr}): "
-                )).strip()
-                if raw.isdigit() and int(raw) >= 1:
-                    ecfg["dead_threshold"] = int(raw)
-                    print(f"  ✓ 連續失敗門檻 → {ecfg['dead_threshold']}")
-        elif choice == "I":
-            confirm = (await ainput("  確認重置所有 slot 分析資料？(y/N): ")).strip().lower()
-            if confirm == "y":
-                state["slot_analysis"] = _make_slot_analysis()
-                if os.path.exists(ANALYSIS_PATH):
-                    os.remove(ANALYSIS_PATH)
-                print(f"  ✓ 分析資料已重置（{sa_spins} 筆清除）")
-        elif choice == "J":
-            tcfg["enabled"] = not tcfg.get("enabled", False)
-            print(f"  ✓ 自動轉帳 → {'啟用' if tcfg['enabled'] else '停用'}")
-        elif choice == "K":
-            print("  注意：對象用於觸發 Discord user picker 的搜尋字串。")
-            print("        可填顯示名稱片段或 user ID（純數字）。")
-            raw = (await ainput(f"  對象 (目前 {tr_tg or '(未設定)'}): ")).strip()
-            if raw:
-                tcfg["target"] = raw
-                print(f"  ✓ 對象 → {raw}")
-        elif choice == "L":
-            raw = (await ainput(f"  金額 (目前 {tr_amt:,}): ")).strip()
-            if raw.isdigit() and int(raw) > 0:
-                tcfg["amount"] = int(raw)
-                print(f"  ✓ 金額 → {int(raw):,}")
-            else:
-                print("  無效輸入（需要正整數）")
-        elif choice == "M":
-            raw = (await ainput(f"  間距分鐘數 (目前 {tr_int}): ")).strip()
-            try:
-                v = float(raw)
-                if v >= 1:
-                    tcfg["interval_min"] = v
-                    print(f"  ✓ 間距 → {v} 分鐘")
-                else:
-                    print("  無效輸入（最少 1 分鐘）")
-            except ValueError:
-                print("  無效輸入")
-        elif choice == "X":
             await run_advanced_menu(state)
             if state.get("quit"):
-                # 系統更新觸發了重啟 — 立刻退出設定選單
                 break
 
     config["gambling"]   = gcfg
     config["email"]      = ecfg
     config["nekomusume"] = ncfg
     config["transfer"]   = tcfg
+    config["dashboard"]  = dcfg
     save_config(config)
     config_holder[0] = config
     _log(state, "設定已更新並儲存")
