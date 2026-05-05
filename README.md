@@ -110,13 +110,16 @@ UI 上的快速鍵：
 | `notify_bigwin` | `true` | /slot 中大獎時寄信（賠率 ≥ `gambling.bigwin_multiplier`）|
 | `notify_dead` | `true` | 連續無法讀取餘額（/slot + /balance）時寄信，提醒 bot 可能掛了 |
 | `notify_neko` | `true` | 貓娘派遣完成時寄信 |
+| `notify_digest` | `true` | 每日 `digest_hour` 整點寄一次 24h 摘要（總下注、勝率、淨收、EV、各事件次數） |
+| `digest_hour` | `0` | 每日摘要的觸發時段（0~23 整點；預設 00:00） |
 | `dead_threshold` | `2` | 連續失敗達此次數就視為「bot 停擺」並寄一次警告（每段死亡只寄一次，恢復後重置）|
 
-五種事件：
+六種事件：
 - **達成目標**：餘額 ≥ `goal`
 - **觸發停損**：餘額 ≤ `loss_floor`（每段下跌只寄一次，回升後重置）
 - **中大獎**：/slot 結果「總計贏得 / 下注」≥ `bigwin_multiplier`（預設 5x）
 - **bot 停擺**：/slot 或 /balance 連續失敗 ≥ `dead_threshold`
+- **每日摘要**：每天 `digest_hour` 整點，只要那一小時內醒過來且沒寄過，就會寄一次
 - **貓娘完成**：派遣狀態從「派遣中」變回「閒置 / 待領取」
 
 ### 貓娘派遣監控

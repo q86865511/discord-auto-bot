@@ -57,6 +57,9 @@ HISTORY_MAX_LEN   = 5000  # 最近 N 筆紀錄（避免檔案無限長大）
 # 自動轉帳預設值
 DEFAULT_TRANSFER_INTERVAL_MIN = 60   # 預設每 60 分鐘轉一次
 
+# 每日 email 摘要的觸發小時（24h 制；00:00 = 隔日寄前一日 24h 摘要）
+DEFAULT_DIGEST_HOUR = 0
+
 command_lock = asyncio.Lock()
 console = Console()
 
@@ -112,6 +115,17 @@ def make_state() -> dict:
         "neko_check_ts":     None,  # 上次 /check 讀到剩餘時間的 epoch；用於 UI 即時倒數
         "dead_notified":    False,  # 「bot 停擺」email 是否已寄出，避免重複通知
         "session_start_ts": time.time(),
+        # 事件累計（給每日摘要用；reset 在每次寄出後）
+        "events": {
+            "hourly_claims":   0,
+            "daily_claims":    0,
+            "transfers":       0,    # 轉帳成功次數
+            "neko_completes":  0,    # 偵測到貓娘完成次數
+            "stop_loss_fires": 0,    # 停損觸發次數
+            "goal_hits":       0,    # 達標次數
+            "bigwins":         0,    # 中大獎次數
+            "since_ts":        time.time(),   # 此摘要區間起始
+        },
         "slot_analysis": _make_slot_analysis(),
     }
 
@@ -703,6 +717,8 @@ def ensure_gambling_defaults(config: dict, balance: int | None = None):
     ecfg.setdefault("notify_bigwin", True)   # 中大獎 email
     ecfg.setdefault("notify_dead",   True)   # bot 停擺 email
     ecfg.setdefault("notify_neko",   True)   # 貓娘完成 email
+    ecfg.setdefault("notify_digest", True)   # 每日摘要 email
+    ecfg.setdefault("digest_hour",   DEFAULT_DIGEST_HOUR)  # 0~23
     ecfg.setdefault("dead_threshold", DEFAULT_DEAD_THRESHOLD)
 
     ncfg = config.setdefault("nekomusume", {})
@@ -1218,6 +1234,8 @@ async def run_config_menu(state: dict, config_holder: list):
         dd_on  = ecfg.get('notify_dead', True)
         dd_thr = int(ecfg.get('dead_threshold', DEFAULT_DEAD_THRESHOLD))
         ls_on  = ecfg.get('notify_loss', True)
+        dg_on  = ecfg.get('notify_digest', True)
+        dg_hr  = int(ecfg.get('digest_hour', DEFAULT_DIGEST_HOUR))
 
         print(f"\n{'═'*48}")
         print("  ⚙️  Discord Bot — 設定修改")
@@ -1245,6 +1263,8 @@ async def run_config_menu(state: dict, config_holder: list):
         print(f"   [G] 中大獎通知:  {'啟用' if bw_on else '停用'}  賠率門檻={bw_mul:.1f}x")
         print(f"   [H] 停擺通知:    {'啟用' if dd_on else '停用'}  連續失敗門檻={dd_thr}")
         print(f"   [P] 停損通知:    {'啟用' if ls_on else '停用'}")
+        print(f"   [T] 每日摘要:    {'啟用' if dg_on else '停用'}  寄送時段={dg_hr:02d}:00-{dg_hr:02d}:59")
+        print(f"   [U] 摘要時段:    {dg_hr:02d}:00  (0~23 整點)")
         print("  [貓娘監控]")
         print(f"   [E] 貓娘監控:    {'啟用' if nk_on else '停用'}  (派遣完成自動 @ 通知)")
         print(f"   [F] 檢查間距:    {ncfg.get('check_interval_min', DEFAULT_NEKOMUSUME_INTERVAL_MIN)} 分鐘")
@@ -1348,6 +1368,16 @@ async def run_config_menu(state: dict, config_holder: list):
         elif choice == "P":
             ecfg["notify_loss"] = not ecfg.get("notify_loss", True)
             print(f"  ✓ 停損通知 → {'啟用' if ecfg['notify_loss'] else '停用'}")
+        elif choice == "T":
+            ecfg["notify_digest"] = not ecfg.get("notify_digest", True)
+            print(f"  ✓ 每日摘要 → {'啟用' if ecfg['notify_digest'] else '停用'}")
+        elif choice == "U":
+            raw = (await ainput(f"  摘要時段 (0~23，目前 {dg_hr}): ")).strip()
+            if raw.isdigit() and 0 <= int(raw) <= 23:
+                ecfg["digest_hour"] = int(raw)
+                print(f"  ✓ 摘要時段 → {int(raw):02d}:00")
+            else:
+                print("  無效輸入（必須是 0~23）")
         elif choice == "C":
             ecfg["enabled"] = not ecfg.get("enabled", False)
             print(f"  ✓ Email → {'啟用' if ecfg['enabled'] else '停用'}")
@@ -2132,6 +2162,7 @@ async def hourly_loop(page: Page, state: dict, config_holder: list):
         )
         if new_bal is not None:
             state["balance"] = new_bal
+            state["events"]["hourly_claims"] += 1
             log.info("/hourly 完成，餘額更新為 %d", new_bal)
             # hourly 也可能讓餘額到達目標（例如使用者停用賭博、靠領取慢慢累積）
             await _maybe_notify_goal(page, state, config_holder)
@@ -2173,6 +2204,7 @@ async def transfer_loop(page: Page, state: dict, config_holder: list):
         try:
             ok = await do_transfer(page, target, amount)
             if ok:
+                state["events"]["transfers"] += 1
                 _log(state, f"💸 已轉帳 {amount:,} → {target}")
             else:
                 _log(state, f"⚠ 轉帳指令送出但找不到確認按鈕 ({target} {amount:,})")
@@ -2204,6 +2236,7 @@ async def daily_loop(page: Page, state: dict, config_holder: list):
         )
         if new_bal is not None:
             state["balance"] = new_bal
+            state["events"]["daily_claims"] += 1
             log.info("/daily 完成，餘額更新為 %d", new_bal)
             await _maybe_notify_goal(page, state, config_holder)
         else:
@@ -2269,6 +2302,7 @@ async def nekomusume_loop(page: Page, state: dict, config_holder: list):
         return parse_dispatch_status(text)
 
     async def _notify_completion():
+        state["events"]["neko_completes"] += 1
         user_id = str(config_holder[0].get("gambling", {})
                       .get("notify_user_id", DEFAULT_NOTIFY_USER_ID))
         try:
@@ -2343,6 +2377,7 @@ async def _notify_bigwin(state: dict, config_holder: list,
     """
     log = logging.getLogger(__name__)
     log.info("🎰 中大獎！下注 %d → 贏得 %d (%.2fx)", bet, gross_win, multiplier)
+    state["events"]["bigwins"] += 1
 
     ecfg = config_holder[0].get("email", {})
     if not (ecfg.get("enabled") and ecfg.get("notify_bigwin", True)):
@@ -2397,6 +2432,151 @@ async def _notify_dead(state: dict, config_holder: list, fail_count: int,
     log.warning("已寄出 bot 停擺警告 email（連 %d 次失敗）", fail_count)
 
 
+def _build_digest_body(state: dict) -> str:
+    """組出每日摘要 email 內文，內容涵蓋區間統計、餘額、slot 分析。"""
+    ev = state.get("events", {})
+    since = ev.get("since_ts", state.get("session_start_ts", time.time()))
+    now = time.time()
+    hours = max(0.1, (now - since) / 3600)
+
+    bal = state.get("balance")
+    bal_str = f"{bal:,}" if isinstance(bal, int) else "未知"
+    start = state.get("start_balance")
+    if isinstance(start, int) and isinstance(bal, int):
+        diff_str = f"{(bal - start):+,}"
+    else:
+        diff_str = "─"
+
+    # 區間下注紀錄（只看 since 之後）
+    history = state.get("history") or []
+    period_records = [
+        r for r in history
+        if _record_ts_after(r, since)
+    ]
+    p_total = len(period_records)
+    p_wins  = sum(1 for r in period_records if r.get("change", 0) > 0)
+    p_loss  = sum(1 for r in period_records if r.get("change", 0) < 0)
+    p_net   = sum(r.get("change", 0) for r in period_records)
+    p_wr    = (p_wins / p_total * 100) if p_total else 0.0
+
+    # Slot 分析（累計，不只本區間）
+    sa = state.get("slot_analysis", {})
+    sa_stats = compute_slot_stats(sa) if sa.get("total_spins") else None
+
+    lines = [
+        "📊 Discord Bot 每日摘要",
+        f"區間: 過去 {hours:.1f} 小時",
+        "",
+        "━━━━━━ 餘額 ━━━━━━",
+        f"目前餘額:   {bal_str}",
+        f"起始餘額:   {start if start is not None else '未知'}",
+        f"累計盈虧:   {diff_str}",
+        "",
+        "━━━━━━ 本區間下注 ━━━━━━",
+        f"下注次數:   {p_total}",
+        f"勝/敗:      {p_wins} / {p_loss}",
+        f"勝率:       {p_wr:.1f}%",
+        f"區間淨收:   {p_net:+,}",
+        "",
+        "━━━━━━ 本區間事件 ━━━━━━",
+        f"/hourly 領取:    {ev.get('hourly_claims', 0)}",
+        f"/daily 領取:     {ev.get('daily_claims', 0)}",
+        f"自動轉帳:        {ev.get('transfers', 0)}",
+        f"貓娘完成:        {ev.get('neko_completes', 0)}",
+        f"中大獎次數:      {ev.get('bigwins', 0)}",
+        f"達標次數:        {ev.get('goal_hits', 0)}",
+        f"停損觸發:        {ev.get('stop_loss_fires', 0)}",
+    ]
+
+    if sa_stats:
+        lines += [
+            "",
+            "━━━━━━ Slot 累計分析 ━━━━━━",
+            f"總轉數:     {sa_stats['total_spins']:,}",
+            f"勝率:       {sa_stats['win_rate']:.1%}",
+            f"EV:         {sa_stats['ev']:.4f}x  (邊際: {sa_stats['edge']:+.2%})",
+            f"標準差:     {sa_stats['std_dev']:.4f}",
+        ]
+        if sa_stats.get("sufficient_data"):
+            kf = sa_stats["kelly_fraction"]
+            lines.append(f"Kelly f*:   {kf:.4f}  (半 Kelly: {kf/2:.4f})")
+        else:
+            lines.append(f"Kelly f*:   資料不足（需 {MIN_KELLY_SAMPLES} 筆，"
+                         f"目前 {sa_stats['total_spins']}）")
+
+    return "\n".join(lines)
+
+
+def _record_ts_after(record: dict, since_ts: float) -> bool:
+    """history record 的 ts 是 'YYYY-MM-DD HH:MM:SS' 字串；轉 epoch 比對。"""
+    ts_str = record.get("ts", "")
+    try:
+        dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+        return dt.timestamp() >= since_ts
+    except (ValueError, TypeError):
+        return True   # parse 失敗就保守地納入
+
+
+def _reset_event_counters(state: dict):
+    """寄出摘要後 reset 區間計數器（但保留累計 history / slot_analysis）。"""
+    state["events"] = {
+        "hourly_claims":   0,
+        "daily_claims":    0,
+        "transfers":       0,
+        "neko_completes":  0,
+        "stop_loss_fires": 0,
+        "goal_hits":       0,
+        "bigwins":         0,
+        "since_ts":        time.time(),
+    }
+
+
+async def digest_loop(state: dict, config_holder: list):
+    """
+    每日 email 摘要 loop。
+    每次醒來檢查：是否到了 digest_hour 整點？是否啟用？是否本日尚未寄過？
+    寄出後 reset 區間計數器、記錄當日 (YYYY-MM-DD) 避免重寄。
+    """
+    log = logging.getLogger(__name__)
+    last_sent_date: str | None = None
+
+    while not state["quit"]:
+        # 每分鐘檢查一次（不需要更精準）
+        await interruptible_sleep(state, 60)
+        if state["quit"]:
+            break
+
+        ecfg = config_holder[0].get("email", {})
+        if not (ecfg.get("enabled") and ecfg.get("notify_digest", True)):
+            continue
+
+        try:
+            target_hour = int(ecfg.get("digest_hour", DEFAULT_DIGEST_HOUR))
+        except (TypeError, ValueError):
+            target_hour = DEFAULT_DIGEST_HOUR
+        target_hour = max(0, min(23, target_hour))
+
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+
+        # 命中目標小時 + 今日尚未寄
+        if now.hour == target_hour and last_sent_date != today:
+            try:
+                body = _build_digest_body(state)
+                ok = await send_email(
+                    ecfg, f"[Discord Bot] 📊 每日摘要 {today}", body,
+                )
+                if ok:
+                    log.info("每日摘要 email 已寄出")
+                    _log(state, f"📧 每日摘要已寄出 → {ecfg.get('to', '')}")
+                    last_sent_date = today
+                    _reset_event_counters(state)
+                else:
+                    log.warning("每日摘要 email 寄出失敗")
+            except Exception as e:
+                log.error("digest_loop 例外: %s", e)
+
+
 async def _maybe_notify_goal(page: Page, state: dict, config_holder: list):
     """
     達成 gambling.goal 時：
@@ -2419,6 +2599,7 @@ async def _maybe_notify_goal(page: Page, state: dict, config_holder: list):
 
     if bal >= goal and not state["goal_reached"]:
         state["goal_reached"] = True
+        state["events"]["goal_hits"] += 1
         user_id = str(gcfg.get("notify_user_id") or DEFAULT_NOTIFY_USER_ID)
         action  = (gcfg.get("goal_action") or DEFAULT_GOAL_ACTION).lower()
         step    = int(gcfg.get("goal_step", DEFAULT_GOAL_STEP) or 0)
@@ -2500,6 +2681,7 @@ async def _maybe_handle_stop_loss(state: dict, config_holder: list) -> bool:
 
     # 第一次觸發
     state["loss_triggered"] = True
+    state["events"]["stop_loss_fires"] += 1
     action = (gcfg.get("loss_action") or DEFAULT_LOSS_ACTION).lower()
     step   = int(gcfg.get("loss_step", DEFAULT_LOSS_STEP) or 0)
     log.warning("觸發停損 %d（餘額 %d），動作=%s", floor, bal, action)
@@ -2866,6 +3048,7 @@ async def main():
             asyncio.create_task(gambling_loop(page, state, config_holder)),
             asyncio.create_task(nekomusume_loop(page, state, config_holder)),
             asyncio.create_task(transfer_loop(page, state, config_holder)),
+            asyncio.create_task(digest_loop(state, config_holder)),
         ]
 
         await ui_task   # 等待使用者按 Q 離開
