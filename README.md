@@ -178,8 +178,6 @@ UI 上的快速鍵：
 ├── setup.bat                安裝環境（venv + 套件 + Chromium）
 ├── login.bat                執行登入
 ├── run.bat                  啟動 bot
-├── build.bat                打包成 dist/DiscordBot.exe
-├── build.spec               PyInstaller 設定檔
 ├── requirements.txt         Python 套件清單
 ├── bot/                     模組化 package
 │   ├── slot/                Slot 相關
@@ -215,28 +213,7 @@ UI 上的快速鍵：
 
 > **手機怎麼開？** 預設已是 LAN-friendly。電腦看 bot 啟動時 log 印的 LAN IP（或 `ipconfig` 找 IPv4 地址），手機在同一 WiFi 下開 `http://<那個 IP>:8765/` 即可。
 > **資安**：dashboard 沒有密碼。只在你信任的私人 LAN 開啟。如果你的網路上有不信任的人，務必改回 `127.0.0.1` 或加 firewall rule。
-> **零外部依賴**：只用 Python 內建 `http.server`，所以打包 `.exe` 也不用裝 FastAPI 等套件。
-
-### 打包成 `.exe`（不需要 Python 也能跑）
-
-雙擊執行：
-
-```
-build.bat
-```
-
-會用 PyInstaller 把整個程式打包成 `dist\DiscordBot.exe`（約 30~50 MB 的單一檔案）。
-
-#### 部署到沒裝 Python 的電腦
-
-1. 把 `dist\DiscordBot.exe` 複製過去
-2. 放上 `config.json` 與 `storage_state.json`（與 .exe 同目錄）
-3. 雙擊 `DiscordBot.exe`：
-   - **第一次啟動會下載 Chromium（約 300 MB，需要網路、約 5-10 分鐘）**，存到使用者 `%LOCALAPPDATA%\ms-playwright`
-   - 下載完成後直接接著啟動 bot；之後每次啟動就直接開
-4. Windows Defender 可能誤判為病毒（PyInstaller 通病）— 第一次執行時請選「仍要執行」並加白名單
-
-> 為什麼不把 Chromium 一起塞進 .exe？太肥了（會變 400+ MB），冷啟動還要解壓縮 5-10 秒。動態下載一次就好。
+> **零外部依賴**：dashboard 只用 Python 內建 `http.server`，不用安裝 FastAPI 等套件。
 
 ### 日誌與除錯
 

@@ -2695,55 +2695,7 @@ async def ui_loop(state: dict, config_holder: list, page: Page | None = None):
 
 
 # ── 主程式 ────────────────────────────────────────────────────────────────────
-def _ensure_chromium_installed() -> bool:
-    """
-    .exe 打包用：第一次執行時 Chromium 還沒下載 → 自動跑 `playwright install chromium`。
-    走原始檔案的環境（venv / 系統 Python）就跳過 — Chromium 已透過 setup.bat 裝過。
-    回傳 True 表示可繼續啟動。
-    """
-    import subprocess
-    # 偵測是否為 PyInstaller 打包：sys.frozen / sys._MEIPASS
-    is_frozen = getattr(sys, "frozen", False)
-    if not is_frozen:
-        return True
-    try:
-        # 嘗試找 Chromium executable；找不到就觸發下載
-        from playwright._impl._driver import compute_driver_executable
-        # 簡單判斷：透過 playwright 的 _impl 確認 binaries 目錄存在
-        from pathlib import Path
-        cache_dir = Path.home() / "AppData" / "Local" / "ms-playwright"
-        if cache_dir.exists() and any(cache_dir.glob("chromium-*")):
-            return True
-    except Exception:
-        pass
-
-    print("=== 第一次執行：下載 Chromium 瀏覽器（約 300MB，需要網路）===")
-    print("這只會跑一次，下次啟動就跳過")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=False,
-            text=True,
-            timeout=900,    # 15 分鐘上限
-        )
-        if result.returncode != 0:
-            print(f"⚠ playwright install 失敗（exit code {result.returncode}）")
-            return False
-    except subprocess.TimeoutExpired:
-        print("⚠ Chromium 下載逾時（15 分鐘），請檢查網路後重新啟動")
-        return False
-    except Exception as e:
-        print(f"⚠ Chromium 下載發生錯誤: {e}")
-        return False
-    print("=== Chromium 下載完成 ===\n")
-    return True
-
-
 async def main():
-    if not _ensure_chromium_installed():
-        print("無法準備 Chromium，程式中止。請檢查網路與磁碟空間。")
-        return
-
     if not os.path.exists(STORAGE_STATE_PATH):
         print("找不到 storage_state.json！請先執行 login.py 完成登入。")
         return
