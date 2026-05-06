@@ -37,8 +37,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # main.py 是入口,有些動態 import / 全局狀態屬於正常設計
 "main.py" = ["E402"]
-# Dashboard 因 HTML embed 字串很長,放寬一點
-"bot/web/dashboard.py" = ["E501"]
+# Templates 內嵌 HTML/JS,字串很長
+"bot/web/templates.py" = ["E501"]
 
 [tool.ruff.format]
 # format 風格走 ruff 預設(類似 black)
