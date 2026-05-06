@@ -73,7 +73,8 @@ h2.section { font-size: 14px; color: #8b949e; text-transform: uppercase;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 12px;
-  align-items: start;
+  /* 預設 align-items: stretch — 同一橫列的卡片自動切齊到該列最高一張的高度,
+     列與列之間維持各自自然高度(不會把 chart card 也拉高) */
 }
 @media (max-width: 1100px) { .grid { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 900px)  { .grid { grid-template-columns: repeat(2, 1fr); } }
