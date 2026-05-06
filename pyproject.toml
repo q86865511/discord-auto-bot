@@ -1,0 +1,46 @@
+[tool.ruff]
+# 跟主流社群一致;不要太嚴讓 PR 卡 noise issues
+line-length = 110
+target-version = "py310"
+extend-exclude = ["__pycache__", ".venv", "build", "dist", "data", "logs", "exports"]
+
+[tool.ruff.lint]
+# 啟用基本錯誤偵測 + 一些風格 / 安全 lint。完整列表 https://docs.astral.sh/ruff/rules/
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes (unused imports / undefined names)
+    "B",     # flake8-bugbear (likely bugs)
+    "I",     # isort (import 排序)
+    "UP",    # pyupgrade (用較新語法)
+    "SIM",   # flake8-simplify
+    "PIE",   # flake8-pie (misc gotchas)
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "E501",  # 行太長(110 chars 已經給夠);UI 字串 + 中文混排會超不少
+    "B008",  # 不用對 Default function call 報警(像 typer 那種寫法很常見)
+    "SIM108", # 三元 vs if/else — 兩種都讀得懂
+    "SIM105", # try/except/pass 不一定要改 contextlib.suppress
+    "SIM118", # `key in dict` vs `key in dict.keys()` — 後者有時候更明確
+    "RUF001", # 中文標點和 ASCII 標點長相相同的警告 — 我們是中英混排,常出現
+    "RUF002", # 同上,注解中的相似字元
+    "RUF003",
+    "RUF100", # 「未啟用的 noqa 指示」— 程式碼裡很多 # noqa: BLE001 是原意保留
+              # (我們沒開 BLE001 規則,但這些 noqa 留作文件用),不要砍掉
+    "PIE790", # `pass` 在 except 裡的 noise
+    "B904",   # raise from — 暴力捕捉的呼叫鏈大多無關緊要
+    "UP007",  # X | Y 對 Optional[X] — 兼容性考量先不強制
+    "UP037",  # quoted annotations - TYPE_CHECKING 區段需要
+]
+
+[tool.ruff.lint.per-file-ignores]
+# main.py 是入口,有些動態 import / 全局狀態屬於正常設計
+"main.py" = ["E402"]
+# Dashboard 因 HTML embed 字串很長,放寬一點
+"bot/web/dashboard.py" = ["E501"]
+
+[tool.ruff.format]
+# format 風格走 ruff 預設(類似 black)
+quote-style = "double"
+indent-style = "space"

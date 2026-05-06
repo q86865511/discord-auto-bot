@@ -181,6 +181,19 @@ bot 啟動時 log 會印出本機 + LAN IP 兩個網址。
 - 想清掉所有 log：按 `C` → 進階 → 清空 log + 輪替檔
 - `logs/slot_debug.log` 只在 slot 解析失敗時才寫，用於 regex 排查
 
+## 開發者
+
+`pyproject.toml` 內含 ruff 設定。要跑：
+
+```bash
+pip install ruff
+python -m ruff check .         # 列出所有 lint issue
+python -m ruff check . --fix   # 自動修能修的
+python -m ruff format .        # 格式化
+```
+
+ruff 不是 runtime dependency，只在你想 lint / format 時裝。
+
 ## 技術說明
 
 - **Emoji 解析**：Discord textContent 不含 `<img>` 的 alt（emoji 是 img），自家 walk DOM 把 alt 也接出來，否則 slot 符號全是空字串

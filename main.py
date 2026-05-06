@@ -355,18 +355,25 @@ async def main() -> None:
         def on_config_save_sync(partial: dict) -> dict:
             """Dashboard thread → main loop 的 sync 包裝。
 
-            把 partial config 套到目前 config,跑 schema 驗證,然後 schedule
-            一個 coroutine 到 main loop 把它存到 DB。所有 thread/coroutine
-            的協調都在這裡集中處理。
+            交易式更新:
+              1. deepcopy 目前 config(避免 in-place mutation)
+              2. merge_partial 套到 copy 上、跑驗證
+              3. 驗證 OK 才 schedule save_config 到 main loop
+              4. DB 寫入成功後才把 copy 置換到 config_holder[0]
+            驗證或 DB 寫入失敗都不會碰到記憶體中的真實 config。
             """
+            import copy as _copy
             try:
                 cur = config_holder[0]
-                errs = merge_partial(cur, partial)
+                trial = _copy.deepcopy(cur)        # ← 改動 trial,不碰 cur
+                errs = merge_partial(trial, partial)
                 if errs:
                     return {"ok": False, "errors": errs, "message": "驗證失敗"}
-                fut = asyncio.run_coroutine_threadsafe(save_config(db, cur), loop)
+                # 寫 DB 用 copy(若失敗 cur 仍乾淨)
+                fut = asyncio.run_coroutine_threadsafe(save_config(db, trial), loop)
                 warnings = fut.result(timeout=5) or []
-                config_holder[0] = cur
+                # 只有 DB 寫入成功才置換 config_holder
+                config_holder[0] = trial
                 return {"ok": True, "warnings": warnings}
             except Exception as e:    # noqa: BLE001
                 log.exception("on_config_save_sync 失敗")
@@ -378,6 +385,7 @@ async def main() -> None:
                 from bot.web.dashboard import start_dashboard_thread
                 dashboard_thread = start_dashboard_thread(
                     state, config_provider, on_action, on_config_save_sync,
+                    main_loop=loop,    # ← 傳入 main loop 以便 thread-safe snapshot
                 )
             except Exception:    # noqa: BLE001
                 log.exception("dashboard 啟動失敗")

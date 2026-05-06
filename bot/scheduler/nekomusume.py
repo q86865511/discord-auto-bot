@@ -46,9 +46,14 @@ async def nekomusume_loop(
             return "unknown", None
         return parse_dispatch_status(text)
 
-    async def _notify_completion() -> None:
-        async with state.lock:
-            state.events.neko_completes += 1
+    async def _notify_completion(*, is_real_transition: bool = True) -> None:
+        """派遣完成時:嘗試自動領取 + 通知。
+
+        is_real_transition=True 代表確實偵測到 dispatching → idle 的轉折,
+        會增加 events.neko_completes 並寄通知。
+        is_real_transition=False(啟動時的 idle 探測)只在「真的領到 loot」
+        時才寄通知,沒領到就靜默(可能根本沒有東西能領)。
+        """
         ncfg = config_provider().nekomusume
         gcfg = config_provider().gambling
         user_id = (gcfg.notify_user_id or DEFAULT_NOTIFY_USER_ID).strip()
@@ -64,6 +69,17 @@ async def nekomusume_loop(
             except Exception as e:    # noqa: BLE001
                 log.exception("自動領取失敗")
                 state.queue_log(f"⚠ 貓娘自動領取失敗: {e}")
+
+        # 決定要不要計數 / 寄通知:
+        # - 真的轉折 (dispatching → idle):一定算
+        # - 啟動探測 (last_status=None → idle):只有真的領到才算
+        should_notify = is_real_transition or auto_claimed
+        if not should_notify:
+            log.debug("啟動探測 — 沒有 loot 可領,不發通知")
+            return
+
+        async with state.lock:
+            state.events.neko_completes += 1
 
         try:
             if auto_claimed:
@@ -115,7 +131,18 @@ async def nekomusume_loop(
             async with state.lock:
                 state.neko_deadline_ts = None
             if last_status == "dispatching":
-                await _notify_completion()
+                # 確實偵測到完成轉折 — 一定計數 + 通知
+                await _notify_completion(is_real_transition=True)
+            elif last_status is None:
+                # 剛啟動 + 偵測到 idle:可能 cat 閒置在領取狀態
+                # (bot 上次沒跑完、或人工已派遣完成但沒領)
+                # 試一次 auto_claim;有領到就跟轉折一樣處理,沒領到就靜默
+                ncfg2 = config_provider().nekomusume
+                if ncfg2.auto_claim:
+                    log.info("剛啟動偵測到 idle — 嘗試 auto_claim 探測")
+                    await _notify_completion(is_real_transition=False)
+                else:
+                    log.info("貓娘狀態: %s(閒置)", new_status)
             else:
                 log.info("貓娘狀態: %s(閒置)", new_status)
 

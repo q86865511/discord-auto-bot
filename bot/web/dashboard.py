@@ -34,8 +34,10 @@ from bot.core.constants import (
 from bot.core.log_filter import redact_text
 
 if TYPE_CHECKING:
+    import asyncio
+
     from bot.core.config import BotConfig
-    from bot.core.db import Database
+    from bot.core.db import Database  # noqa: F401  # 預留給未來 typing
     from bot.core.state import BotState
 
 log = logging.getLogger("dashboard")
@@ -1101,18 +1103,56 @@ def _build_analysis_snapshot(state: "BotState") -> dict:
 
 
 # ── HTTP handler ──────────────────────────────────────────────────────
+def _run_in_main_loop(
+    main_loop, state, builder, *args, timeout: float = 2.0,
+):
+    """在 main asyncio loop 內(state.lock 保護下)呼叫 builder(...) 組快照。
+
+    給 dashboard thread 用 — 避免直接讀 main loop 正在改的 state。
+
+    builder 是 sync function。我們在 main loop 內 wrap 一個 coroutine,
+    取得 state.lock 後再呼叫 builder — 這樣 builder 看到的是「同一瞬間」
+    的 state 而不是更新一半的中間狀態。
+
+    若 main_loop=None(舊呼叫者沒提供),fallback 直接呼叫 builder 不加 lock。
+    """
+    if main_loop is None:
+        return builder(*args)
+    import asyncio as _aio
+
+    async def _wrap():
+        async with state.lock:
+            return builder(*args)
+    fut = _aio.run_coroutine_threadsafe(_wrap(), main_loop)
+    try:
+        return fut.result(timeout=timeout)
+    except (TimeoutError, _aio.TimeoutError):
+        log.warning("snapshot 在 %.1fs 內未返回 — 改 fallback 直讀 state", timeout)
+        return builder(*args)
+
+
 def _make_handler(
     state: "BotState",
     config_provider: Callable[[], "BotConfig"],
     on_action: Callable[[str], dict],
     on_config_save_sync: Callable[[dict], dict],
+    main_loop: "asyncio.AbstractEventLoop | None" = None,
 ):
     """工廠 — 動態產出 BaseHTTPRequestHandler subclass。
 
     on_config_save_sync 接收 partial config dict,**同步**回傳
     {"ok": bool, "errors": [...], "warnings": [...]}.
+
+    main_loop:主 event loop 的 reference。若提供,/api/state 與 /api/analysis
+    會 schedule 一個 coroutine 到 main loop 內(在 state.lock 保護下)組 snapshot,
+    然後透過 thread-safe future 拿回結果 — 確保 dashboard thread 不會讀到
+    main loop 正在更新一半的 state。
+
+    若 main_loop=None,fallback 直接讀 state(可能拿到不一致的快照)。
+
     Dashboard 在 thread 中跑,不能直接 await async function;改用 sync 包裝。
     """
+    import asyncio as _asyncio
 
     class DashboardHandler(http.server.BaseHTTPRequestHandler):
         # 縮短 server header(避免洩漏 Python 版本)
@@ -1209,10 +1249,14 @@ def _make_handler(
                 self._json({"lines": lines, "count": len(lines)})
                 return
             if path == "/api/state":
-                self._json(_build_state_snapshot(state, config_provider()))
+                self._json(_run_in_main_loop(
+                    main_loop, state, _build_state_snapshot, state, config_provider()
+                ))
                 return
             if path == "/api/analysis":
-                self._json(_build_analysis_snapshot(state))
+                self._json(_run_in_main_loop(
+                    main_loop, state, _build_analysis_snapshot, state
+                ))
                 return
             if path == "/api/config":
                 cfg = config_provider().to_redacted_dict()
@@ -1326,6 +1370,7 @@ def start_dashboard_thread(
     on_config_save_sync: Callable[[dict], dict],
     host: str | None = None,
     port: int | None = None,
+    main_loop=None,
 ) -> threading.Thread | None:
     cfg = config_provider().dashboard
     host = host or cfg.host
@@ -1337,7 +1382,8 @@ def start_dashboard_thread(
                   "請設定密碼或改 host=127.0.0.1。")
         return None
 
-    handler_cls = _make_handler(state, config_provider, on_action, on_config_save_sync)
+    handler_cls = _make_handler(state, config_provider, on_action,
+                                 on_config_save_sync, main_loop=main_loop)
     try:
         server = _ReusableTCPServer((host, port), handler_cls)
     except OSError as e:
