@@ -1,177 +1,202 @@
-"""
-Web dashboard — 在 localhost (或 LAN) 顯示 bot 即時狀態 + 控制台。
+"""Web dashboard — 在 localhost (或 LAN) 顯示 bot 即時狀態 + 控制台。
 
-純 Python stdlib（http.server + json）就夠，不引入 FastAPI 等新套件，
-打包 .exe 也不會肥。
+安全強化(v2):
+- HTTP Basic Auth 用 hmac.compare_digest 比對(防 timing attack)
+- 0.0.0.0 + 無密碼 = 啟動失敗(由 main 層在 wizard 已修正,這裡再做最後保護)
+- /api/config POST 走 schema 驗證(BotConfig.validate),拒絕不合理值
+- /api/logs 過濾 password / token / secret 等敏感字
+- HTML 主體經 escape;後端不再回傳含 HTML markup 的 string 欄位
+- 加 CSRF 保護:所有 POST 必須有 Origin/Referer 與 Host 同源
 
-頁面結構：
-- /            概覽（餘額 / 排程 / 累計淨收圖 / 最近下注）
-- /analysis    Slot 分析（EV / 賠率分布 / 符號統計 / 線路統計）
-- /control     控制台（暫停 / 重置分析 / 重啟 / 編輯設定）
-
-API：
-- GET  /api/state         概覽快照
-- GET  /api/analysis      分析快照
-- GET  /api/config        當前設定
-- POST /api/action/<name> 動作: pause / resume / reset_analysis / restart
-- POST /api/config        更新 config（merge + save_config）
-
-使用：
-- main.py 啟動 dashboard 在背景 thread
-- 設定：config["dashboard"] = {"enabled": true, "host": "0.0.0.0", "port": 8765}
-- 預設 host 是 0.0.0.0（同 LAN 手機可開；要鎖本機就改 "127.0.0.1"）
+純 Python stdlib(http.server + json),零外部依賴。
 """
 from __future__ import annotations
 
+import hmac
 import http.server
 import json
 import logging
 import os
+import re
 import socket
 import socketserver
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+from bot.core.constants import (
+    HIGH_MULT_THRESHOLD,
+    LOG_FILE_PATH,
+    MIN_KELLY_SAMPLES,
+    PAYOUT_BUCKETS,
+)
+from bot.core.log_filter import redact_text
+
+if TYPE_CHECKING:
+    from bot.core.config import BotConfig
+    from bot.core.db import Database
+    from bot.core.state import BotState
+
+log = logging.getLogger("dashboard")
 
 
-# ── 共用 HTML 頭部 / 導覽列 ─────────────────────────────────────────────────
+# ── HTML chrome ──────────────────────────────────────────────────────
+_CSS = """
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0;
+  font-family: -apple-system, "Segoe UI", "Microsoft JhengHei", sans-serif;
+  background: #0d1117; color: #e6edf3;
+  min-height: 100vh;
+}
+header {
+  background: #161b22; border-bottom: 1px solid #30363d;
+  padding: 12px 16px; display: flex; align-items: center; gap: 12px;
+  position: sticky; top: 0; z-index: 10;
+}
+header h1 { font-size: 18px; margin: 0; color: #58a6ff; }
+nav {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  margin-left: auto;
+}
+.nav-link {
+  padding: 6px 12px; border-radius: 6px; text-decoration: none;
+  color: #8b949e; font-size: 14px; transition: background 0.15s;
+}
+.nav-link:hover { background: #21262d; color: #e6edf3; }
+.nav-link.active { background: #1f6feb; color: white; }
+main { padding: 16px; }
+h2.section { font-size: 14px; color: #8b949e; text-transform: uppercase;
+  letter-spacing: 0.5px; margin: 20px 0 8px 0; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+@media (max-width: 1100px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 900px)  { .grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 600px)  { .grid { grid-template-columns: 1fr; } }
+.card {
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 12px;
+}
+.card h3 {
+  font-size: 14px; margin: 0 0 8px 0; color: #8b949e;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.row { display: flex; justify-content: space-between; padding: 4px 0;
+  border-bottom: 1px solid #21262d; }
+.row:last-child { border-bottom: none; }
+.row .label { color: #8b949e; font-size: 13px; }
+.row .value { font-weight: 600; font-variant-numeric: tabular-nums; }
+.green  { color: #3fb950; }
+.red    { color: #f85149; }
+.yellow { color: #d29922; }
+.blue   { color: #58a6ff; }
+.dim    { color: #6e7681; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+table th, table td {
+  text-align: left; padding: 6px 8px;
+  border-bottom: 1px solid #30363d;
+  font-variant-numeric: tabular-nums;
+}
+table th { color: #8b949e; font-weight: normal; font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.5px; }
+table.right-align td:not(:first-child),
+table.right-align th:not(:first-child) { text-align: right; }
+@media (max-width: 600px) {
+  table { font-size: 12px; }
+  table th, table td { padding: 4px; }
+}
+#status-bar { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+#status-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #3fb950; animation: pulse 2s infinite;
+}
+#status-dot.paused { background: #d29922; animation: none; }
+#status-dot.dead   { background: #f85149; animation: none; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.footer { margin-top: 24px; padding-top: 12px;
+  border-top: 1px solid #30363d;
+  color: #6e7681; font-size: 12px; text-align: center; }
+canvas { width: 100%; max-width: 100%; height: 250px; display: block; }
+@media (max-width: 600px) { canvas { height: 180px; } }
+.btn {
+  background: #21262d; border: 1px solid #30363d; color: #e6edf3;
+  padding: 10px 16px; border-radius: 6px; cursor: pointer;
+  font-size: 14px; transition: all 0.15s;
+}
+.btn:hover { background: #30363d; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.primary { background: #1f6feb; border-color: #1f6feb; }
+.btn.primary:hover { background: #388bfd; }
+.btn.danger  { background: #da3633; border-color: #da3633; }
+.btn.danger:hover { background: #f85149; }
+.btn.warning { background: #9e6a03; border-color: #9e6a03; }
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.field { margin: 8px 0; }
+.field label { display: block; color: #8b949e; font-size: 12px;
+  margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.field input, .field select {
+  width: 100%; padding: 6px 10px; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 4px;
+  color: #e6edf3; font-size: 14px;
+}
+.field input:focus, .field select:focus {
+  outline: none; border-color: #1f6feb;
+}
+.field .err { color: #f85149; font-size: 12px; margin-top: 4px; }
+.toast {
+  position: fixed; bottom: 20px; right: 20px;
+  padding: 10px 16px; border-radius: 6px;
+  background: #1f6feb; color: white;
+  transform: translateY(100px); opacity: 0;
+  transition: all 0.3s;
+  max-width: 80%;
+}
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.error { background: #da3633; }
+""".strip()
+
+
+_NAV_ITEMS = [
+    ("overview", "/",         "📊 概覽"),
+    ("analysis", "/analysis", "🎯 拉霸分析"),
+    ("logs",     "/logs",     "📋 即時日誌"),
+    ("control",  "/control",  "🛠️ 系統設定"),
+]
+
+
+def _esc(s: Any) -> str:
+    """HTML escape;非字串轉成字串。None 變空字串。"""
+    if s is None:
+        return ""
+    text = str(s)
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("'", "&#39;"))
+
+
 def _html_shell(title: str, body_html: str, active: str = "overview") -> str:
-    nav_items = [
-        ("overview", "/",         "📊 概覽"),
-        ("analysis", "/analysis", "🎯 拉霸分析"),
-        ("logs",     "/logs",     "📋 即時日誌"),
-        ("control",  "/control",  "🛠️ 系統設定"),
-    ]
     nav_html = "".join(
         f'<a href="{href}" class="nav-link{" active" if key == active else ""}">{label}</a>'
-        for key, href, label in nav_items
+        for key, href, label in _NAV_ITEMS
     )
+    # 注意:body_html 內容由 caller 確保安全(各頁 body 是寫死的 template,不含使用者資料)
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title} — Discord Auto Bot</title>
-<style>
-  * {{ box-sizing: border-box; }}
-  body {{
-    margin: 0; padding: 0;
-    font-family: -apple-system, "Segoe UI", "Microsoft JhengHei", sans-serif;
-    background: #0d1117; color: #e6edf3;
-    min-height: 100vh;
-  }}
-  header {{
-    background: #161b22; border-bottom: 1px solid #30363d;
-    padding: 12px 16px; display: flex; align-items: center; gap: 12px;
-    position: sticky; top: 0; z-index: 10;
-  }}
-  header h1 {{ font-size: 18px; margin: 0; color: #58a6ff; }}
-  nav {{
-    display: flex; gap: 4px; flex-wrap: wrap;
-    margin-left: auto;
-  }}
-  .nav-link {{
-    padding: 6px 12px; border-radius: 6px; text-decoration: none;
-    color: #8b949e; font-size: 14px; transition: background 0.15s;
-  }}
-  .nav-link:hover {{ background: #21262d; color: #e6edf3; }}
-  .nav-link.active {{ background: #1f6feb; color: white; }}
-  main {{ padding: 16px; }}
-  h2.section {{ font-size: 14px; color: #8b949e; text-transform: uppercase;
-    letter-spacing: 0.5px; margin: 20px 0 8px 0; }}
-  .grid {{
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);     /* 桌機固定 4 欄，第一排剛好 4 張卡 */
-    gap: 12px;
-    align-items: start;        /* 卡片各自高度，不再被同列最高的撐到一樣高 */
-  }}
-  /* 平板：縮成 2 欄；手機：縮成 1 欄 */
-  @media (max-width: 900px) {{
-    .grid {{ grid-template-columns: repeat(2, 1fr); }}
-  }}
-  @media (max-width: 500px) {{
-    .grid {{ grid-template-columns: 1fr; }}
-  }}
-  .card {{
-    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-    padding: 12px;
-  }}
-  .card h3 {{
-    font-size: 14px; margin: 0 0 8px 0; color: #8b949e;
-    text-transform: uppercase; letter-spacing: 0.5px;
-  }}
-  .row {{ display: flex; justify-content: space-between; padding: 4px 0;
-    border-bottom: 1px solid #21262d; }}
-  .row:last-child {{ border-bottom: none; }}
-  .row .label {{ color: #8b949e; font-size: 13px; }}
-  .row .value {{ font-weight: 600; font-variant-numeric: tabular-nums; }}
-  .green  {{ color: #3fb950; }}
-  .red    {{ color: #f85149; }}
-  .yellow {{ color: #d29922; }}
-  .blue   {{ color: #58a6ff; }}
-  .dim    {{ color: #6e7681; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  table th, table td {{
-    text-align: left; padding: 6px 8px;
-    border-bottom: 1px solid #30363d;
-    font-variant-numeric: tabular-nums;
-  }}
-  table th {{ color: #8b949e; font-weight: normal; font-size: 12px;
-    text-transform: uppercase; letter-spacing: 0.5px; }}
-  table.right-align td:not(:first-child),
-  table.right-align th:not(:first-child) {{ text-align: right; }}
-  #status-bar {{
-    display: flex; align-items: center; gap: 8px; font-size: 13px;
-  }}
-  #status-dot {{
-    width: 10px; height: 10px; border-radius: 50%;
-    background: #3fb950; animation: pulse 2s infinite;
-  }}
-  #status-dot.paused {{ background: #d29922; animation: none; }}
-  #status-dot.dead   {{ background: #f85149; animation: none; }}
-  @keyframes pulse {{
-    0%, 100% {{ opacity: 1; }}
-    50% {{ opacity: 0.5; }}
-  }}
-  .footer {{ margin-top: 24px; padding-top: 12px;
-    border-top: 1px solid #30363d;
-    color: #6e7681; font-size: 12px; text-align: center; }}
-  canvas {{ width: 100%; max-width: 100%; height: 250px; display: block; }}
-  /* control page */
-  .btn {{
-    background: #21262d; border: 1px solid #30363d; color: #e6edf3;
-    padding: 10px 16px; border-radius: 6px; cursor: pointer;
-    font-size: 14px; transition: all 0.15s;
-  }}
-  .btn:hover {{ background: #30363d; }}
-  .btn.primary {{ background: #1f6feb; border-color: #1f6feb; }}
-  .btn.primary:hover {{ background: #388bfd; }}
-  .btn.danger  {{ background: #da3633; border-color: #da3633; }}
-  .btn.danger:hover {{ background: #f85149; }}
-  .btn.warning {{ background: #9e6a03; border-color: #9e6a03; }}
-  .btn-row {{ display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }}
-  .field {{ margin: 8px 0; }}
-  .field label {{ display: block; color: #8b949e; font-size: 12px;
-    margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }}
-  .field input, .field select {{
-    width: 100%; padding: 6px 10px; background: #0d1117;
-    border: 1px solid #30363d; border-radius: 4px;
-    color: #e6edf3; font-size: 14px;
-  }}
-  .field input:focus, .field select:focus {{
-    outline: none; border-color: #1f6feb;
-  }}
-  .toast {{
-    position: fixed; bottom: 20px; right: 20px;
-    padding: 10px 16px; border-radius: 6px;
-    background: #1f6feb; color: white;
-    transform: translateY(100px); opacity: 0;
-    transition: all 0.3s;
-  }}
-  .toast.show {{ transform: translateY(0); opacity: 1; }}
-  .toast.error {{ background: #da3633; }}
-</style>
+<title>{_esc(title)} — Discord Auto Bot</title>
+<style>{_CSS}</style>
 </head>
 <body>
   <header>
@@ -185,6 +210,11 @@ def _html_shell(title: str, body_html: str, active: str = "overview") -> str:
   <main>{body_html}</main>
   <div id="toast" class="toast"></div>
 <script>
+function escapeHtml(s) {{
+  if (s == null) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}}
 function showToast(msg, isError) {{
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -199,11 +229,11 @@ async function refreshStatus() {{
     dot.className = '';
     if (d.paused) dot.classList.add('paused');
     if (d.dead_notified) dot.classList.add('dead');
-    document.getElementById('status-text').textContent =
-      d.paused ? '已暫停' : (d.status || '運行中');
+    const t = document.getElementById('status-text');
+    t.textContent = d.paused ? '已暫停' : (d.status || '運行中');
   }} catch(e) {{
-    document.getElementById('status-text').innerHTML =
-      '<span class="red">無法連線到 bot</span>';
+    document.getElementById('status-text').textContent = '無法連線到 bot';
+    document.getElementById('status-text').className = 'red';
   }}
 }}
 refreshStatus();
@@ -216,8 +246,8 @@ def _html_close() -> str:
     return "</body></html>"
 
 
-# ── 頁面：Overview ─────────────────────────────────────────────────────────
-_OVERVIEW_BODY = """
+# ── 頁面 body templates(純 markup,不含使用者資料) ────────────────
+_OVERVIEW_BODY = r"""
 <div class="grid">
   <div class="card">
     <h3>💰 餘額 / 損益</h3>
@@ -263,21 +293,22 @@ _OVERVIEW_BODY = """
     </table>
   </div>
 </div>
-<div class="footer">
-  自動刷新 2 秒 · <a href="/control" style="color:#58a6ff;">控制台</a> ·
-  <a href="/analysis" style="color:#58a6ff;">完整分析</a>
-</div>
+<div class="footer">自動刷新 2 秒</div>
 <script>
-function fmt(n) { if (n == null) return '─'; return n.toLocaleString(); }
+function fmt(n) { if (n == null) return '─'; return Number(n).toLocaleString(); }
 function fmtSign(n) {
   if (n == null) return '─';
-  const s = (n >= 0 ? '+' : '') + n.toLocaleString();
-  return n >= 0 ? `<span class="green">${s}</span>` : `<span class="red">${s}</span>`;
+  const s = (n >= 0 ? '+' : '') + Number(n).toLocaleString();
+  const cls = n >= 0 ? 'green' : 'red';
+  const span = document.createElement('span');
+  span.className = cls;
+  span.textContent = s;
+  return span;
 }
 function fmtRemaining(epoch) {
   if (!epoch) return '─';
   const r = Math.floor(epoch - Date.now()/1000);
-  if (r <= 0) return '<span class="green">即將執行</span>';
+  if (r <= 0) return '即將執行';
   const h = Math.floor(r / 3600);
   const m = Math.floor((r % 3600) / 60);
   const s = r % 60;
@@ -285,41 +316,38 @@ function fmtRemaining(epoch) {
   if (m > 0) return `${m}m ${String(s).padStart(2,'0')}s`;
   return `${s}s`;
 }
+function setSign(id, n) {
+  const el = document.getElementById(id);
+  el.textContent = '';
+  if (n == null) { el.textContent = '─'; return; }
+  el.appendChild(fmtSign(n));
+}
 
 let chartHistory = [];
-
 function drawChart() {
   const c = document.getElementById('chart');
   if (!c) return;
   const ctx = c.getContext('2d');
-  const w = c.clientWidth || 600, h = 250;
+  const w = c.clientWidth || 600, h = c.clientHeight || 250;
   c.width = w; c.height = h;
   const padL = 60, padR = 12, padT = 16, padB = 24;
   const innerW = w - padL - padR;
   const innerH = h - padT - padB;
-
   if (chartHistory.length < 2) {
     ctx.fillStyle = '#6e7681';
     ctx.font = '13px sans-serif';
-    ctx.fillText('資料不足（需要至少 2 筆下注）', padL + 10, padT + 24);
+    ctx.fillText('資料不足(需要至少 2 筆下注)', padL + 10, padT + 24);
     return;
   }
-
   const nets = [];
   let cum = 0;
   chartHistory.forEach(r => { cum += r.change; nets.push(cum); });
   const minN = Math.min(0, ...nets), maxN = Math.max(0, ...nets);
-  let range = maxN - minN || 1;
-
-  // 找 5 個 nice 刻度
   const nice = niceTicks(minN, maxN, 5);
   const yMin = nice.min, yMax = nice.max;
-  range = yMax - yMin || 1;
-
+  const range = yMax - yMin || 1;
   const xScale = (i) => padL + (i / Math.max(1, nets.length - 1)) * innerW;
   const yScale = (v) => padT + ((yMax - v) / range) * innerH;
-
-  // 格線 + Y 軸標籤
   ctx.strokeStyle = '#21262d';
   ctx.lineWidth = 1;
   ctx.fillStyle = '#6e7681';
@@ -335,8 +363,6 @@ function drawChart() {
     const label = (v >= 0 ? '+' : '') + Math.round(v).toLocaleString();
     ctx.fillText(label, padL - 6, y);
   });
-
-  // 零基準線（特別亮）
   if (yMin < 0 && yMax > 0) {
     const zy = yScale(0);
     ctx.strokeStyle = '#484f58';
@@ -344,15 +370,11 @@ function drawChart() {
     ctx.beginPath();
     ctx.moveTo(padL, zy); ctx.lineTo(w - padR, zy); ctx.stroke();
   }
-
-  // X 軸：第一筆與最後一筆
   ctx.fillStyle = '#6e7681';
   ctx.textAlign = 'left';
   ctx.fillText('1', padL, h - padB / 2);
   ctx.textAlign = 'right';
   ctx.fillText(`${nets.length}`, w - padR, h - padB / 2);
-
-  // 折線
   ctx.strokeStyle = nets[nets.length - 1] >= 0 ? '#3fb950' : '#f85149';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -362,15 +384,12 @@ function drawChart() {
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   });
   ctx.stroke();
-
-  // 最後一點
   ctx.fillStyle = ctx.strokeStyle;
   const lastX = xScale(nets.length - 1);
   const lastY = yScale(nets[nets.length - 1]);
   ctx.beginPath();
   ctx.arc(lastX, lastY, 3.5, 0, Math.PI * 2);
   ctx.fill();
-  // 最後一點的數值標籤
   ctx.fillStyle = '#e6edf3';
   ctx.textAlign = 'right';
   ctx.font = 'bold 12px sans-serif';
@@ -378,8 +397,6 @@ function drawChart() {
     nets[nets.length-1].toLocaleString();
   ctx.fillText(lastLabel, lastX - 8, lastY - 8);
 }
-
-// 找漂亮的整數刻度（5 段左右）
 function niceTicks(min, max, count) {
   const range = max - min || 1;
   const rough = range / count;
@@ -396,28 +413,33 @@ function niceTicks(min, max, count) {
   for (let v = niceMin; v <= niceMax + 1e-9; v += step) ticks.push(v);
   return { min: niceMin, max: niceMax, step, ticks };
 }
-
 async function refresh() {
   try {
     const r = await fetch('/api/state');
     const d = await r.json();
     document.getElementById('balance').textContent = fmt(d.balance);
     document.getElementById('start_balance').textContent = fmt(d.start_balance);
-    document.getElementById('diff').innerHTML =
-      (d.balance != null && d.start_balance != null)
-      ? fmtSign(d.balance - d.start_balance) : '─';
-    document.getElementById('net_change').innerHTML = fmtSign(d.net_change);
+    if (d.balance != null && d.start_balance != null) {
+      setSign('diff', d.balance - d.start_balance);
+    } else {
+      document.getElementById('diff').textContent = '─';
+    }
+    setSign('net_change', d.net_change);
     document.getElementById('current_bet').textContent = d.current_bet ? fmt(d.current_bet) : '─';
     document.getElementById('goal').textContent = d.goal_str || '─';
     document.getElementById('loss_floor').textContent = d.loss_str || '─';
     document.getElementById('total_bets').textContent = fmt(d.total_bets);
-    document.getElementById('wins_losses').innerHTML =
-      `<span class="green">${d.wins}</span> / <span class="red">${d.losses}</span>`;
+    const wl = document.getElementById('wins_losses');
+    wl.textContent = '';
+    const sw = document.createElement('span'); sw.className = 'green'; sw.textContent = String(d.wins);
+    const sl = document.createElement('span'); sl.className = 'red';   sl.textContent = String(d.losses);
+    wl.appendChild(sw); wl.append(' / '); wl.appendChild(sl);
     document.getElementById('win_rate').textContent =
       (d.total_bets > 0 ? (d.wins / d.total_bets * 100).toFixed(1) : '0.0') + '%';
-    document.getElementById('streak').innerHTML = d.streak_str || '─';
-    document.getElementById('profit_per_hour').innerHTML = d.pph_str || '─';
-    document.getElementById('ev').innerHTML = d.ev_str || '─';
+    // streak / pph / ev / kelly:後端只回 plain-text,前端組裝 + escape
+    document.getElementById('streak').textContent = d.streak_str || '─';
+    document.getElementById('profit_per_hour').textContent = d.pph_str || '─';
+    document.getElementById('ev').textContent = d.ev_str || '─';
     document.getElementById('kelly').textContent = d.kelly_str || '─';
     document.getElementById('hourly_next').textContent = fmtRemaining(d.hourly_next);
     document.getElementById('daily_next').textContent = fmtRemaining(d.daily_next);
@@ -435,15 +457,17 @@ async function refresh() {
       const tr = document.createElement('tr');
       const change = r.change || 0;
       const cls = change > 0 ? 'green' : (change < 0 ? 'red' : 'dim');
-      tr.innerHTML = `
-        <td class="dim">${r.ts || ''}</td>
-        <td>${fmt(r.bet)}</td>
-        <td class="${cls}">${(change >= 0 ? '+' : '') + change.toLocaleString()}</td>
-        <td>${fmt(r.after)}</td>
-        <td class="${cls}">${r.result || ''}</td>`;
+      const tdTs   = document.createElement('td'); tdTs.className   = 'dim'; tdTs.textContent = r.ts || '';
+      const tdBet  = document.createElement('td'); tdBet.textContent  = fmt(r.bet);
+      const tdCh   = document.createElement('td'); tdCh.className    = cls;
+      tdCh.textContent = (change >= 0 ? '+' : '') + change.toLocaleString();
+      const tdAft  = document.createElement('td'); tdAft.textContent  = fmt(r.after);
+      const tdRes  = document.createElement('td'); tdRes.className   = cls; tdRes.textContent = r.result || '';
+      tr.appendChild(tdTs); tr.appendChild(tdBet); tr.appendChild(tdCh);
+      tr.appendChild(tdAft); tr.appendChild(tdRes);
       tbody.appendChild(tr);
     });
-  } catch (err) { /* status-bar handler shows error */ }
+  } catch (err) { /* status bar */ }
 }
 refresh();
 setInterval(refresh, 2000);
@@ -452,8 +476,7 @@ window.addEventListener('resize', drawChart);
 """
 
 
-# ── 頁面：Slot 分析 ────────────────────────────────────────────────────────
-_ANALYSIS_BODY = """
+_ANALYSIS_BODY = r"""
 <div class="grid">
   <div class="card" style="grid-column: 1/-1;">
     <h3>📊 基本統計</h3>
@@ -465,7 +488,13 @@ _ANALYSIS_BODY = """
     <div class="row"><span class="label">變異數</span><span class="value" id="variance">─</span></div>
     <div class="row"><span class="label">Kelly f*</span><span class="value" id="kelly">─</span></div>
   </div>
-
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>📉 Drawdown</h3>
+    <div class="row"><span class="label">歷史峰值</span><span class="value" id="dd_peak">─</span></div>
+    <div class="row"><span class="label">當前累計淨收</span><span class="value" id="dd_cur">─</span></div>
+    <div class="row"><span class="label">最大跌幅</span><span class="value" id="dd_max">─</span></div>
+    <div class="row"><span class="label">當前距峰值</span><span class="value" id="dd_now">─</span></div>
+  </div>
   <div class="card" style="grid-column: 1/-1;">
     <h3>📈 賠率分布</h3>
     <table class="right-align" id="dist-table">
@@ -473,16 +502,14 @@ _ANALYSIS_BODY = """
       <tbody></tbody>
     </table>
   </div>
-
   <div class="card" style="grid-column: 1/-1;">
-    <h3>🎯 符號統計（回收率 = 累計賠付 / 累計下注）</h3>
+    <h3>🎯 符號統計</h3>
     <table class="right-align" id="sym-table">
       <thead><tr><th>符號</th><th>中獎次數</th><th>平均倍率</th><th>累計賠付</th><th>回收率</th><th>格子機率</th></tr></thead>
       <tbody></tbody>
     </table>
     <div id="noise-msg" class="dim" style="margin-top: 8px; font-size: 12px;"></div>
   </div>
-
   <div class="card" style="grid-column: 1/-1;">
     <h3>📐 線路統計</h3>
     <table class="right-align" id="line-table">
@@ -492,30 +519,40 @@ _ANALYSIS_BODY = """
   </div>
 </div>
 <script>
+function escapeHtml(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function fmtPct(p) { return (p * 100).toFixed(1) + '%'; }
 function fmtMul(p) { return p.toFixed(4) + 'x'; }
+function appendCell(tr, text, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.textContent = text;
+  tr.appendChild(td);
+}
 async function refresh() {
   try {
     const r = await fetch('/api/analysis');
     const d = await r.json();
     if (!d.has_data) {
       document.getElementById('total_spins').textContent = '0';
-      document.querySelector('main').insertAdjacentHTML('afterbegin',
-        '<div class="card" style="margin-bottom:12px;"><span class="yellow">尚無分析資料 — 開始賭博後會自動累積。</span></div>');
       return;
     }
     document.getElementById('total_spins').textContent = d.total_spins.toLocaleString();
     document.getElementById('win_rate').textContent = fmtPct(d.win_rate);
     document.getElementById('ev').textContent = fmtMul(d.ev);
     const edge = d.edge;
-    const edgeColor = edge >= 0 ? 'green' : 'red';
-    document.getElementById('edge').innerHTML =
-      `<span class="${edgeColor}">${(edge >= 0 ? '+' : '') + (edge*100).toFixed(2)}%</span>`;
+    const edgeEl = document.getElementById('edge');
+    edgeEl.className = 'value ' + (edge >= 0 ? 'green' : 'red');
+    edgeEl.textContent = (edge >= 0 ? '+' : '') + (edge*100).toFixed(2) + '%';
     document.getElementById('std_dev').textContent = d.std_dev.toFixed(4);
     document.getElementById('variance').textContent = d.variance.toFixed(4);
     document.getElementById('kelly').textContent = d.kelly_str;
 
-    // 賠率分布
+    const dd = d.drawdown || {};
+    document.getElementById('dd_peak').textContent = (dd.peak >= 0 ? '+' : '') + (dd.peak||0).toLocaleString();
+    document.getElementById('dd_cur').textContent  = (dd.current_net >= 0 ? '+' : '') + (dd.current_net||0).toLocaleString();
+    document.getElementById('dd_max').textContent  = (dd.max_drawdown||0).toLocaleString();
+    document.getElementById('dd_now').textContent  = (dd.current_drawdown||0).toLocaleString();
+
     const distBody = document.querySelector('#dist-table tbody');
     distBody.innerHTML = '';
     d.payout_distribution.forEach(row => {
@@ -523,38 +560,39 @@ async function refresh() {
       const barLen = Math.min(40, Math.floor(pct / 2));
       const bar = '█'.repeat(barLen);
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${row.bucket}</td><td>${row.count.toLocaleString()}</td>
-        <td>${pct.toFixed(1)}%</td><td>${bar}</td><td>${row.actual || ''}</td>`;
+      appendCell(tr, row.bucket);
+      appendCell(tr, row.count.toLocaleString());
+      appendCell(tr, pct.toFixed(1) + '%');
+      appendCell(tr, bar);
+      appendCell(tr, row.actual || '');
       distBody.appendChild(tr);
     });
 
-    // 符號統計
     const symBody = document.querySelector('#sym-table tbody');
     symBody.innerHTML = '';
     let hidden = 0;
     d.symbols.forEach(row => {
       if (row.hidden) { hidden++; return; }
       const tr = document.createElement('tr');
-      const w = row.wins > 0 ? row.wins.toLocaleString() : '─';
-      const m = row.wins > 0 ? row.avg_mult.toFixed(2) + 'x' : '─';
-      const p = row.wins > 0 ? row.total_payout.toLocaleString() : '─';
-      const rec = row.wins > 0 ? (row.recover_rate * 100).toFixed(1) + '%' : '─';
-      const gp = row.grid_prob != null ? (row.grid_prob * 100).toFixed(1) + '%' : '─';
-      tr.innerHTML = `<td>${row.display}</td><td>${w}</td><td>${m}</td>
-        <td>${p}</td><td>${rec}</td><td>${gp}</td>`;
+      appendCell(tr, row.display);
+      appendCell(tr, row.wins > 0 ? row.wins.toLocaleString() : '─');
+      appendCell(tr, row.wins > 0 ? row.avg_mult.toFixed(2) + 'x' : '─');
+      appendCell(tr, row.wins > 0 ? row.total_payout.toLocaleString() : '─');
+      appendCell(tr, row.wins > 0 ? (row.recover_rate * 100).toFixed(1) + '%' : '─');
+      appendCell(tr, row.grid_prob != null ? (row.grid_prob * 100).toFixed(1) + '%' : '─');
       symBody.appendChild(tr);
     });
     document.getElementById('noise-msg').textContent =
-      hidden > 0 ? `（已隱藏 ${hidden} 個雜訊符號：未中獎且格子機率 < 0.1%）` : '';
+      hidden > 0 ? `(已隱藏 ${hidden} 個雜訊符號:未中獎且格子機率 < 0.1%)` : '';
 
-    // 線路統計
     const lineBody = document.querySelector('#line-table tbody');
     lineBody.innerHTML = '';
     d.lines.forEach(row => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${row.line_name}</td><td>${row.hits.toLocaleString()}</td>
-        <td>${(row.hit_rate*100).toFixed(1)}%</td>
-        <td>${row.total_payout.toLocaleString()}</td>`;
+      appendCell(tr, row.line_name);
+      appendCell(tr, row.hits.toLocaleString());
+      appendCell(tr, (row.hit_rate*100).toFixed(1) + '%');
+      appendCell(tr, row.total_payout.toLocaleString());
       lineBody.appendChild(tr);
     });
   } catch (err) { console.error(err); }
@@ -565,19 +603,19 @@ setInterval(refresh, 5000);
 """
 
 
-# ── 頁面：控制台 ───────────────────────────────────────────────────────────
-_CONTROL_BODY = """
+_CONTROL_BODY = r"""
+<div id="errors" class="dim" style="margin-bottom: 8px;"></div>
 <div class="grid">
   <div class="card">
     <h3>⚡ 快速動作</h3>
     <div class="btn-row">
-      <button class="btn primary" onclick="doAction('toggle_pause')" id="btn-pause">⏸️ 暫停 / 恢復</button>
+      <button class="btn primary" onclick="doAction('toggle_pause', this)">⏸️ 暫停 / 恢復</button>
     </div>
     <div class="btn-row">
-      <button class="btn warning" onclick="confirmAction('reset_analysis', '確定要重置 slot 分析資料嗎？此動作不可逆。')">🔄 重置 Slot 分析</button>
+      <button class="btn warning" onclick="confirmAction('reset_analysis', '確定要重置 slot 分析資料?', this)">🔄 重置 Slot 分析</button>
     </div>
     <div class="btn-row">
-      <button class="btn danger" onclick="confirmAction('restart', '確定要重啟程式嗎？所有 loop 會中斷後重新啟動。')">🔁 重啟程式</button>
+      <button class="btn danger" onclick="confirmAction('restart', '確定要重啟程式?', this)">🔁 重啟程式</button>
     </div>
   </div>
 
@@ -593,34 +631,34 @@ _CONTROL_BODY = """
     <div class="field">
       <label>策略</label>
       <select id="cfg-gambling-strategy" onchange="markDirty()">
-        <option value="auto">auto（按比例）</option>
-        <option value="fixed">fixed（固定 min_bet）</option>
-        <option value="kelly">kelly（依 EV 動態）</option>
+        <option value="auto">auto(按比例)</option>
+        <option value="fixed">fixed(固定 min_bet)</option>
+        <option value="kelly">kelly(依 EV 動態)</option>
       </select>
     </div>
     <div class="field">
-      <label>保底門檻（餘額低於此就停止下注）</label>
-      <input type="number" id="cfg-gambling-threshold" oninput="markDirty()">
+      <label>保底門檻(餘額低於此就停止下注)</label>
+      <input type="number" min="0" id="cfg-gambling-threshold" oninput="markDirty()">
     </div>
     <div class="field">
       <label>最小下注</label>
-      <input type="number" id="cfg-gambling-min_bet" oninput="markDirty()">
+      <input type="number" min="1" id="cfg-gambling-min_bet" oninput="markDirty()">
     </div>
     <div class="field">
-      <label>最大下注（0 = 自動）</label>
-      <input type="number" id="cfg-gambling-max_bet" oninput="markDirty()">
+      <label>最大下注(0 = 自動)</label>
+      <input type="number" min="0" id="cfg-gambling-max_bet" oninput="markDirty()">
     </div>
     <div class="field">
-      <label>押注比例（auto 策略用）</label>
-      <input type="number" step="0.01" id="cfg-gambling-bet_fraction" oninput="markDirty()">
+      <label>押注比例(0~1)</label>
+      <input type="number" step="0.01" min="0" max="1" id="cfg-gambling-bet_fraction" oninput="markDirty()">
     </div>
   </div>
 
   <div class="card">
     <h3>🏁 目標 / 停損</h3>
     <div class="field">
-      <label>目標餘額（0 = 不設）</label>
-      <input type="number" id="cfg-gambling-goal" oninput="markDirty()">
+      <label>目標餘額(0 = 不設)</label>
+      <input type="number" min="0" id="cfg-gambling-goal" oninput="markDirty()">
     </div>
     <div class="field">
       <label>達標行為</label>
@@ -630,8 +668,8 @@ _CONTROL_BODY = """
       </select>
     </div>
     <div class="field">
-      <label>停損點（0 = 不設）</label>
-      <input type="number" id="cfg-gambling-loss_floor" oninput="markDirty()">
+      <label>停損點(0 = 不設)</label>
+      <input type="number" min="0" id="cfg-gambling-loss_floor" oninput="markDirty()">
     </div>
     <div class="field">
       <label>停損行為</label>
@@ -652,16 +690,16 @@ _CONTROL_BODY = """
       </select>
     </div>
     <div class="field">
-      <label>對象（顯示名稱片段或 user ID）</label>
-      <input type="text" id="cfg-transfer-target" oninput="markDirty()">
+      <label>對象(顯示名稱片段或 user ID)</label>
+      <input type="text" maxlength="200" id="cfg-transfer-target" oninput="markDirty()">
     </div>
     <div class="field">
       <label>金額</label>
-      <input type="number" id="cfg-transfer-amount" oninput="markDirty()">
+      <input type="number" min="0" id="cfg-transfer-amount" oninput="markDirty()">
     </div>
     <div class="field">
-      <label>間距（分鐘）</label>
-      <input type="number" id="cfg-transfer-interval_min" oninput="markDirty()">
+      <label>間距(分鐘)</label>
+      <input type="number" min="1" id="cfg-transfer-interval_min" oninput="markDirty()">
     </div>
   </div>
 </div>
@@ -673,33 +711,36 @@ _CONTROL_BODY = """
 </div>
 
 <div class="footer">
-  <a href="/" style="color:#58a6ff;">回到概覽</a>
+  ⚠ 出於安全考量,Dashboard 不開放修改密碼 / Discord ID / 監聽位址等敏感欄位。請於主程式 UI(C 鍵)修改。
 </div>
 
 <script>
 let dirty = false;
 function markDirty() {
   dirty = true;
-  document.getElementById('dirty-indicator').textContent = '● 未儲存';
-  document.getElementById('dirty-indicator').className = 'yellow';
+  const i = document.getElementById('dirty-indicator');
+  i.textContent = '● 未儲存'; i.className = 'yellow';
 }
 function clearDirty() {
   dirty = false;
   document.getElementById('dirty-indicator').textContent = '';
 }
-
-async function doAction(name) {
+async function doAction(name, btn) {
+  if (btn) btn.disabled = true;
   try {
-    const r = await fetch('/api/action/' + name, { method: 'POST' });
+    const r = await fetch('/api/action/' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: {'X-Requested-With': 'fetch'},
+    });
     const d = await r.json();
     showToast(d.message || '完成', !d.ok);
     if (name === 'toggle_pause') setTimeout(refreshStatus, 100);
   } catch(e) { showToast('動作失敗: ' + e.message, true); }
+  finally { if (btn) setTimeout(()=>{ btn.disabled = false; }, 800); }
 }
-function confirmAction(name, msg) {
-  if (confirm(msg)) doAction(name);
+function confirmAction(name, msg, btn) {
+  if (confirm(msg)) doAction(name, btn);
 }
-
 function setVal(id, v) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -710,12 +751,12 @@ function getVal(id, type) {
   const el = document.getElementById(id);
   if (!el) return undefined;
   const v = el.value;
+  if (v === '' || v == null) return null;
   if (type === 'bool') return v === 'true';
-  if (type === 'int')  return parseInt(v, 10);
-  if (type === 'float') return parseFloat(v);
+  if (type === 'int')  { const n = parseInt(v, 10); return isNaN(n) ? null : n; }
+  if (type === 'float') { const n = parseFloat(v); return isNaN(n) ? null : n; }
   return v;
 }
-
 async function loadConfig() {
   try {
     const r = await fetch('/api/config');
@@ -739,8 +780,8 @@ async function loadConfig() {
     clearDirty();
   } catch(e) { showToast('載入失敗: ' + e.message, true); }
 }
-
 async function saveConfig() {
+  document.getElementById('errors').innerHTML = '';
   const payload = {
     gambling: {
       enabled:      getVal('cfg-gambling-enabled', 'bool'),
@@ -761,35 +802,42 @@ async function saveConfig() {
       interval_min: getVal('cfg-transfer-interval_min', 'int'),
     },
   };
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
   try {
     const r = await fetch('/api/config', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {'Content-Type': 'application/json', 'X-Requested-With': 'fetch'},
       body: JSON.stringify(payload),
     });
     const d = await r.json();
     if (d.ok) {
       showToast('設定已儲存');
       clearDirty();
+      if (d.warnings && d.warnings.length) {
+        document.getElementById('errors').innerHTML =
+          '⚠ 驗證警告(已儲存,但可能影響行為):<br>' +
+          d.warnings.map(escapeHtml).join('<br>');
+      }
     } else {
       showToast(d.message || '儲存失敗', true);
+      if (d.errors && d.errors.length) {
+        document.getElementById('errors').innerHTML =
+          '❌ 驗證錯誤(未儲存):<br>' + d.errors.map(escapeHtml).join('<br>');
+      }
     }
   } catch(e) { showToast('儲存失敗: ' + e.message, true); }
+  finally { btn.disabled = false; }
 }
-
 loadConfig();
 </script>
 """
 
 
-# （QR 頁面已移除 — QR code 改在 cmd UI 直接顯示）
-
-
-# ── 頁面：Log viewer ───────────────────────────────────────────────────────
-_LOGS_BODY = """
+_LOGS_BODY = r"""
 <div class="card">
   <div style="display: flex; justify-content: space-between; align-items: center;">
-    <h3 style="margin: 0;">📋 Bot Log（最近 200 行）</h3>
+    <h3 style="margin: 0;">📋 Bot Log(最近 200 行,密碼/token 自動遮罩)</h3>
     <div>
       <label class="dim" style="font-size: 12px;">
         <input type="checkbox" id="autoscroll" checked> 自動捲到底
@@ -804,30 +852,30 @@ _LOGS_BODY = """
        color: #c9d1d9;"></pre>
 </div>
 <script>
+function escapeHtml(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 async function refreshLogs() {
   try {
     const r = await fetch('/api/logs');
     const d = await r.json();
     const pre = document.getElementById('log-content');
-    if (d.error) {
-      pre.textContent = '錯誤: ' + d.error;
-      pre.classList.add('red');
-      return;
-    }
-    pre.classList.remove('red');
-    // 上色：[ERROR] 紅、[WARNING] 黃、[INFO] 預設、[DEBUG] dim
-    const lines = (d.lines || []).map(line => {
-      let cls = '';
-      if (line.includes('[ERROR]')) cls = 'color:#f85149;';
-      else if (line.includes('[WARNING]')) cls = 'color:#d29922;';
-      else if (line.includes('[DEBUG]')) cls = 'color:#6e7681;';
-      // 明顯事件 highlight
-      if (line.includes('🎰') || line.includes('中大獎')) cls = 'color:#3fb950;font-weight:600;';
-      else if (line.includes('⛔') || line.includes('停損')) cls = 'color:#f85149;font-weight:600;';
-      else if (line.includes('🐱') || line.includes('貓娘')) cls = 'color:#a371f7;';
-      return `<span style="${cls}">${escapeHtml(line)}</span>`;
+    if (d.error) { pre.textContent = '錯誤: ' + d.error; return; }
+    pre.innerHTML = '';
+    (d.lines || []).forEach(line => {
+      const span = document.createElement('span');
+      span.textContent = line;
+      if (line.includes('[ERROR]')) span.style.color = '#f85149';
+      else if (line.includes('[WARNING]')) span.style.color = '#d29922';
+      else if (line.includes('[DEBUG]')) span.style.color = '#6e7681';
+      if (line.includes('🎰') || line.includes('中大獎')) {
+        span.style.color = '#3fb950'; span.style.fontWeight = '600';
+      } else if (line.includes('⛔') || line.includes('停損')) {
+        span.style.color = '#f85149'; span.style.fontWeight = '600';
+      } else if (line.includes('🐱') || line.includes('貓娘')) {
+        span.style.color = '#a371f7';
+      }
+      pre.appendChild(span);
+      pre.appendChild(document.createTextNode('\n'));
     });
-    pre.innerHTML = lines.join('\\n');
     if (document.getElementById('autoscroll').checked) {
       pre.scrollTop = pre.scrollHeight;
     }
@@ -835,35 +883,16 @@ async function refreshLogs() {
     document.getElementById('log-content').textContent = '無法載入 log: ' + e.message;
   }
 }
-function escapeHtml(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
 refreshLogs();
 setInterval(refreshLogs, 3000);
 </script>
 """
 
 
-def _build_qr_svg(text: str) -> bytes:
-    """產生 QR code SVG bytes；qrcode 套件沒裝就回 None。"""
-    try:
-        import qrcode
-        import qrcode.image.svg
-        factory = qrcode.image.svg.SvgPathImage
-        img = qrcode.make(text, image_factory=factory, box_size=10, border=2)
-        import io
-        buf = io.BytesIO()
-        img.save(buf)
-        return buf.getvalue()
-    except ImportError:
-        return None
-    except Exception:
-        return None
-
-
-def _read_log_tail(path: str = "bot.log", max_lines: int = 200,
+# ── Snapshot helpers ──────────────────────────────────────────────────
+def _read_log_tail(path: str = LOG_FILE_PATH, max_lines: int = 200,
                    max_bytes: int = 256 * 1024) -> list[str]:
-    """從 path 讀最後 max_lines 行；不存在或讀失敗回空 list。"""
+    """讀最後 N 行,redact 敏感字。"""
     try:
         if not os.path.exists(path):
             return []
@@ -871,21 +900,20 @@ def _read_log_tail(path: str = "bot.log", max_lines: int = 200,
         with open(path, "rb") as f:
             if size > max_bytes:
                 f.seek(size - max_bytes)
-                f.readline()   # 跳掉可能切到一半的行
+                f.readline()
             data = f.read().decode("utf-8", errors="replace")
-        lines = data.splitlines()
-        return lines[-max_lines:]
+        lines = data.splitlines()[-max_lines:]
+        return [redact_text(line) for line in lines]
     except OSError:
         return []
 
 
-# ── 共用 helpers ───────────────────────────────────────────────────────────
-def _build_state_snapshot(state: dict, config: dict) -> dict:
-    """組出 /api/state 的快照（給 overview 頁用）。"""
-    gcfg = config.get("gambling", {}) or {}
-    bal = state.get("balance")
-    start = state.get("start_balance")
-    goal = int(gcfg.get("goal", 0) or 0)
+def _build_state_snapshot(state: "BotState", config: "BotConfig") -> dict:
+    """組 /api/state 快照(plain-text 欄位,前端組裝 HTML)。"""
+    gcfg = config.gambling
+    bal = state.balance
+    start = state.start_balance
+    goal = int(gcfg.goal or 0)
 
     if goal > 0 and isinstance(bal, int):
         pct = min(100.0, bal / goal * 100)
@@ -895,7 +923,7 @@ def _build_state_snapshot(state: dict, config: dict) -> dict:
     else:
         goal_str = "未設定"
 
-    floor = int(gcfg.get("loss_floor", 0) or 0)
+    floor = int(gcfg.loss_floor or 0)
     if floor > 0 and isinstance(bal, int):
         if bal <= floor:
             loss_str = f"⚠ {bal:,} ≤ {floor:,}"
@@ -908,26 +936,25 @@ def _build_state_snapshot(state: dict, config: dict) -> dict:
 
     ev_str = "─"
     kelly_str = "─"
-    sa = state.get("slot_analysis") or {}
+    sa = state.slot_analysis or {}
     n = sa.get("total_spins", 0)
     if n > 0:
         try:
-            from bot.slot.analysis import compute_slot_stats, MIN_KELLY_SAMPLES
+            from bot.slot.analysis import compute_slot_stats
             stats = compute_slot_stats(sa)
             edge_pct = stats["edge"] * 100
-            ev_str = (f'<span class="{"green" if edge_pct >= 0 else "red"}">'
-                      f"{stats['ev']:.3f}x ({'+' if edge_pct >= 0 else ''}"
-                      f"{edge_pct:.2f}%)</span> n={n}")
+            ev_str = (f"{stats['ev']:.3f}x ({'+' if edge_pct >= 0 else ''}"
+                      f"{edge_pct:.2f}%) n={n}")
             if stats.get("sufficient_data") and stats.get("kelly_fraction", 0) > 0:
                 kf = stats["kelly_fraction"]
                 kelly_str = f"{kf:.4f} (½={kf/2:.4f})"
             else:
                 kelly_str = f"資料不足 (需 {MIN_KELLY_SAMPLES})"
-        except Exception:
-            pass
+        except Exception:    # noqa: BLE001
+            log.exception("compute_slot_stats 失敗")
 
-    neko_st = state.get("neko_status", "unknown")
-    neko_dl = state.get("neko_deadline_ts")
+    neko_st = state.neko_status
+    neko_dl = state.neko_deadline_ts
     if neko_st == "dispatching":
         if neko_dl:
             r = max(0, int(neko_dl - time.time()))
@@ -941,78 +968,70 @@ def _build_state_snapshot(state: dict, config: dict) -> dict:
     else:
         neko_str = "─"
 
-    history = state.get("history") or []
+    history = state.history or []
     history_last_15 = history[-15:]
     history_recent = [{"change": r.get("change", 0)} for r in history[-100:]]
 
-    # 連勝/連敗 字串
-    cs = state.get("current_streak", 0)
-    max_w = state.get("max_win_streak", 0)
-    max_l = state.get("max_loss_streak", 0)
+    cs = state.current_streak
+    max_w = state.max_win_streak
+    max_l = state.max_loss_streak
     if cs > 0:
-        streak_str = (f'<span class="green">🔥 {cs} 連勝</span>'
-                      f' <span class="dim">(最高 {max_w}勝/{max_l}敗)</span>')
+        streak_str = f"🔥 {cs} 連勝 (最高 {max_w}勝/{max_l}敗)"
     elif cs < 0:
-        streak_str = (f'<span class="red">💀 {abs(cs)} 連敗</span>'
-                      f' <span class="dim">(最高 {max_w}勝/{max_l}敗)</span>')
+        streak_str = f"💀 {abs(cs)} 連敗 (最高 {max_w}勝/{max_l}敗)"
     else:
-        streak_str = (f'<span class="dim">─</span>'
-                      f' <span class="dim">(最高 {max_w}勝/{max_l}敗)</span>')
+        streak_str = f"─ (最高 {max_w}勝/{max_l}敗)"
 
-    # 平均時薪
-    sess_start = state.get("session_start_ts")
+    sess_start = state.session_start_ts
     pph_str = "─"
     if sess_start:
         hrs = max(1/60, (time.time() - sess_start) / 3600)
-        pph = state.get("net_change", 0) / hrs
-        cls = "green" if pph >= 0 else "red"
-        sign = "+" if pph >= 0 else ""
-        pph_str = (f'<span class="{cls}">{sign}{int(pph):,}</span>'
-                   f' / 小時 <span class="dim">({hrs:.1f}h)</span>')
+        pph = state.net_change / hrs
+        pph_str = f"{'+' if pph >= 0 else ''}{int(pph):,} / 小時 ({hrs:.1f}h)"
 
     return {
         "ts":            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status":        state.get("status", "─"),
-        "paused":        state.get("paused", False),
+        "status":        state.status,
+        "paused":        state.paused,
         "balance":       bal,
         "start_balance": start,
-        "net_change":    state.get("net_change", 0),
-        "current_bet":   state.get("current_bet", 0),
-        "total_bets":    state.get("total_bets", 0),
-        "wins":          state.get("wins", 0),
-        "losses":        state.get("losses", 0),
+        "net_change":    state.net_change,
+        "current_bet":   state.current_bet,
+        "total_bets":    state.total_bets,
+        "wins":          state.wins,
+        "losses":        state.losses,
         "goal_str":      goal_str,
         "loss_str":      loss_str,
         "ev_str":        ev_str,
         "kelly_str":     kelly_str,
         "streak_str":    streak_str,
         "pph_str":       pph_str,
-        "hourly_next":   state.get("hourly_next"),
-        "daily_next":    state.get("daily_next"),
+        "hourly_next":   state.hourly_next,
+        "daily_next":    state.daily_next,
         "neko_str":      neko_str,
-        "events":        dict(state.get("events", {})),
-        "dead_notified": state.get("dead_notified", False),
+        "events":        dict(state.events.__dict__),
+        "dead_notified": state.dead_notified,
         "history_last_15": history_last_15,
         "history_recent":  history_recent,
     }
 
 
-def _build_analysis_snapshot(state: dict) -> dict:
-    """組出 /api/analysis 的快照（給 analysis 頁用）。"""
-    sa = state.get("slot_analysis") or {}
+def _build_analysis_snapshot(state: "BotState") -> dict:
+    sa = state.slot_analysis or {}
     n = sa.get("total_spins", 0)
     if n == 0:
         return {"has_data": False, "total_spins": 0}
 
     from bot.slot.analysis import (
-        compute_slot_stats, _format_symbol_display, _is_noise_symbol,
-        PAYOUT_BUCKETS, HIGH_MULT_THRESHOLD, MIN_KELLY_SAMPLES,
+        compute_drawdown,
+        compute_slot_stats,
+        format_symbol_display,
+        is_noise_symbol,
     )
 
     stats = compute_slot_stats(sa)
     total_wagered = sa.get("total_wagered", 0) or 1
 
-    # 賠率分布（含「以上」桶的實際 multipliers）
     high_mults = stats.get("high_mults", [])
     dist_rows = []
     for bucket in PAYOUT_BUCKETS:
@@ -1028,7 +1047,6 @@ def _build_analysis_snapshot(state: dict) -> dict:
             "bucket": bucket, "count": count, "pct": pct, "actual": actual,
         })
 
-    # 符號統計
     si = stats.get("symbol_info", {}) or {}
     gp = stats.get("grid_symbol_prob", {}) or {}
     all_syms = set(si.keys()) | set(gp.keys())
@@ -1038,10 +1056,10 @@ def _build_analysis_snapshot(state: dict) -> dict:
         info = si.get(sym, {})
         wins = info.get("win_appearances", 0)
         prob = gp.get(sym)
-        is_noise = _is_noise_symbol(sym, wins, prob or 0)
+        is_noise = is_noise_symbol(sym, wins, prob or 0)
         sym_rows.append({
             "symbol":        sym,
-            "display":       _format_symbol_display(sym),
+            "display":       format_symbol_display(sym),
             "wins":          wins,
             "avg_mult":      info.get("avg_mult", 0.0),
             "total_payout":  info.get("total_payout", 0),
@@ -1050,19 +1068,20 @@ def _build_analysis_snapshot(state: dict) -> dict:
             "hidden":        is_noise,
         })
 
-    # 線路統計
     li = stats.get("line_info", {}) or {}
     line_rows = sorted(
         [{"line_name": ln, **info} for ln, info in li.items()],
         key=lambda r: -r["hits"],
     )
 
-    # Kelly string
     if stats.get("sufficient_data") and stats.get("kelly_fraction", 0) > 0:
         kf = stats["kelly_fraction"]
         kelly_str = f"{kf:.4f} (½={kf/2:.4f})"
     else:
-        kelly_str = f"資料不足 (需 {MIN_KELLY_SAMPLES}，目前 {n})"
+        valid_n = stats.get("valid_rr_count", n)
+        kelly_str = f"資料不足 (需 {MIN_KELLY_SAMPLES},目前 {valid_n})"
+
+    drawdown = compute_drawdown(state.history or [])
 
     return {
         "has_data":       True,
@@ -1076,39 +1095,40 @@ def _build_analysis_snapshot(state: dict) -> dict:
         "payout_distribution": dist_rows,
         "symbols":        sym_rows,
         "lines":          line_rows,
+        "drawdown":       drawdown,
     }
 
 
-# 共用 deepmerge — 給 POST /api/config 用
-def _deep_merge(target: dict, src: dict) -> dict:
-    """src 蓋到 target；遞迴合併 dict，其餘直接覆蓋。回傳 target（原地修改）。"""
-    for k, v in src.items():
-        if v is None:
-            continue
-        if isinstance(v, dict) and isinstance(target.get(k), dict):
-            _deep_merge(target[k], v)
-        else:
-            target[k] = v
-    return target
+# ── HTTP handler ──────────────────────────────────────────────────────
+def _make_handler(
+    state: "BotState",
+    config_provider: Callable[[], "BotConfig"],
+    on_action: Callable[[str], dict],
+    on_config_save_sync: Callable[[dict], dict],
+):
+    """工廠 — 動態產出 BaseHTTPRequestHandler subclass。
 
-
-# ── HTTP handler 工廠 ──────────────────────────────────────────────────────
-def _make_handler(state: dict, config_holder: list,
-                  on_action: Callable[[str], dict]):
-    """工廠函式 — 動態產出 BaseHTTPRequestHandler subclass。"""
+    on_config_save_sync 接收 partial config dict,**同步**回傳
+    {"ok": bool, "errors": [...], "warnings": [...]}.
+    Dashboard 在 thread 中跑,不能直接 await async function;改用 sync 包裝。
+    """
 
     class DashboardHandler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, format, *args):  # noqa: A002, N802
-            logging.getLogger("dashboard").debug(format, *args)
+        # 縮短 server header(避免洩漏 Python 版本)
+        server_version = "DashboardSrv/1.0"
+        sys_version = ""
 
-        # ── HTTP Basic Auth（dashboard.password 設了才啟用）───────────────
+        def log_message(self, fmt, *args):  # noqa: A002, N802
+            log.debug(fmt, *args)
+
+        # ── Auth ─────────────────────────────────────────────────────
         def _check_auth(self) -> bool:
-            """設定密碼則檢查 Authorization header；沒設密碼直接放行。"""
-            dcfg = config_holder[0].get("dashboard", {})
-            pwd = (dcfg.get("password") or "").strip()
+            cfg = config_provider().dashboard
+            pwd = (cfg.password or "").strip()
             if not pwd:
-                return True   # 沒設密碼 = 不啟用
-            user = (dcfg.get("username") or "admin").strip() or "admin"
+                # 沒設密碼 — 但若 host=0.0.0.0 我們在 server start 階段就會拒
+                return True
+            user = (cfg.username or "admin").strip() or "admin"
 
             auth_hdr = self.headers.get("Authorization", "")
             if not auth_hdr.startswith("Basic "):
@@ -1117,11 +1137,12 @@ def _make_handler(state: dict, config_holder: list,
             import base64
             try:
                 decoded = base64.b64decode(auth_hdr[6:]).decode("utf-8", "replace")
-                u, _, p = decoded.partition(":")
-            except Exception:
+                u, _sep, p = decoded.partition(":")
+            except Exception:    # noqa: BLE001
                 self._send_401()
                 return False
-            if u != user or p != pwd:
+            # hmac.compare_digest:恆定時間比對,防 timing attack
+            if not (hmac.compare_digest(u, user) and hmac.compare_digest(p, pwd)):
                 self._send_401()
                 return False
             return True
@@ -1130,114 +1151,162 @@ def _make_handler(state: dict, config_holder: list,
             body = b"Unauthorized"
             self.send_response(401)
             self.send_header("WWW-Authenticate", 'Basic realm="DiscordBot"')
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-        # ── 路由 ─────────────────────────────────────────────────────────
+        # ── CSRF / Origin 檢查(POST 才需要) ────────────────────────
+        def _check_csrf(self) -> bool:
+            """檢查 Origin / Referer 是否與 Host 同源。
+
+            原則:Same-Origin Policy + 額外要求 X-Requested-With Header
+            (XHR / fetch 自動帶,form-submit 不會帶 → 防 CSRF form attack)。
+            """
+            host = self.headers.get("Host", "")
+            origin = self.headers.get("Origin", "")
+            referer = self.headers.get("Referer", "")
+            xrw = self.headers.get("X-Requested-With", "")
+
+            # 必須是 fetch/XHR(瀏覽器跨站 form 不會自動帶 X-Requested-With)
+            if not xrw:
+                return False
+
+            # Origin / Referer 必須是 http://<host>...
+            for h in (origin, referer):
+                if not h:
+                    continue
+                # 只取 scheme://host:port 部分比對
+                m = re.match(r"^(https?)://([^/]+)", h)
+                if not m:
+                    return False
+                if m.group(2).lower() != host.lower():
+                    return False
+            # 至少要有一個來源 header
+            return bool(origin or referer)
+
+        # ── GET routing ──────────────────────────────────────────────
         def do_GET(self):  # noqa: N802
             if not self._check_auth():
                 return
             path = self.path.split("?", 1)[0]
-            if path in ("/", "/index.html"):
-                self._html(_html_shell("概覽", _OVERVIEW_BODY, "overview")
-                           + _html_close())
-            elif path == "/analysis":
-                self._html(_html_shell("Slot 分析", _ANALYSIS_BODY, "analysis")
-                           + _html_close())
-            elif path == "/control":
-                self._html(_html_shell("系統設定", _CONTROL_BODY, "control")
-                           + _html_close())
-            elif path == "/logs":
-                self._html(_html_shell("即時日誌", _LOGS_BODY, "logs")
-                           + _html_close())
-            elif path == "/api/logs":
-                lines = _read_log_tail("bot.log", max_lines=200)
+
+            routes_html = {
+                "/":          ("概覽",     _OVERVIEW_BODY, "overview"),
+                "/index.html":("概覽",     _OVERVIEW_BODY, "overview"),
+                "/analysis":  ("Slot 分析", _ANALYSIS_BODY, "analysis"),
+                "/control":   ("系統設定", _CONTROL_BODY, "control"),
+                "/logs":      ("即時日誌", _LOGS_BODY, "logs"),
+            }
+            if path in routes_html:
+                title, body, active = routes_html[path]
+                self._html(_html_shell(title, body, active) + _html_close())
+                return
+
+            if path == "/api/logs":
+                lines = _read_log_tail()
                 self._json({"lines": lines, "count": len(lines)})
-            elif path == "/api/state":
-                self._json(_build_state_snapshot(state, config_holder[0]))
-            elif path == "/api/analysis":
+                return
+            if path == "/api/state":
+                self._json(_build_state_snapshot(state, config_provider()))
+                return
+            if path == "/api/analysis":
                 self._json(_build_analysis_snapshot(state))
-            elif path == "/api/config":
-                # 回傳整份 config（敏感欄位遮罩）
-                cfg = json.loads(json.dumps(config_holder[0]))   # deep copy
-                if "email" in cfg and "password" in cfg["email"]:
-                    cfg["email"]["password"] = "***" if cfg["email"].get("password") else ""
-                if "dashboard" in cfg and "password" in cfg["dashboard"]:
-                    cfg["dashboard"]["password"] = "***" if cfg["dashboard"].get("password") else ""
+                return
+            if path == "/api/config":
+                cfg = config_provider().to_redacted_dict()
                 self._json(cfg)
-            else:
-                self._respond(404, "text/plain", b"Not Found")
+                return
+            self._respond(404, "text/plain", b"Not Found")
 
         def do_POST(self):  # noqa: N802
             if not self._check_auth():
                 return
-            path = self.path.split("?", 1)[0]
+            if not self._check_csrf():
+                self._json({"ok": False, "message": "請求被拒(CSRF/Origin 檢查失敗)"}, code=403)
+                return
 
+            path = self.path.split("?", 1)[0]
             if path.startswith("/api/action/"):
                 action = path[len("/api/action/"):]
+                # 白名單
+                if action not in ("toggle_pause", "reset_analysis", "restart"):
+                    self._json({"ok": False, "message": f"未知動作: {action}"}, code=400)
+                    return
                 try:
                     result = on_action(action)
                     self._json(result)
-                except Exception as e:
+                except Exception as e:    # noqa: BLE001
+                    log.exception("action %s 失敗", action)
                     self._json({"ok": False, "message": f"錯誤: {e}"}, code=500)
                 return
 
             if path == "/api/config":
                 length = int(self.headers.get("Content-Length", "0") or 0)
+                if length > 64 * 1024:    # 64KB 上限
+                    self._json({"ok": False, "message": "payload 過大"}, code=413)
+                    return
                 raw = self.rfile.read(length) if length else b""
                 try:
                     payload = json.loads(raw.decode("utf-8")) if raw else {}
                 except json.JSONDecodeError as e:
                     self._json({"ok": False, "message": f"JSON 錯誤: {e}"}, code=400)
                     return
-                # 過濾掉 None / 空字串以外的「保留現值」訊號
-                # （前端輸入空欄位時，type=int 會送 NaN，過濾掉它）
+                if not isinstance(payload, dict):
+                    self._json({"ok": False, "message": "payload 必須是 dict"}, code=400)
+                    return
                 _strip_invalid_numbers(payload)
-                # 不允許 dashboard 改自己的 host / port（避免鎖死自己）
-                payload.pop("dashboard", None)
-                # 也不允許從 dashboard 改 password（前端只看到 ***）
+                # 不允許 dashboard / email 修改密碼或 host(防鎖死自己)
+                if "dashboard" in payload:
+                    payload["dashboard"].pop("password", None)
+                    payload["dashboard"].pop("host", None)
+                    payload["dashboard"].pop("port", None)
                 if "email" in payload:
                     payload["email"].pop("password", None)
+                # 也不允許改 guild_id / channel_id
+                payload.pop("guild_id", None)
+                payload.pop("channel_id", None)
+
                 try:
-                    _deep_merge(config_holder[0], payload)
-                    # 用 main 注入的 save_config callback
-                    from main import save_config as _save_config
-                    _save_config(config_holder[0])
-                    config_holder[0] = json.loads(json.dumps(config_holder[0]))
-                    self._json({"ok": True, "message": "已儲存"})
-                except Exception as e:
+                    result = on_config_save_sync(payload)
+                    if result.get("ok"):
+                        self._json(result)
+                    else:
+                        self._json(result, code=400)
+                except Exception as e:    # noqa: BLE001
+                    log.exception("儲存設定失敗")
                     self._json({"ok": False, "message": f"儲存失敗: {e}"}, code=500)
                 return
 
             self._respond(404, "text/plain", b"Not Found")
 
-        # ── 回應 helpers ─────────────────────────────────────────────────
-        def _html(self, body: str):
+        # ── Response helpers ─────────────────────────────────────────
+        def _html(self, body: str) -> None:
             self._respond(200, "text/html; charset=utf-8", body.encode("utf-8"))
 
-        def _json(self, obj: Any, code: int = 200):
+        def _json(self, obj: Any, code: int = 200) -> None:
             body = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
             self._respond(code, "application/json; charset=utf-8", body)
 
-        def _respond(self, code: int, ctype: str, body: bytes):
+        def _respond(self, code: int, ctype: str, body: bytes) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "same-origin")
             self.end_headers()
             self.wfile.write(body)
 
     return DashboardHandler
 
 
-def _strip_invalid_numbers(d):
-    """遞迴把 NaN / 不是有效數字的 number 改成 None（讓 _deep_merge 略過）。"""
+def _strip_invalid_numbers(d: Any) -> None:
     if isinstance(d, dict):
         for k in list(d.keys()):
             v = d[k]
-            if isinstance(v, float) and v != v:   # NaN
+            if isinstance(v, float) and v != v:    # NaN
                 d[k] = None
             elif isinstance(v, dict):
                 _strip_invalid_numbers(v)
@@ -1248,43 +1317,43 @@ class _ReusableTCPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
 
-def _detect_lan_ip() -> str:
-    """嘗試找出本機在 LAN 上的 IPv4（給 README hint 用，連不上就回 '?'）。"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0.1)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "?"
+# ── Server lifecycle ──────────────────────────────────────────────────
+def start_dashboard_thread(
+    state: "BotState",
+    config_provider: Callable[[], "BotConfig"],
+    on_action: Callable[[str], dict],
+    on_config_save_sync: Callable[[dict], dict],
+    host: str | None = None,
+    port: int | None = None,
+) -> threading.Thread | None:
+    cfg = config_provider().dashboard
+    host = host or cfg.host
+    port = port or cfg.port
 
+    # 安全保險:0.0.0.0 + 無密碼 → 拒絕啟動
+    if host == "0.0.0.0" and not (cfg.password or "").strip():
+        log.error("Dashboard 配置不安全(0.0.0.0 + 無密碼),拒絕啟動。"
+                  "請設定密碼或改 host=127.0.0.1。")
+        return None
 
-def start_dashboard_thread(state: dict, config_holder: list,
-                            on_action: Callable[[str], dict],
-                            host: str = "0.0.0.0", port: int = 8765
-                            ) -> threading.Thread | None:
-    """啟動 dashboard HTTP server 在背景 thread。"""
-    log = logging.getLogger("dashboard")
-    handler_cls = _make_handler(state, config_holder, on_action)
+    handler_cls = _make_handler(state, config_provider, on_action, on_config_save_sync)
     try:
         server = _ReusableTCPServer((host, port), handler_cls)
     except OSError as e:
-        log.warning("dashboard 啟動失敗（port %d 被占用？）: %s", port, e)
+        log.warning("dashboard 啟動失敗(port %d 被占用?): %s", port, e)
         return None
 
-    lan_ip = _detect_lan_ip()
     if host == "0.0.0.0":
+        from bot.web.url_helpers import detect_lan_ip
         log.info("dashboard 啟動 — 本機: http://127.0.0.1:%d/  / LAN: http://%s:%d/",
-                 port, lan_ip, port)
+                 port, detect_lan_ip(), port)
     else:
         log.info("dashboard 啟動 — http://%s:%d/", host, port)
 
-    def _serve():
+    def _serve() -> None:
         try:
             server.serve_forever(poll_interval=0.5)
-        except Exception as e:
+        except Exception as e:    # noqa: BLE001
             log.error("dashboard server 例外: %s", e)
         finally:
             server.server_close()
@@ -1296,8 +1365,7 @@ def start_dashboard_thread(state: dict, config_holder: list,
     return t
 
 
-def stop_dashboard_thread(t: threading.Thread | None):
-    """關閉 dashboard server。"""
+def stop_dashboard_thread(t: threading.Thread | None) -> None:
     if t is None:
         return
     server = getattr(t, "_dashboard_server", None)
@@ -1305,5 +1373,5 @@ def stop_dashboard_thread(t: threading.Thread | None):
         return
     try:
         server.shutdown()
-    except Exception:
-        pass
+    except Exception:    # noqa: BLE001
+        log.warning("關閉 dashboard 時發生錯誤", exc_info=True)

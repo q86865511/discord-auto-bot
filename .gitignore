@@ -2,13 +2,23 @@
 config.json
 storage_state.json
 
+# SQLite 資料庫（含設定 / 歷史 / 分析,部分欄位加密）
+bot.db
+bot.db-journal
+bot.db-wal
+bot.db-shm
+
+# 加密主金鑰 — 絕對不要 commit
+secret.key
+secret.key.bak
+
 # 匯出的賭博紀錄
 exports/
 
-# Slot 分析資料（runtime 產生）
+# Slot 分析資料（舊版 JSON,留作 migration 來源）
 slot_analysis.json
 
-# 下注歷史紀錄（runtime 產生）
+# 下注歷史紀錄（舊版 JSON,留作 migration 來源）
 gambling_history.json
 
 # Python
