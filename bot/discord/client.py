@@ -309,13 +309,13 @@ async def navigate_to_channel(page: "Page", guild_id: str, channel_id: str) -> N
         except Exception:    # noqa: BLE001
             current_url = ""
         if "/login" in current_url or "/register" in current_url:
-            msg = ("Discord session 已過期(storage_state.json 失效)。"
-                   "請執行 login.bat 重新登入後再啟動 run.bat。")
+            msg = ("Discord session 已過期(data/storage_state.json 失效)。"
+                   "重啟 run.bat — 程式會自動引導你重新登入。")
         elif "discord.com/channels/" not in current_url:
             msg = (f"無法載入頻道頁,目前位置: {current_url}。"
                    "可能是 storage_state 過期、guild_id/channel_id 設定錯誤、"
-                   "或網路連線問題。請檢查 config 的 ID 是否正確;"
-                   "若仍然不行,執行 login.bat 重新登入。")
+                   "或網路連線問題。請檢查設定 ID 是否正確;"
+                   "若仍然不行,刪掉 data/storage_state.json 後重啟 run.bat 重新登入。")
         else:
             msg = (f"頻道頁載入超過 30 秒仍找不到輸入框。網路太慢?Discord 改 UI?"
                    f"目前位置: {current_url}")

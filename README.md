@@ -16,43 +16,27 @@
 - Windows 10 / 11
 - Python 3.10+（已加入 PATH）
 
-## 安裝
-
-雙擊執行：
-
-```
-setup.bat
-```
-
-會自動建 venv、裝 `playwright` / `rich` / `matplotlib`、下載 Chromium，並從 `config.example.json` 複製一份 `config.json`。
-
-接著編輯 `config.json` 填入：
-
-| 欄位 | 說明 | 怎麼取得 |
-|------|------|---------|
-| `guild_id` | 伺服器 ID | Discord 開發者模式 → 對伺服器右鍵「複製伺服器 ID」 |
-| `channel_id` | 要操作的頻道 ID | 對頻道右鍵「複製頻道 ID」 |
-| `gambling.notify_user_id` | 達標時要 @ 的人的 User ID | 對使用者右鍵「複製使用者 ID」 |
-
-（開啟開發者模式：使用者設定 → 進階 → 啟用「開發者模式」）
-
-## 登入 Discord
-
-雙擊執行：
-
-```
-login.bat
-```
-
-會跳出 Chromium 視窗，**請手動完成 Discord 登入**（含 2FA 等）。當網址跳轉到 `/channels/...` 時會自動關閉並儲存 `storage_state.json`。往後不需要再登入。
-
-## 啟動
+## 啟動（一鍵）
 
 雙擊執行：
 
 ```
 run.bat
 ```
+
+腳本會**自動偵測**目前狀態，依需要逐步處理：
+
+1. **首次啟動** — 沒 `.venv` → 自動建 venv、`pip install` 套件、下載 Chromium（~300 MB，需要網路）
+2. **套件缺漏** — 偵測到 `import playwright/rich/qrcode/cryptography` 失敗 → 重新 `pip install`
+3. **首次設定** — bot 內互動式 wizard 引導你開 Discord 開發者模式、填三個 ID（伺服器 / 頻道 / 通知 user ID）
+4. **首次登入** — 跳出 Chromium 視窗，手動完成 Discord 登入（含 2FA），網址跳到 `/channels/...` 時自動儲存
+5. **正常啟動** — 上述都完成 → 直接進 Rich UI
+
+之後每次啟動都只跑步驟 5（除非 `requirements.txt` 變動就會重跑步驟 2）。
+
+開啟 Discord 開發者模式：使用者設定 → 進階 → 啟用「開發者模式」，之後右鍵伺服器 / 頻道 / 使用者就會多出「複製 ID」選項。
+
+設定全部存在加密的 SQLite (`data/bot.db`)，不再需要編輯 JSON 檔。要改設定按 `C` 進選單，或開 Web Dashboard 的「系統設定」頁面。
 
 UI 上的快速鍵：
 
@@ -173,24 +157,25 @@ UI 上的快速鍵：
 
 ```
 .
-├── main.py                  主程式入口（UI + 自動化迴圈）
-├── login.py                 第一次登入用
-├── setup.bat                安裝環境（venv + 套件 + Chromium）
-├── login.bat                執行登入
-├── run.bat                  啟動 bot
+├── main.py                  入口程式（極簡，只負責初始化 + 啟動 loops）
+├── run.bat                  一鍵啟動腳本（自動處理 setup / login / run）
 ├── requirements.txt         Python 套件清單
-├── bot/                     模組化 package
-│   ├── slot/                Slot 相關
-│   │   ├── parsers.py       embed regex / DOM 文字擷取
-│   │   └── analysis.py      累計 / 計算 / 持久化 / 符號顯示
-│   └── web/                 Web 相關
-│       └── dashboard.py     localhost / LAN 儀表板
-├── config.example.json      設定檔範本
-├── config.json              你的實際設定（已被 .gitignore，不會上傳）
-├── storage_state.json       Discord session（已被 .gitignore，不會上傳）
-├── slot_analysis.json       Slot 分析累計資料（已被 .gitignore，runtime 產生）
-├── gambling_history.json    下注歷史紀錄（已被 .gitignore，runtime 產生）
-├── bot.log                  Rotating logs（已被 .gitignore；最多 5MB×3 個檔輪替）
+├── README.md
+├── bot/                     原始碼 package
+│   ├── core/                DB / 加密 / 設定 schema / 狀態 / log filter
+│   ├── discord/             Playwright wrapper（送指令、讀餘額、play_slot、轉帳）
+│   ├── scheduler/           5 個排程 loop（hourly / daily / gambling / transfer / nekomusume / digest）
+│   ├── notifications/       email + 通知判斷
+│   ├── slot/                slot embed 解析 + 累計分析 + Kelly
+│   ├── ui/                  Rich 終端 UI + 互動式設定選單
+│   └── web/                 Web dashboard（http.server + auth + CSRF）
+├── data/                    runtime 持久化（已被 .gitignore）
+│   ├── bot.db               SQLite — 所有設定、歷史、分析（敏感欄位加密）
+│   ├── secret.key           Fernet 加密金鑰
+│   └── storage_state.json   Discord session
+├── logs/                    runtime 日誌（已被 .gitignore）
+│   ├── bot.log + .1/.2/.3   主日誌（5MB × 3 個檔輪替）
+│   └── slot_debug.log       slot 解析失敗時的 dump
 └── exports/                 匯出的賭博紀錄與分析報告（已被 .gitignore）
 ```
 
