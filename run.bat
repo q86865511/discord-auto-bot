@@ -1,67 +1,67 @@
 @echo off
-REM ─────────────────────────────────────────────────────────────────
-REM  Discord Auto Bot — all-in-one launcher
+REM -----------------------------------------------------------------
+REM  Discord Auto Bot -- all-in-one launcher
 REM
-REM  雙擊就好,腳本會自動偵測:
-REM    - 沒 venv? 建 venv
-REM    - 套件沒裝? pip install
-REM    - Chromium 沒下? playwright install
-REM    - 都好了? 啟動 main.py
+REM  Auto-detects state and handles each phase:
+REM    no .venv          -> create venv + pip install + chromium
+REM    venv missing pkgs -> pip install
+REM    no config / login -> main.py interactive wizard
+REM    otherwise         -> run main.py with exit-code-42 reboot loop
 REM
-REM  首次設定(guild_id / channel_id / Discord 登入)由 main.py 內的
-REM  互動式 wizard 引導。退出 code 42 = 使用者按 F 重啟。
-REM ─────────────────────────────────────────────────────────────────
+REM  ASCII-only on purpose: cmd parses .bat files using the system
+REM  code page (CP950 on Traditional Chinese Windows), so any non-ASCII
+REM  bytes in this file get mis-interpreted as broken commands BEFORE
+REM  chcp 65001 takes effect. Keep this script English-only; let main.py
+REM  print Chinese (Python always handles UTF-8 cleanly).
+REM -----------------------------------------------------------------
 chcp 65001 >nul
 cd /d "%~dp0"
 setlocal enabledelayedexpansion
 
-REM 檢查 Python
+REM Check Python availability
 where python >nul 2>nul
 if errorlevel 1 goto NO_PYTHON
 
-REM 1) 沒 venv 就跑首次設定
+REM 1) No venv -> first-time setup
 if not exist ".venv\Scripts\python.exe" goto FIRST_SETUP
 
-REM 2) 有 venv 但缺關鍵套件 → 重新安裝(例如 requirements.txt 改了)
+REM 2) Venv exists but missing critical packages -> reinstall
 ".venv\Scripts\python.exe" -c "import playwright, rich, qrcode, cryptography" >nul 2>nul
 if errorlevel 1 goto INSTALL_DEPS
 
 goto RUN
 
-REM ─── 首次設定:venv + deps + Chromium ───
 :FIRST_SETUP
 echo.
-echo === 首次啟動 — 建立執行環境(只跑一次)===
-echo [1/3] 建立 Python venv...
+echo === First-time setup (this runs only once) ===
+echo [1/3] Creating Python venv...
 python -m venv .venv
 if errorlevel 1 goto FAIL_VENV
 goto INSTALL_DEPS_FRESH
 
-REM ─── 安裝相依套件(已有 venv,但模組缺漏)───
 :INSTALL_DEPS
 echo.
-echo === 偵測到套件缺漏,重新安裝 ===
+echo === Detected missing packages, reinstalling ===
 :INSTALL_DEPS_FRESH
-echo [2/3] 安裝 Python 套件...
+echo [2/3] Installing Python packages...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
 ".venv\Scripts\pip.exe" install -r requirements.txt
 if errorlevel 1 goto FAIL_PIP
 
-echo [3/3] 安裝 Playwright Chromium(首次需要下載 ~300MB)...
+echo [3/3] Installing Playwright Chromium (~300MB on first run)...
 ".venv\Scripts\python.exe" -m playwright install chromium
 if errorlevel 1 goto FAIL_PLAYWRIGHT
 
 echo.
-echo === 環境就緒 ===
+echo === Setup complete ===
 echo.
 
-REM ─── 啟動 bot;exit code 42 = 使用者按 F 要求重啟 ───
 :RUN
 :loop
 ".venv\Scripts\python.exe" main.py
 if "%ERRORLEVEL%"=="42" (
     echo.
-    echo === 收到重啟請求(exit 42),3 秒後重啟... ===
+    echo === Reboot requested (exit 42), restarting in 3s... ===
     timeout /t 3 /nobreak >nul
     goto loop
 )
@@ -70,32 +70,31 @@ pause
 exit /b 0
 
 
-REM ─── 錯誤處理 ───
 :NO_PYTHON
 echo.
-echo [錯誤] 找不到 python — 請先安裝 Python 3.10+ 並確認已加入 PATH
-echo        (https://www.python.org/downloads/ → 安裝時勾選 "Add to PATH")
+echo [ERROR] python not found in PATH. Install Python 3.10+ first
+echo         (https://www.python.org/downloads/  check "Add to PATH").
 endlocal
 pause
 exit /b 1
 
 :FAIL_VENV
 echo.
-echo [錯誤] venv 建立失敗 — 確認 Python 安裝完整
+echo [ERROR] venv creation failed -- verify Python install integrity.
 endlocal
 pause
 exit /b 1
 
 :FAIL_PIP
 echo.
-echo [錯誤] pip install 失敗 — 檢查網路 / 看上方錯誤訊息
+echo [ERROR] pip install failed -- check network / scroll up for details.
 endlocal
 pause
 exit /b 1
 
 :FAIL_PLAYWRIGHT
 echo.
-echo [錯誤] Playwright Chromium 下載失敗 — 通常是網路問題,稍後重試
+echo [ERROR] Playwright Chromium download failed -- usually network. Retry later.
 endlocal
 pause
 exit /b 1
