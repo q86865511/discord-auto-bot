@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from bot.core.constants import SLOT_DEBUG_LOG_PATH
+
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
@@ -350,7 +352,7 @@ _get_page_text = get_page_text
 
 # ── 結構化 debug dump ─────────────────────────────────────────────────
 def debug_dump_slot_text(
-    text: str, reason: str, log_path: str = "slot_debug.log",
+    text: str, reason: str, log_path: str = SLOT_DEBUG_LOG_PATH,
     page_url: str = "", extra: dict | None = None,
 ) -> None:
     """解析失敗時把 拉霸機結果 區塊 + 上下文寫到 debug log。
@@ -364,6 +366,10 @@ def debug_dump_slot_text(
 
     """
     try:
+        # 父目錄(logs/)不存在就建立 — main 啟動時會 bootstrap 建好,
+        # 但保險起見這裡也做一次,避免外部 caller 沒走 main 流程時失敗
+        import os
+        os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
         block = ""
         m = SLOT_FULL_BLOCK.search(text)
         if m:

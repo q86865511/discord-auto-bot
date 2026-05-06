@@ -6,19 +6,27 @@
 from __future__ import annotations
 
 # ── 檔案路徑 ──────────────────────────────────────────────────────────
-# 持久化資料(SQLite + 加密金鑰)集中放 data/,避免污染專案根目錄
+# 持久化資料(SQLite + 加密金鑰 + Discord session)集中放 data/
+# 所有 log 檔案集中放 logs/
+# 避免污染專案根目錄,並讓備份 / 清理 / 排除更直觀
 DATA_DIR              = "data"
+LOG_DIR               = "logs"
 DB_PATH               = "data/bot.db"
 SECRET_KEY_PATH       = "data/secret.key"
-STORAGE_STATE_PATH    = "storage_state.json"
+STORAGE_STATE_PATH    = "data/storage_state.json"
 EXPORT_DIR            = "exports"
-LOG_FILE_PATH         = "bot.log"
-SLOT_DEBUG_LOG_PATH   = "slot_debug.log"
+LOG_FILE_PATH         = "logs/bot.log"
+SLOT_DEBUG_LOG_PATH   = "logs/slot_debug.log"
 
 # ── 舊版檔案(用於一次性 migration 後清掉) ─────────────────────────────
-LEGACY_CONFIG_PATH    = "config.json"
-LEGACY_HISTORY_PATH   = "gambling_history.json"
-LEGACY_ANALYSIS_PATH  = "slot_analysis.json"
+# 這些 path 留著只是給 migrate_*_from_json() 找舊檔。已遷移完就可刪除。
+# 同時也支援 storage_state.json 從舊根目錄位置升級。
+LEGACY_CONFIG_PATH         = "config.json"
+LEGACY_HISTORY_PATH        = "gambling_history.json"
+LEGACY_ANALYSIS_PATH       = "slot_analysis.json"
+LEGACY_STORAGE_STATE_PATH  = "storage_state.json"
+LEGACY_LOG_FILE_PATH       = "bot.log"
+LEGACY_SLOT_DEBUG_LOG_PATH = "slot_debug.log"
 
 # ── 日誌 ──────────────────────────────────────────────────────────────
 LOG_FILE_MAX_BYTES    = 5 * 1024 * 1024   # 5 MB

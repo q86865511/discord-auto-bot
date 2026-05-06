@@ -1,26 +1,32 @@
-# 個人資訊 — 絕對不要 commit
+# ── runtime 持久化資料(SQLite + 加密金鑰 + Discord session)──
+# 全集中在 data/ 一個資料夾,直接整個排除
+data/
+
+# ── runtime 日誌 ─────────────────────────────────────────────
+# bot.log + 輪替 + slot_debug.log 都在 logs/
+logs/
+
+# ── 個人設定(可能含敏感資料)── 不會 commit
 config.json
 storage_state.json
 
-# 持久化資料(SQLite + 加密金鑰)— 整個資料夾排除
-data/
-
-# 舊版位置(主目錄)— 兼容已有環境
+# ── 舊版根目錄位置(向下相容,bootstrap 會自動搬到 data/ 或 logs/)──
 bot.db
 bot.db-journal
 bot.db-wal
 bot.db-shm
 secret.key
 secret.key.bak
-
-# 匯出的賭博紀錄
-exports/
-
-# Slot 分析資料（舊版 JSON,留作 migration 來源）
 slot_analysis.json
-
-# 下注歷史紀錄（舊版 JSON,留作 migration 來源）
 gambling_history.json
+bot.log
+bot.log.1
+bot.log.2
+bot.log.3
+slot_debug.log
+
+# ── 匯出的賭博紀錄 ──
+exports/
 
 # Python
 __pycache__/
@@ -45,5 +51,5 @@ Thumbs.db
 playwright-report/
 test-results/
 
-# 日誌（含 slot_debug.log — slot 解析失敗時會寫入）
+# 開發過程任意產生的 log 檔(運行時的 bot.log 已被 logs/ 涵蓋)
 *.log

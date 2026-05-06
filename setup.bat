@@ -38,13 +38,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "config.json" (
-    echo.
-    echo [INFO] config.json not found, copying from config.example.json
-    copy /Y config.example.json config.json >nul
-    echo        Edit config.json to fill in guild_id / channel_id / notify_user_id.
-)
-
 echo.
-echo === Done. Next: run login.bat to log in to Discord. ===
+echo === Done ===
+echo First-run wizard will start when you launch run.bat — it asks for
+echo guild_id / channel_id / user_id and walks through Discord login.
+echo No need to manually edit config.json.
+echo.
 pause

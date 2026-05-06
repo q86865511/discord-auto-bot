@@ -22,14 +22,20 @@ from playwright.async_api import async_playwright
 
 from bot.core.async_io import remove_file
 from bot.core.constants import (
+    DATA_DIR,
     DB_PATH,
     LEGACY_ANALYSIS_PATH,
     LEGACY_CONFIG_PATH,
     LEGACY_HISTORY_PATH,
+    LEGACY_LOG_FILE_PATH,
+    LEGACY_SLOT_DEBUG_LOG_PATH,
+    LEGACY_STORAGE_STATE_PATH,
+    LOG_DIR,
     LOG_FILE_BACKUP_COUNT,
     LOG_FILE_MAX_BYTES,
     LOG_FILE_PATH,
     REBOOT_EXIT_CODE,
+    SLOT_DEBUG_LOG_PATH,
     STORAGE_STATE_PATH,
 )
 from bot.core.config import (
@@ -93,6 +99,9 @@ def setup_logging(state: BotState, log_level: str = "INFO") -> logging.Logger:
     root.addHandler(ui)
 
     try:
+        # 若 LOG_DIR 還不存在(例如外部呼叫 setup_logging 沒走 _bootstrap_layout)
+        # 也保險建一下,避免 RotatingFileHandler 開檔失敗
+        os.makedirs(LOG_DIR, exist_ok=True)
         fh = logging.handlers.RotatingFileHandler(
             LOG_FILE_PATH,
             maxBytes=LOG_FILE_MAX_BYTES,
@@ -155,8 +164,58 @@ def _save_qr_png(text: str) -> str | None:
         return None
 
 
+def _bootstrap_layout() -> None:
+    """建立 data/ + logs/ 資料夾,並把舊路徑的檔案搬到新位置。
+
+    為什麼要搬?方便備份 / 排除 / 清理 — runtime 資料全在 data/、所有 log
+    在 logs/、原始碼留在根目錄。
+
+    舊位置 → 新位置:
+      storage_state.json  → data/storage_state.json
+      bot.log + .1/.2/.3  → logs/bot.log + .1/.2/.3
+      slot_debug.log      → logs/slot_debug.log
+
+    搬移用 rename 而不是 copy+delete,避免「中斷時兩邊都有」。新位置已存在
+    就跳過(代表先前已搬過或新建)。
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR,  exist_ok=True)
+
+    moves = [
+        (LEGACY_STORAGE_STATE_PATH,  STORAGE_STATE_PATH),
+        (LEGACY_LOG_FILE_PATH,       LOG_FILE_PATH),
+        (LEGACY_SLOT_DEBUG_LOG_PATH, SLOT_DEBUG_LOG_PATH),
+    ]
+    # bot.log 的輪替檔(.1 .2 .3)也一起搬
+    for i in range(1, LOG_FILE_BACKUP_COUNT + 1):
+        moves.append((f"{LEGACY_LOG_FILE_PATH}.{i}", f"{LOG_FILE_PATH}.{i}"))
+
+    for src, dst in moves:
+        if not os.path.exists(src):
+            continue
+        if os.path.exists(dst):
+            # 兩邊都有 → 新位置(dst)是 canonical;src 是 legacy 殘留,
+            # 通常代表先前已搬過、或上次搬移過程中斷。直接刪掉 src,
+            # 不要保留兩份避免使用者誤以為 root bot.log 還在用。
+            # 對 storage_state.json 來說一樣安全 — dst 是當前 session 路徑。
+            try:
+                os.remove(src)
+                print(f"  ✓ 清掉殘留 {src}(已有新位置 {dst})")
+            except OSError as e:
+                print(f"  ⚠ 無法清除 legacy {src}: {e}")
+            continue
+        try:
+            os.replace(src, dst)
+            print(f"  ✓ 已搬移 {src} → {dst}")
+        except OSError as e:
+            print(f"  ⚠ 搬移失敗 {src} → {dst}: {e}")
+
+
 # ── 主程式 ────────────────────────────────────────────────────────────
 async def main() -> None:
+    # 0) 建立資料夾結構 + 搬舊檔案到新位置
+    _bootstrap_layout()
+
     # 1) 初始化加密與 DB
     key = load_or_create_key()
     cipher = Cipher(key)
