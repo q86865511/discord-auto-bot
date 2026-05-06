@@ -1,226 +1,215 @@
 # Discord Auto Bot
 
-以 Playwright 控制 Chromium 自動執行 Discord 斜線指令的腳本，內建 Rich 終端 UI。
+以 Playwright 控制 Chromium 自動執行 Discord 斜線指令。Rich 終端 UI + Web Dashboard 雙介面。
 
-主要功能：
-- 自動定期執行 `/hourly`、`/daily`
-- 自動 `/slot` 賭博，含可調策略（auto / fixed）、保底門檻、上下注上限、間距
-- 餘額目標達成時 `@` 指定使用者
-- 即時統計：總下注、勝率、淨收
-- 一鍵暫停 / 恢復、匯出賭博紀錄（CSV + 餘額曲線圖）
+## 功能
 
-> **使用前須知**：本腳本透過真實瀏覽器自動化操作 Discord。自動化使用者帳號違反 Discord 服務條款，使用造成的帳號處置請自行承擔。僅供研究、學習用途。
+- **自動指令**：`/hourly` 整點對齊、`/daily`、`/slot` 賭博（auto / fixed / kelly 三策略）
+- **目標 / 停損 / 連敗冷靜**：餘額達標自動 `@` 通知；跌破停損點自動停 / 階梯式下移；連敗 N 場強制冷靜 M 分鐘
+- **貓娘監控**：派遣完成自動偵測 → 可選自動點「領取並再派遣」按鈕
+- **自動轉帳**：定期 `/transfer` + 自動點「確認轉錢」按鈕
+- **Email 通知**：達標 / 停損 / 中大獎 / bot 停擺 / 貓娘完成 / 每日 24h 摘要
+- **Web Dashboard**：localhost / LAN 即時儀表板，4 個頁面 + HTTP Basic Auth + CSRF 防護
+- **分析**：EV / Kelly Criterion（半 Kelly + 95% CI 下界）/ 賠率分布 / 符號 / 線路 / 連勝紀錄 / 平均時薪 / 時段分析
+- **可靠性**：頻道掛了自動 reload；連續失敗自動 reboot；session 過期自動引導重新登入
+- **持久化**：所有資料 SQLite + Fernet 加密；輪替日誌；可匯出 CSV / PNG
+
+> **使用前須知**：自動化使用者帳號違反 Discord 服務條款，使用造成的帳號處置請自行承擔。僅供研究、學習用途。
 
 ## 系統需求
 
-- Windows 10 / 11
+- Windows 10 / 11（其他 OS 未測試，啟動腳本是 .bat）
 - Python 3.10+（已加入 PATH）
 
 ## 啟動（一鍵）
 
-雙擊執行：
+雙擊 `run.bat`。腳本會自動偵測並依序處理：
 
-```
-run.bat
-```
+1. **沒 .venv** → 自動建 venv、`pip install` 套件、下載 Chromium（~300 MB，需要網路；只跑一次）
+2. **套件缺漏** → 偵測到 import 失敗就重跑 `pip install`
+3. **首次設定** → main.py 內 wizard 互動引導，幫你填三個 ID（伺服器 / 頻道 / 通知 user ID）
+4. **首次登入** → 跳出 Chromium，手動完成 Discord 登入（含 2FA），跳到 `/channels/...` 自動儲存
+5. **正常啟動** → 進 Rich UI
 
-腳本會**自動偵測**目前狀態，依需要逐步處理：
+之後每次啟動都只跑步驟 5（除非 `requirements.txt` 變動會重跑步驟 2）。
 
-1. **首次啟動** — 沒 `.venv` → 自動建 venv、`pip install` 套件、下載 Chromium（~300 MB，需要網路）
-2. **套件缺漏** — 偵測到 `import playwright/rich/qrcode/cryptography` 失敗 → 重新 `pip install`
-3. **首次設定** — bot 內互動式 wizard 引導你開 Discord 開發者模式、填三個 ID（伺服器 / 頻道 / 通知 user ID）
-4. **首次登入** — 跳出 Chromium 視窗，手動完成 Discord 登入（含 2FA），網址跳到 `/channels/...` 時自動儲存
-5. **正常啟動** — 上述都完成 → 直接進 Rich UI
+> **怎麼取得 ID**：開啟 Discord 開發者模式（使用者設定 → 進階 → 啟用「開發者模式」），右鍵伺服器 / 頻道 / 使用者就會多出「複製 ID」選項。
 
-之後每次啟動都只跑步驟 5（除非 `requirements.txt` 變動就會重跑步驟 2）。
-
-開啟 Discord 開發者模式：使用者設定 → 進階 → 啟用「開發者模式」，之後右鍵伺服器 / 頻道 / 使用者就會多出「複製 ID」選項。
-
-設定全部存在加密的 SQLite (`data/bot.db`)，不再需要編輯 JSON 檔。要改設定按 `C` 進選單，或開 Web Dashboard 的「系統設定」頁面。
-
-UI 上的快速鍵：
+## 終端機快速鍵
 
 | 鍵 | 功能 |
 |----|------|
 | `Q` | 退出 |
-| `C` | 修改設定（互動式選單；存檔後即時套用，不需手動重載）|
-| `P` | 暫停 / 恢復所有功能（會即時打斷 hourly/daily 等待）|
-| `E` | 匯出賭博紀錄為 CSV + PNG 圖表 + Slot 分析報告（存到 `exports/`）|
-| `S` | 查看 Slot 分析報告（EV、符號統計、線路統計、Kelly 建議、ASCII 賭博紀錄圖）|
-| `L` | 重新載入 Discord 頻道頁面（page state 變糟時用）|
-| `F` | 整個程式重啟（透過 `run.bat` loop 達成；直接 `python main.py` 跑時會直接退出）|
+| `C` | 修改系統設定（互動式選單，分 7 大類）|
+| `P` | 暫停 / 恢復所有功能 |
+| `E` | 匯出賭博紀錄（CSV + PNG + 分析報告 → `exports/`）|
+| `S` | 查看 Slot 分析（EV、Kelly、賠率分布、符號統計、線路統計、時段分析）|
+| `W` | 在預設瀏覽器開啟 Web Dashboard |
+| `K` | 產生並開啟 QR Code 圖檔（手機掃即連 Dashboard）|
+| `F` | 整個程式重啟（`run.bat` 偵測 exit code 42 自動再啟動）|
 
-## 賭博設定說明
+## 設定
 
-`config.json` → `gambling` 內的欄位：
+所有設定存在加密的 SQLite (`data/bot.db`)，**不再需要編輯任何 JSON 檔**。改設定有兩種方式：
 
-| 欄位 | 預設 | 說明 |
-|------|------|------|
-| `enabled` | `false` | 是否啟用自動賭博 |
-| `threshold` | `5000` | 保底門檻：餘額低於這個值就停止下注 |
-| `min_bet` | `100` | 單次最小下注 |
-| `max_bet` | `500` | 單次最大下注（`0` = 自動：餘額超過門檻部分的 10%）|
-| `strategy` | `"auto"` | `auto` = 按比例；`fixed` = 固定 `min_bet`；`kelly` = 依據期望值的 Kelly Criterion（詳見下方說明）|
-| `bet_fraction` | `0.02` | auto 策略：押注超過門檻部分的這個比例 |
-| `interval_min` | `4` | 兩次下注之間最短秒數 |
-| `interval_max` | `10` | 兩次下注之間最長秒數 |
-| `goal` | `0` | 餘額目標；達到時通知，`0` = 不啟用 |
-| `goal_action` | `pause` | 達標後動作：`pause` = 停用賭博；`raise` = 把已達目標當作新門檻、目標 += `goal_step` 後繼續（保護獲利的階梯式策略）|
-| `goal_step` | `10000` | `raise` 模式下，新目標 = 舊目標 + 此值 |
-| `loss_floor` | `0` | 停損點：餘額跌到這個值就觸發停損動作，`0` = 不啟用 |
-| `loss_action` | `pause` | 觸發停損後動作：`pause` = 停用賭博；`lower_threshold` = 把門檻拉到「當前餘額 - `loss_step`」、停損點同步下移後繼續（階梯式停損）|
-| `loss_step` | `5000` | `lower_threshold` 模式下，新門檻 = 餘額 - 此值；新停損點 = 舊停損點 - 此值 |
-| `bigwin_multiplier` | `5.0` | 中大獎賠率門檻（總計贏得 / 下注 ≥ 此值就寄 email；需 `email.notify_bigwin` 啟用）|
-| `notify_user_id` | — | 目標達成 / 貓娘完成時要 `@` 的 Discord User ID |
+1. 終端機按 `C` 進入分類選單（賭博 / 目標停損 / 通知 / 貓娘 / 轉帳 / Dashboard / 進階）
+2. Web Dashboard 的「系統設定」頁面（即時生效，不用重啟）
 
-> **停損 vs 保底門檻**：
-> - `threshold`（保底）= 餘額低於此就「等待」（不下注、不通知，只是觀望）
-> - `loss_floor`（停損）= 餘額低於此就「觸發動作」（停用 bot 或下移門檻 + 寄信）
-> - 通常 `loss_floor < threshold` 才合理（先停下注，跌得更慘才停損）
+### 賭博基本
 
-### Email 通知（選用）
+- `enabled`（主開關）`threshold`（保底門檻）`min_bet` `max_bet` `bet_fraction`
+- `strategy`：`auto`（按比例）/ `fixed`（固定 min_bet）/ `kelly`（依 EV 動態，需 ≥ 200 筆樣本）
+- `interval_min` / `interval_max`（兩次下注秒數區間）
 
-`config.json` → `email`：
+### 目標 / 停損 / 連敗冷靜
 
-| 欄位 | 預設 | 說明 |
-|------|------|------|
-| `enabled` | `false` | 主開關，整個 email 功能 |
-| `smtp_host` / `smtp_port` | Gmail | SMTP 伺服器 |
-| `user` | — | 寄件人帳號 |
-| `password` | — | **Gmail 必須用 [App Password](https://myaccount.google.com/apppasswords)，不是登入密碼** |
-| `to` | — | 收件人 |
-| `notify_goal` | `true` | 達成 `goal` 時寄信 |
-| `notify_loss` | `true` | 觸發 `loss_floor` 停損時寄信 |
-| `notify_bigwin` | `true` | /slot 中大獎時寄信（賠率 ≥ `gambling.bigwin_multiplier`）|
-| `notify_dead` | `true` | 連續無法讀取餘額（/slot + /balance）時寄信，提醒 bot 可能掛了 |
-| `notify_neko` | `true` | 貓娘派遣完成時寄信 |
-| `notify_digest` | `true` | 每日 `digest_hour` 整點寄一次 24h 摘要（總下注、勝率、淨收、EV、各事件次數） |
-| `digest_hour` | `0` | 每日摘要的觸發時段（0~23 整點；預設 00:00） |
-| `dead_threshold` | `2` | 連續失敗達此次數就視為「bot 停擺」並寄一次警告（每段死亡只寄一次，恢復後重置）|
+- `goal` + `goal_action`（pause / raise）+ `goal_step` — 達標停或階梯式提目標
+- `loss_floor` + `loss_action`（pause / lower_threshold）+ `loss_step` — 跌破停或下移門檻續跑
+- `loss_streak_pause`（連敗 N 場觸發；0 = 停用）+ `loss_streak_cooldown_min`（冷靜 M 分鐘）
 
-六種事件：
-- **達成目標**：餘額 ≥ `goal`
-- **觸發停損**：餘額 ≤ `loss_floor`（每段下跌只寄一次，回升後重置）
-- **中大獎**：/slot 結果「總計贏得 / 下注」≥ `bigwin_multiplier`（預設 5x）
-- **bot 停擺**：/slot 或 /balance 連續失敗 ≥ `dead_threshold`
-- **每日摘要**：每天 `digest_hour` 整點，只要那一小時內醒過來且沒寄過，就會寄一次
-- **貓娘完成**：派遣狀態從「派遣中」變回「閒置 / 待領取」
+> **保底門檻 vs 停損點**：
+> - `threshold`（保底）= 餘額低於此就「等待回升」（不下注、不通知）
+> - `loss_floor`（停損）= 餘額低於此就「觸發動作 + 寄信」
+> - 通常 `loss_floor < threshold` 才合理（先停下注，跌得更慘才真停損）
 
-### 貓娘派遣監控
+### Email 通知
 
-`config.json` → `nekomusume`：
+`email` 區塊：`enabled` / `smtp_host:port` / `user`（寄件者）/ `password`（**Gmail 必須用 [App Password](https://myaccount.google.com/apppasswords)**）/ `to`（收件者）
 
-| 欄位 | 預設 | 說明 |
-|------|------|------|
-| `enabled` | `true` | 是否監控 |
-| `check_interval_min` | `30` | 基本檢查間距（分鐘）；剩 1 小時內會自動加密輪詢 |
+七種事件可分別開關：
 
-每隔 N 分鐘送一次 `/check`（ephemeral，不會洗版），偵測到從「派遣中」轉為「完成 / 閒置」時，自動 `@` 指定使用者，提醒 `/nekomusume claim` 領取。同時若 email 啟用也會寄信。
+| 開關 | 觸發條件 |
+|------|---------|
+| `notify_goal` | 餘額 ≥ `goal` |
+| `notify_loss` | 餘額 ≤ `loss_floor`（每段下跌只寄一次，回升後重置）|
+| `notify_bigwin` | /slot「總計贏得 / 下注」≥ `bigwin_multiplier`（預設 5x）|
+| `notify_dead` | /slot 或 /balance 連續失敗 ≥ `dead_threshold`（每段死亡只寄一次）|
+| `notify_neko` | 貓娘派遣完成 |
+| `notify_digest` | 每天 `digest_hour` 整點寄 24h 摘要（預設 0:00）|
 
-### Slot 分析與 Kelly 策略
+> 設定密碼會以 Fernet 加密存進 SQLite，不會以明文留在任何 JSON。
 
-按 `S` 鍵可查看完整分析報告，包含：
+### 貓娘監控
 
-- **期望值 (EV)**：每次下注的平均回報倍率。EV > 1 = 機器對玩家有利；EV < 1 = 莊家佔優
-- **符號統計**：各符號的中獎次數、平均倍率、總賠付，以及從九宮格解析的出現機率
-- **線路統計**：各連線方向的命中次數與命中率
-- **賠率分布**：0x / 0-1x / 1-2x / 2-5x / 5-10x / 10x+ 的分布直方圖
-- **Kelly Criterion**：基於 EV 和變異數計算的最佳下注比例
-
-**Kelly 策略** (`strategy: "kelly"`)：
-
-- 需要累計 50 筆以上轉數才會啟用；資料不足時以 `min_bet` 下注
-- 使用半 Kelly（f*/2）以降低波動風險
-- EV ≤ 1（負期望值）時固定下 `min_bet`，不停止賭博，UI 會清楚顯示 EV
-- 可隨時從設定選單切回 `auto` 或 `fixed`
-
-分析資料持久化在 `slot_analysis.json`，重啟後會自動載入繼續累計。可在設定選單 `[I]` 重置。
-
-下注歷史紀錄持久化在 `gambling_history.json`（最近 5000 筆），重啟後仍可從 `S` 鍵看到 ASCII 賭博紀錄圖、按 `E` 鍵匯出 CSV / PNG 折線圖。
+- `enabled` 每 `check_interval_min` 分鐘送 `/check`，剩 1 小時內加密輪詢
+- `auto_claim`（預設 false）— 偵測到完成時自動 `/nekomusume status` 並點「領取並再派遣」按鈕
 
 ### 自動轉帳
 
-`config.json` → `transfer`：
-
-| 欄位 | 預設 | 說明 |
-|------|------|------|
-| `enabled` | `false` | 是否啟用 |
-| `target` | `""` | 對象 — 用於觸發 Discord user picker 的搜尋字串。可填顯示名稱片段或 user ID（純數字）。送指令時會打字到 `user:` 參數，再按 Enter 選最上面那位 |
-| `amount` | `100` | 每次轉帳金額 |
-| `interval_min` | `60` | 多久轉一次（分鐘）|
-
-啟用後，bot 每隔 N 分鐘自動送 `/transfer`，並按下「確認轉錢」按鈕完成轉帳。設定可在 UI 按 `C` → `[J/K/L/M]` 修改。
-
-> ⚠ **注意**：對象的搜尋字串請填夠精準的關鍵字，否則 user picker 可能選到不是你預期的人。
-
-## 檔案說明
-
-```
-.
-├── main.py                  入口程式（極簡，只負責初始化 + 啟動 loops）
-├── run.bat                  一鍵啟動腳本（自動處理 setup / login / run）
-├── requirements.txt         Python 套件清單
-├── README.md
-├── bot/                     原始碼 package
-│   ├── core/                DB / 加密 / 設定 schema / 狀態 / log filter
-│   ├── discord/             Playwright wrapper（送指令、讀餘額、play_slot、轉帳）
-│   ├── scheduler/           5 個排程 loop（hourly / daily / gambling / transfer / nekomusume / digest）
-│   ├── notifications/       email + 通知判斷
-│   ├── slot/                slot embed 解析 + 累計分析 + Kelly
-│   ├── ui/                  Rich 終端 UI + 互動式設定選單
-│   └── web/                 Web dashboard（http.server + auth + CSRF）
-├── data/                    runtime 持久化（已被 .gitignore）
-│   ├── bot.db               SQLite — 所有設定、歷史、分析（敏感欄位加密）
-│   ├── secret.key           Fernet 加密金鑰
-│   └── storage_state.json   Discord session
-├── logs/                    runtime 日誌（已被 .gitignore）
-│   ├── bot.log + .1/.2/.3   主日誌（5MB × 3 個檔輪替）
-│   └── slot_debug.log       slot 解析失敗時的 dump
-└── exports/                 匯出的賭博紀錄與分析報告（已被 .gitignore）
-```
+- `enabled` `target`（user picker 搜尋字串：顯示名稱片段或純數字 user ID）`amount` `interval_min`
+- ⚠ 對象搜尋字串請夠精準，否則 Discord 的 user picker 可能選錯人
 
 ### Web Dashboard
 
-啟動後會在 `http://<本機 IP>:8765/` 開一個網頁儀表板。**預設是 `0.0.0.0`**（同 LAN 手機/平板都可開），bot 啟動時 log 會印出本機 + LAN IP 的網址。
-
-三個頁面：
-- **`/` 概覽** — 餘額 / 目標 / 停損 / 排程倒數 / **累計淨收折線圖（含 Y 軸刻度）** / 最近 15 筆下注
-- **`/analysis` Slot 分析** — EV / 賠率分布 / 符號統計 / 線路統計（與 `S` 鍵同等內容，但表格格式）
-- **`/control` 控制台** — 暫停/恢復、重置分析、重啟程式、編輯賭博/目標/停損/轉帳設定
-
-`config.json` → `dashboard`：
+bot 啟動時 log 會印出本機 + LAN IP 兩個網址。
 
 | 欄位 | 預設 | 說明 |
 |------|------|------|
 | `enabled` | `true` | 啟用 / 停用 |
-| `host` | `"0.0.0.0"` | 監聽位址；同 LAN 手機可看。要鎖本機只能本人開就改 `"127.0.0.1"` |
+| `host` | `"127.0.0.1"` | 預設只本機；要讓同 LAN 手機看，改 `"0.0.0.0"`（**請先設密碼**）|
 | `port` | `8765` | 監聽 port |
+| `username` | `"admin"` | HTTP Basic Auth 帳號 |
+| `password` | `""` | HTTP Basic Auth 密碼；空 = 不啟用驗證 |
 
-> **手機怎麼開？** 預設已是 LAN-friendly。電腦看 bot 啟動時 log 印的 LAN IP（或 `ipconfig` 找 IPv4 地址），手機在同一 WiFi 下開 `http://<那個 IP>:8765/` 即可。
-> **資安**：dashboard 沒有密碼。只在你信任的私人 LAN 開啟。如果你的網路上有不信任的人，務必改回 `127.0.0.1` 或加 firewall rule。
-> **零外部依賴**：dashboard 只用 Python 內建 `http.server`，不用安裝 FastAPI 等套件。
+四個頁面：
 
-### 日誌與除錯
+- **`/` 概覽** — 餘額 / 目標 / 停損 / 連勝紀錄 / 平均時薪 / 排程倒數 / 累計淨收折線圖（含 Y 軸刻度）/ 最近 15 筆下注
+- **`/analysis` 拉霸分析** — 與 `S` 鍵同等內容，HTML 表格版
+- **`/logs` 即時日誌** — `bot.log` 最近 200 行，每 3 秒 tail，事件 highlight 上色
+- **`/control` 系統設定** — 暫停 / 恢復、重置分析、重啟程式、即時編輯設定
 
-- `bot.log`：所有 INFO 以上訊息都會寫到這。檔案達 5 MB 自動輪替（保留 `bot.log.1/.2/.3` 共 3 份）
-- 想看 DEBUG 等級訊息：把 `config.json` 加 `"log_level": "DEBUG"`，重啟生效
-- 想清掉所有 log：按 `C` → `[X] 進階` → `[8] 清空 bot.log + 輪替檔`
-- `slot_debug.log` 只在 slot 解析失敗時才寫（line/grid 沒抓到），用於 regex 排查
+> **手機怎麼連？** 改 `host` 為 `"0.0.0.0"` → 設 `password` → 按 `K` 鍵產 QR PNG → 手機掃。
+>
+> **資安提醒**：
+> - `0.0.0.0` 沒密碼 = 同 WiFi 任何人都能控制你的 bot（暫停 / 重置 / 改設定都能做）。**務必設 `dashboard.password`**。
+> - 不在 LAN 暴露的話，保持 `127.0.0.1` 即可，免設密碼。
+>
+> **零外部依賴**：dashboard 用 Python 內建 `http.server`，不用裝 FastAPI 等套件。
+
+### Slot 分析與 Kelly
+
+按 `S` 鍵看完整報告：
+
+- **EV**（期望值）— 每注平均回報倍率（>1 = 玩家有利）
+- **賠率分布**：`0` / `0~2` / `2~5` / `5~8` / `8~10` / `10~20` / `以上`（≥ 20x 列出實際倍率）
+- **符號統計**：中獎次數、平均倍率、累計賠付、回收率、九宮格機率
+- **線路統計**：8 種連線方向命中次數 + 命中率
+- **時段分析**：依 hour-of-day 分組勝率 / 平均賠率 / 淨收（≥ 10 把的最賺/最虧時段標 🏆/💀）
+- **連勝紀錄 + 平均時薪**：當前 streak、歷史最高連勝/連敗、本 session 每小時淨收
+
+**Kelly 策略** (`strategy: "kelly"`)：
+
+- 用 sample variance（n-1 修正）估計變異數
+- 用 EV 95% 信賴區間下界估算 Kelly fraction（更保守）
+- 半 Kelly + 25% 上限（避免極端建議）
+- 需要 ≥ 200 筆樣本才啟用；資料不足時下 `min_bet`
+- EV ≤ 1（負期望值）時固定下 `min_bet`，不停止賭博
+- 隨時可從設定切回 auto / fixed
+
+分析資料持久化在 `data/bot.db`。要重置：`C` → 進階 → 重置分析。
+
+## 檔案結構
+
+```
+.
+├── main.py             入口程式
+├── run.bat             一鍵啟動腳本
+├── requirements.txt
+├── README.md
+├── bot/                原始碼 package
+│   ├── core/           DB / 加密 / 設定 schema / 狀態 / log filter
+│   ├── discord/        Playwright wrapper（送指令、讀餘額、play_slot、轉帳）
+│   ├── scheduler/      hourly / daily / gambling / transfer / nekomusume / digest 6 個 loop
+│   ├── notifications/  email + 通知判斷
+│   ├── slot/           parsers + analysis（Kelly）
+│   ├── ui/             Rich 終端 UI + 互動式設定選單
+│   └── web/            Web dashboard
+├── data/               runtime 持久化（gitignored）
+│   ├── bot.db          SQLite — 設定、歷史、分析（敏感欄位加密）
+│   ├── secret.key      Fernet 加密金鑰
+│   └── storage_state.json    Discord session
+├── logs/               runtime 日誌（gitignored）
+│   ├── bot.log + .1/.2/.3    主日誌（5MB × 3 個檔輪替）
+│   └── slot_debug.log         slot 解析失敗時的 dump
+└── exports/            匯出資料（gitignored）
+```
+
+## 日誌與除錯
+
+- `logs/bot.log`：所有 INFO+ 訊息，達 5 MB 自動輪替（保留 `.1/.2/.3` 共 3 份）
+- 想看 DEBUG 等級：按 `C` → 進階改 `log_level`，重啟後生效
+- 想清掉所有 log：按 `C` → 進階 → 清空 log + 輪替檔
+- `logs/slot_debug.log` 只在 slot 解析失敗時才寫，用於 regex 排查
 
 ## 技術說明
 
-- **餘額讀取**：用 `body.textContent` 比對「餘額/油幣」字樣的出現次數差，比 `chat-messages-` count diff 更穩
-- **Slot 動畫處理**：要求餘額值連續 5 秒不變才採用，避免讀到 bot「先扣下注、再加獎金」的中間狀態（會把贏的場次誤判為輸）
-- **指令序列化**：所有送指令的動作共用 `asyncio.Lock`，避免 hourly / daily / gambling 三個 loop 互相污染對方的回應解析
-- **暫停機制**：所有長 sleep 都用 0.5 秒分段，可被「P 鍵」即時打斷
+- **Emoji 解析**：Discord textContent 不含 `<img>` 的 alt（emoji 是 img），自家 walk DOM 把 alt 也接出來，否則 slot 符號全是空字串
+- **Slot 動畫處理**：要求餘額連續 5 秒不變才採用，避免讀到「先扣下注、再加獎金」中間狀態
+- **指令序列化**：所有送指令動作共用 `asyncio.Lock`，避免 6 個 loop 互相污染回應解析
+- **暫停機制**：所有長 sleep 用 0.5 秒分段，可被 `P` 鍵即時打斷
+- **/hourly 對齊**：等到下個整點 + 30~180 秒隨機 jitter，避免在重置邊界錯位
+- **可靠性**：`recover_page()` 連續失敗 3 次 → 設 reboot 旗標 → exit 42 → run.bat 自動重 launch
+- **Session 過期偵測**：頻道載入失敗時看 URL 是否在 `/login` → 自動引導重新登入
+- **加密**：email password / dashboard password 用 Fernet 加密存進 SQLite，金鑰在 `data/secret.key`
+- **CSRF 防護**：dashboard POST 必須 Origin/Referer 與 Host 同源
+- **Log redaction**：dashboard 顯示的 log 過濾 password / token / secret 等敏感字
 
 ## 常見問題
 
-**Q: 餘額一直讀不到？**
-A: 確認頻道權限正常、bot 有回應使用者、`/balance` 指令可用。看 UI 日誌欄是否顯示 timeout。
+**Q: bot 一直讀不到餘額？**  
+A: 確認頻道權限正常、目標 bot 有回應、`/balance` 指令可用。看 `logs/bot.log` 是否一堆 timeout。連續失敗 ≥ 3 次會自動 reload 頻道；累積夠多會 exit 42 由 `run.bat` 重啟整個 bot。
 
-**Q: 想換頻道？**
-A: 改 `config.json` 的 `channel_id`，按 `R` 重載即可，不用重啟。
+**Q: 想換頻道？**  
+A: 按 `C` → 賭博基本（或 Web Dashboard 的「系統設定」頁面）→ 改 channel_id。下次重啟生效。
 
-**Q: 可以同時跑多個帳號嗎？**
-A: 開多個資料夾分別放各自的 `config.json` / `storage_state.json` 即可。
+**Q: 多帳號怎麼跑？**  
+A: 把整個資料夾複製成 `bot1/` `bot2/`，各自有獨立 `data/bot.db` 和 `data/storage_state.json`。記得每個資料夾的 `dashboard.port` 要不一樣（例如 8765 / 8766），同時跑才不會搶 port。
+
+**Q: 不小心搞壞 bot.db？**  
+A: 刪掉 `data/bot.db`，下次啟動 wizard 會重建（但歷史資料會清空）。`data/secret.key` 也別刪，否則密碼欄位無法解密。
+
+**Q: 從 v1（root JSON 版本）升級？**  
+A: 啟動時自動偵測 `config.json` / `slot_analysis.json` / `gambling_history.json` 並一次性遷移到 `data/bot.db`。遷移完那些 JSON 就可以刪。
+
+**Q: 我帳號被 Discord 鎖了 / Captcha？**  
+A: Bot 帳號自動化違反 Discord ToS。請自行承擔風險。如果頻繁觸發，把 `interval_min/max` 加大、`/hourly` jitter 加大、減少 transfer / 貓娘的頻率。
