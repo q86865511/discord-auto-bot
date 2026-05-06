@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 # ── 檔案路徑 ──────────────────────────────────────────────────────────
-DB_PATH               = "bot.db"
-SECRET_KEY_PATH       = "secret.key"
+# 持久化資料(SQLite + 加密金鑰)集中放 data/,避免污染專案根目錄
+DATA_DIR              = "data"
+DB_PATH               = "data/bot.db"
+SECRET_KEY_PATH       = "data/secret.key"
 STORAGE_STATE_PATH    = "storage_state.json"
 EXPORT_DIR            = "exports"
 LOG_FILE_PATH         = "bot.log"

@@ -2,13 +2,14 @@
 config.json
 storage_state.json
 
-# SQLite 資料庫（含設定 / 歷史 / 分析,部分欄位加密）
+# 持久化資料(SQLite + 加密金鑰)— 整個資料夾排除
+data/
+
+# 舊版位置(主目錄)— 兼容已有環境
 bot.db
 bot.db-journal
 bot.db-wal
 bot.db-shm
-
-# 加密主金鑰 — 絕對不要 commit
 secret.key
 secret.key.bak
 

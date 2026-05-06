@@ -49,12 +49,13 @@ def load_or_create_key(path: str = SECRET_KEY_PATH) -> bytes:
                 pass
 
     key = secrets.token_bytes(32)
+    p.parent.mkdir(parents=True, exist_ok=True)   # 確保 data/ 等父目錄存在
     p.write_bytes(base64.urlsafe_b64encode(key))
     try:
         os.chmod(path, 0o600)   # Windows 上效果有限,但 Linux/macOS 會生效
     except OSError:
         pass
-    log.info("已產生新的 secret.key (32 byte)")
+    log.info("已產生新的 %s (32 byte)", path)
     return key
 
 
