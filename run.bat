@@ -59,12 +59,16 @@ echo.
 :RUN
 :loop
 ".venv\Scripts\python.exe" main.py
-if "%ERRORLEVEL%"=="42" (
+REM Capture errorlevel into a stable var (delayed expansion / blocks can lose it)
+set EC=%ERRORLEVEL%
+if "%EC%"=="42" (
     echo.
-    echo === Reboot requested (exit 42), restarting in 3s... ===
+    echo === Reboot requested (exit code %EC%), restarting in 3s... ===
     timeout /t 3 /nobreak >nul
     goto loop
 )
+echo.
+echo === Bot exited with code %EC% ===
 endlocal
 pause
 exit /b 0

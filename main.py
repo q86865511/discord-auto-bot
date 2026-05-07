@@ -58,6 +58,7 @@ from bot.scheduler.gambling import gambling_loop
 from bot.scheduler.hourly import hourly_loop
 from bot.scheduler.nekomusume import nekomusume_loop
 from bot.scheduler.transfer import transfer_loop
+from bot.scheduler.updater import updater_loop
 from bot.slot.analysis import make_slot_analysis, migrate_slot_analysis
 from bot.ui.menu import first_run_wizard, run_config_menu
 from bot.ui.terminal import (
@@ -212,7 +213,13 @@ def _bootstrap_layout() -> None:
 
 
 # ── 主程式 ────────────────────────────────────────────────────────────
-async def main() -> None:
+async def main() -> int:
+    """執行 bot 主流程。回傳 exit code(0=正常結束,42=請求重啟)。
+
+    重要:reboot 時 sys.exit 必須在 async_playwright context 之外呼叫,
+    否則 SystemExit 會穿過 async 清理路徑、可能被吞掉或讓子程序殘留,
+    結果是 run.bat 看不到 errorlevel 42、不會自動 loop 重啟(F 鍵閃退)。
+    """
     # 0) 建立資料夾結構 + 搬舊檔案到新位置
     _bootstrap_layout()
 
@@ -284,7 +291,9 @@ async def main() -> None:
                 await _run_login_wizard()
                 print("\n  ✓ 重新登入完成,3 秒後自動重啟 bot...")
                 await asyncio.sleep(3)
-                sys.exit(REBOOT_EXIT_CODE)
+                # 設 reboot 旗標,讓外層回傳 exit code(避免在 async with 內 sys.exit)
+                state.reboot = True
+                return REBOOT_EXIT_CODE
             raise
 
         # 9) 讀初始餘額
@@ -453,6 +462,10 @@ async def main() -> None:
                 digest_loop(state, config_provider, on_config_save_async),
                 name="digest",
             ),
+            asyncio.create_task(
+                updater_loop(state, config_provider, on_config_save_async),
+                name="updater",
+            ),
         ]
 
         await ui_task
@@ -484,14 +497,32 @@ async def main() -> None:
         except Exception:    # noqa: BLE001
             log.warning("最終儲存 slot_analysis 失敗", exc_info=True)
         log.info("程式已結束(slot 分析 / 歷史紀錄已儲存到 DB)")
+        reboot_requested = state.reboot
 
-        if state.reboot:
-            log.info("Reboot 已請求,以 exit code %d 退出", REBOOT_EXIT_CODE)
-            sys.exit(REBOOT_EXIT_CODE)
+    # ── 已退出 async_playwright context;清理已完成 ──────────────────
+    if reboot_requested:
+        log.info("Reboot 已請求,以 exit code %d 退出", REBOOT_EXIT_CODE)
+        # flush 所有 logging handler — 確保 bot.log 寫進最終訊息
+        for h in logging.getLogger().handlers:
+            try:
+                h.flush()
+            except Exception:    # noqa: BLE001
+                pass
+        # Windows:Rich Live alternate-screen 模式可能殘留終端狀態,
+        # cls 一下讓 run.bat 接手後的 reboot 訊息能正常顯示
+        if os.name == "nt":
+            try:
+                os.system("cls")
+            except OSError:
+                pass
+        return REBOOT_EXIT_CODE
+    return 0
 
 
 if __name__ == "__main__":
+    rc = 0
     try:
-        asyncio.run(main())
+        rc = asyncio.run(main()) or 0
     except KeyboardInterrupt:
-        pass
+        rc = 0
+    sys.exit(rc)

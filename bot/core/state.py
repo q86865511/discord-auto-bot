@@ -91,6 +91,12 @@ class BotState:
     dead_notified:        bool = False
     recover_fail_streak:  int  = 0
 
+    # ── 版本檢查(updater_loop 維護) ──────────────────────────────
+    update_available:    bool = False
+    local_commit:        str | None = None    # full SHA;UI 顯示時截 [:7]
+    remote_commit:       str | None = None
+    last_update_check:   float | None = None
+
     # ── 識別 ────────────────────────────────────────────────────────
     guild_id:   str = ""
     channel_id: str = ""
@@ -173,6 +179,10 @@ class BotState:
             "neko_check_ts":       self.neko_check_ts,
             "dead_notified":       self.dead_notified,
             "recover_fail_streak": self.recover_fail_streak,
+            "update_available":    self.update_available,
+            "local_commit":        self.local_commit,
+            "remote_commit":       self.remote_commit,
+            "last_update_check":   self.last_update_check,
             "guild_id":            self.guild_id,
             "channel_id":          self.channel_id,
             "session_start_ts":    self.session_start_ts,

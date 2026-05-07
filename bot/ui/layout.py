@@ -214,6 +214,24 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         dash_str = "[dim]停用[/dim]"
     t2.add_row("🌐 Dashboard", dash_str)
 
+    # ── 版本檢查 ────────────────────────────────────────────────────
+    ucfg = config.updater
+    if not ucfg.auto_check:
+        upd_str = "[dim]停用[/dim]"
+    elif state.update_available:
+        local_short  = (state.local_commit  or "")[:7]
+        remote_short = (state.remote_commit or "")[:7]
+        if ucfg.auto_update:
+            upd_str = (f"[bold yellow]🔔 {local_short}→{remote_short} "
+                       f"自動更新中...[/bold yellow]")
+        else:
+            upd_str = f"[yellow]🔔 新版可用 {local_short}→{remote_short}[/yellow]"
+    elif state.last_update_check:
+        upd_str = "[dim]✓ 已是最新版[/dim]"
+    else:
+        upd_str = "[dim]檢查中...[/dim]"
+    t2.add_row("🔄 版本檢查", upd_str)
+
     cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改系統設定[/dim]",
                       border_style="green")
 

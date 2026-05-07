@@ -27,6 +27,7 @@ from bot.ui.input_validation import (
     ask_int,
     ask_text,
     ask_user_id,
+    ask_yes_no,
     wait_enter,
 )
 from bot.ui.maintenance import run_advanced_menu
@@ -410,6 +411,102 @@ async def _sub_menu_dashboard(config: BotConfig) -> None:
             await wait_enter()
 
 
+# ── 子選單:版本更新 ──────────────────────────────────────────────────
+async def _sub_menu_updater(config: BotConfig, state: BotState) -> None:
+    u = config.updater
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*48}\n  🔄 版本檢查 / 自動更新\n{'═'*48}")
+
+        local_short  = (state.local_commit  or "")[:7] or "─"
+        remote_short = (state.remote_commit or "")[:7] or "─"
+        if state.last_update_check:
+            from datetime import datetime
+            last_str = datetime.fromtimestamp(state.last_update_check).strftime("%H:%M:%S")
+        else:
+            last_str = "尚未檢查"
+
+        print("  [目前狀態]")
+        print(f"   本地版本:  {local_short}")
+        print(f"   遠端版本:  {remote_short}")
+        if state.update_available:
+            print("   狀態:      🔔 [有新版可用,選 [4] 立即更新]")
+        elif state.last_update_check:
+            print("   狀態:      ✓ 已是最新版")
+        else:
+            print("   狀態:      尚未檢查(啟動後 30 秒會自動跑第一次)")
+        print(f"   上次檢查:  {last_str}")
+        print()
+
+        print("  [設定]")
+        print(f"   [1] 自動檢查:      {'✓ 啟用' if u.auto_check else '✗ 停用'}")
+        print(f"   [2] 檢查間距:      {u.check_interval_min} 分鐘")
+        print(f"   [3] 自動更新:      {'✓ 啟用' if u.auto_update else '✗ 停用'}  "
+              f"(偵測新版 → git pull + 重啟)")
+        print()
+        print("  [動作]")
+        print("   [4] 立即檢查 / 更新")
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip()
+        if choice == "0":
+            return
+        elif choice == "1":
+            u.auto_check = not u.auto_check
+            print(f"  ✓ 自動檢查 → {'啟用' if u.auto_check else '停用'}")
+            await wait_enter()
+        elif choice == "2":
+            v = await ask_int("檢查間距分鐘 (建議 30~360)",
+                              u.check_interval_min, min_val=5, max_val=1440)
+            if v is not None: u.check_interval_min = v
+            await wait_enter()
+        elif choice == "3":
+            u.auto_update = not u.auto_update
+            print(f"  ✓ 自動更新 → {'啟用' if u.auto_update else '停用'}")
+            if u.auto_update:
+                print("  ⚠ 啟用後若偵測到新版會自動 git pull + 重啟,你的本地未提交修改可能會中斷流程")
+            await wait_enter()
+        elif choice == "4":
+            from bot.core.updater import check_for_updates, perform_update
+            print("\n  正在檢查 GitHub...")
+            status = await check_for_updates(u.branch)
+            if status.error:
+                print(f"  ⚠ 檢查失敗: {status.error}")
+                await wait_enter()
+                continue
+            local_s  = (status.local_commit  or "")[:7]
+            remote_s = (status.remote_commit or "")[:7]
+            async with state.lock:
+                state.local_commit = status.local_commit
+                state.remote_commit = status.remote_commit
+                state.update_available = status.has_update
+                state.last_update_check = __import__("time").time()
+            if not status.has_update:
+                print(f"  ✓ 已是最新版({local_s})")
+                await wait_enter()
+                continue
+            print(f"  🔔 有新版: {local_s} → {remote_s}")
+            confirm = await ask_yes_no("立即執行 git pull + 重啟程式?")
+            if not confirm:
+                continue
+            print("  正在 git pull...")
+            ok, output = await perform_update(u.branch)
+            print("  --- git output ---")
+            for line in output.strip().splitlines()[-10:]:
+                print(f"  {line}")
+            print("  ------------------")
+            if ok:
+                print("  ✓ 更新成功!3 秒後重啟程式...")
+                import asyncio
+                await asyncio.sleep(3)
+                async with state.lock:
+                    state.reboot = True
+                    state.quit = True
+                return
+            print("  ⚠ 更新失敗")
+            await wait_enter()
+
+
 # ── 主選單 ────────────────────────────────────────────────────────────
 async def run_config_menu(
     config: BotConfig,
@@ -434,7 +531,13 @@ async def run_config_menu(
         print(f"   [5] 💸 自動轉帳     ({'啟用' if config.transfer.enabled else '停用'})")
         print(f"   [6] 🌐 Dashboard    ({'啟用' if config.dashboard.enabled else '停用'}, "
               f"密碼={'已設' if config.dashboard.password else '未設'})")
-        print("   [7] 🛠️  進階(檔案管理 / 系統更新)")
+        u = config.updater
+        upd_summary = (f"自動檢查={'✓' if u.auto_check else '✗'}, "
+                       f"自動更新={'✓' if u.auto_update else '✗'}")
+        if state.update_available:
+            upd_summary += "  🔔 有新版"
+        print(f"   [7] 🔄 版本更新     ({upd_summary})")
+        print("   [8] 🛠️  進階(檔案管理 / 系統更新)")
         print()
         print(f"   📊 Slot 分析:       {sa_spins:,} 筆紀錄")
         print()
@@ -457,6 +560,10 @@ async def run_config_menu(
         elif choice == "6":
             await _sub_menu_dashboard(config)
         elif choice == "7":
+            await _sub_menu_updater(config, state)
+            if state.quit:
+                break
+        elif choice == "8":
             await run_advanced_menu(state, db)
             if state.quit:
                 break

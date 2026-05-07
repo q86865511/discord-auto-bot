@@ -208,6 +208,23 @@ class DashboardConfig:
 
 
 @dataclass
+class UpdaterConfig:
+    """GitHub 版本檢查 / 自動更新。"""
+    auto_check: bool = True              # 開機後自動定期檢查新版
+    check_interval_min: int = 60         # 多久檢查一次(分鐘)
+    auto_update: bool = False            # 偵測到新版 → 自動 git pull + reboot
+    branch: str = "main"
+
+    def validate(self) -> list[str]:
+        errs: list[str] = []
+        if self.check_interval_min < 5:
+            errs.append("檢查間距必須 ≥ 5 分鐘(避免 GitHub 限流)")
+        if not self.branch.replace("-", "").replace("_", "").replace("/", "").isalnum():
+            errs.append(f"branch 名稱含異常字元: {self.branch!r}")
+        return errs
+
+
+@dataclass
 class BotConfig:
     """整份設定。除了上述 section,還有頂層欄位 guild_id / channel_id / log_level。"""
     guild_id: str = ""
@@ -218,6 +235,7 @@ class BotConfig:
     nekomusume: NekomusumeConfig = field(default_factory=NekomusumeConfig)
     transfer: TransferConfig = field(default_factory=TransferConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    updater: UpdaterConfig = field(default_factory=UpdaterConfig)
 
     def validate(self) -> list[str]:
         errs: list[str] = []
@@ -228,7 +246,7 @@ class BotConfig:
         if self.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
             errs.append(f"log_level 必須是 DEBUG/INFO/WARNING/ERROR,目前 {self.log_level!r}")
         for section in (self.gambling, self.email, self.nekomusume,
-                        self.transfer, self.dashboard):
+                        self.transfer, self.dashboard, self.updater):
             errs.extend(section.validate())
         return errs
 
@@ -272,6 +290,7 @@ async def load_config(db) -> BotConfig:
     cfg.nekomusume = _build_dc(NekomusumeConfig, raw.get("nekomusume", {}))
     cfg.transfer   = _build_dc(TransferConfig,   raw.get("transfer", {}))
     cfg.dashboard  = _build_dc(DashboardConfig,  raw.get("dashboard", {}))
+    cfg.updater    = _build_dc(UpdaterConfig,    raw.get("updater", {}))
 
     # 從 secrets table 補回敏感欄位的明文(讓記憶體中的 cfg 物件能直接用)
     cfg.email.password = await db.get_secret("email_password")
@@ -312,6 +331,7 @@ async def save_config(db, config: BotConfig) -> list[str]:
         ("nekomusume", config.nekomusume),
         ("transfer",   config.transfer),
         ("dashboard",  config.dashboard),
+        ("updater",    config.updater),
     ]:
         d = asdict(section_obj)
         for sn, fn in SENSITIVE_FIELDS:
@@ -347,6 +367,7 @@ def merge_partial(config: BotConfig, partial: dict) -> list[str]:
         "nekomusume": config.nekomusume,
         "transfer":   config.transfer,
         "dashboard":  config.dashboard,
+        "updater":    config.updater,
     }
     for section_name, section_obj in section_map.items():
         section_data = partial.get(section_name)
@@ -432,6 +453,7 @@ async def migrate_from_json_if_needed(db, json_path: str) -> bool:
     cfg.nekomusume = _build_dc(NekomusumeConfig, old.get("nekomusume", {}))
     cfg.transfer   = _build_dc(TransferConfig,   old.get("transfer", {}))
     cfg.dashboard  = _build_dc(DashboardConfig,  old.get("dashboard", {}))
+    cfg.updater    = _build_dc(UpdaterConfig,    old.get("updater", {}))
 
     # 安全預設:若 dashboard 沒密碼且是 0.0.0.0 → 退到 127.0.0.1
     if cfg.dashboard.enabled and not (cfg.dashboard.password or "").strip():
