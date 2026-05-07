@@ -41,6 +41,25 @@ log = logging.getLogger(__name__)
 __all__ = ["first_run_wizard", "run_config_menu"]
 
 
+async def _toggle_or_edit(
+    title: str,
+    enabled: bool,
+    param_label: str,
+    param_display: str,
+) -> str:
+    """智能子選單:T = 切換 啟用/停用、P = 改參數、Enter = 取消。
+
+    讓使用者明確選擇,避免「只想改參數卻不小心關掉通知」的踩雷。
+    回傳 'T' / 'P' / ''(取消)。
+    """
+    state_str = "✓ 啟用" if enabled else "✗ 停用"
+    print(f"\n  📌 {title} = {state_str},{param_label} = {param_display}")
+    print("    [T] 切換 啟用/停用")
+    print(f"    [P] 修改 {param_label}")
+    print("    [Enter] 不變更")
+    return (await ainput("  選擇: ")).strip().upper()
+
+
 # ── 子選單:賭博 ─────────────────────────────────────────────────────
 async def _sub_menu_gambling(config: BotConfig) -> None:
     g = config.gambling
@@ -226,27 +245,48 @@ async def _sub_menu_email(config: BotConfig) -> None:
             await wait_enter()
         elif choice == "5":
             e.notify_goal = not e.notify_goal
+            print(f"  ✓ 達標通知 → {'啟用' if e.notify_goal else '停用'}")
             await wait_enter()
         elif choice == "6":
             e.notify_loss = not e.notify_loss
+            print(f"  ✓ 停損通知 → {'啟用' if e.notify_loss else '停用'}")
             await wait_enter()
         elif choice == "7":
-            e.notify_bigwin = not e.notify_bigwin
-            v = await ask_float("賠率門檻 (>=幾倍才寄信)", bw_mul, min_val=1.0)
-            if v is not None: g.bigwin_multiplier = v
+            sub = await _toggle_or_edit(
+                "中大獎通知", e.notify_bigwin, "賠率門檻", f"{bw_mul:.1f}x",
+            )
+            if sub == "T":
+                e.notify_bigwin = not e.notify_bigwin
+                print(f"  ✓ 中大獎通知 → {'啟用' if e.notify_bigwin else '停用'}")
+            elif sub == "P":
+                v = await ask_float("賠率門檻 (>=幾倍才寄信)", bw_mul, min_val=1.0)
+                if v is not None: g.bigwin_multiplier = v
             await wait_enter()
         elif choice == "8":
-            e.notify_dead = not e.notify_dead
-            v = await ask_int("連續失敗幾次算停擺", e.dead_threshold, min_val=1)
-            if v is not None: e.dead_threshold = v
+            sub = await _toggle_or_edit(
+                "停擺通知", e.notify_dead, "失敗門檻", str(e.dead_threshold),
+            )
+            if sub == "T":
+                e.notify_dead = not e.notify_dead
+                print(f"  ✓ 停擺通知 → {'啟用' if e.notify_dead else '停用'}")
+            elif sub == "P":
+                v = await ask_int("連續失敗幾次算停擺", e.dead_threshold, min_val=1)
+                if v is not None: e.dead_threshold = v
             await wait_enter()
         elif choice == "9":
             e.notify_neko = not e.notify_neko
+            print(f"  ✓ 貓娘完成通知 → {'啟用' if e.notify_neko else '停用'}")
             await wait_enter()
         elif choice == "A":
-            e.notify_digest = not e.notify_digest
-            v = await ask_int("摘要時段(0~23 整點)", e.digest_hour, min_val=0, max_val=23)
-            if v is not None: e.digest_hour = v
+            sub = await _toggle_or_edit(
+                "每日摘要", e.notify_digest, "時段", f"{e.digest_hour:02d}:00",
+            )
+            if sub == "T":
+                e.notify_digest = not e.notify_digest
+                print(f"  ✓ 每日摘要 → {'啟用' if e.notify_digest else '停用'}")
+            elif sub == "P":
+                v = await ask_int("摘要時段(0~23 整點)", e.digest_hour, min_val=0, max_val=23)
+                if v is not None: e.digest_hour = v
             await wait_enter()
 
 
