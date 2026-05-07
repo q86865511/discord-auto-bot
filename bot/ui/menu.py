@@ -411,6 +411,163 @@ async def _sub_menu_dashboard(config: BotConfig) -> None:
             await wait_enter()
 
 
+# ── 子選單:進階下注策略(hourly / rolling / trailing) ─────────────
+async def _sub_menu_strategies(config: BotConfig, state: BotState) -> None:
+    g = config.gambling
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*52}\n  🎯 進階下注策略\n{'═'*52}")
+        print()
+        print("  ⓘ 提示:這些策略不會把負 EV 變成正,只能降低 variance / drawdown。")
+        print("  ⓘ 進主程式後 Dashboard → 「策略 backtest」看歷史模擬結果")
+        print()
+
+        print("  [1] 時段過濾  hourly_filter  -- 跳過歷史 EV/勝率差的小時")
+        print(f"      啟用:        {'✓' if g.hourly_filter_enabled else '✗'}")
+        print(f"      樣本門檻:    {g.hourly_min_bets}  (該小時 < N 筆 → 不過濾)")
+        print(f"      勝率下限:    {g.hourly_min_winrate:.1%}  (低於這個 → 跳)")
+        print(f"      EV 下限:     {g.hourly_min_ev:.4f}  (低於這個 → 跳)")
+        print()
+
+        print("  [2] 滾動 EV   rolling_window -- 近期 EV 差時減碼/好時加碼")
+        print(f"      啟用:        {'✓' if g.rolling_enabled else '✗'}")
+        print(f"      視窗筆數:    {g.rolling_window_size}")
+        print(f"      減碼門檻 EV: {g.rolling_low_ev:.4f}  → 倍率 {g.rolling_low_mult:.2f}x")
+        print(f"      加碼門檻 EV: {g.rolling_high_ev:.4f}  → 倍率 {g.rolling_high_mult:.2f}x")
+        print()
+
+        print("  [3] Trailing stop -- 累計淨收從峰值跌幅 > X% → 暫停 K 筆")
+        print(f"      啟用:        {'✓' if g.trailing_stop_enabled else '✗'}")
+        print(f"      跌幅門檻:    {g.trailing_stop_pct:.1f}%")
+        print(f"      冷卻筆數:    {g.trailing_stop_cooldown_bets}")
+        print()
+
+        print("  [Runtime 統計]")
+        print(f"      hourly 跳過:     {state.strategy_skipped_hourly}")
+        print(f"      trailing 跳過:   {state.strategy_skipped_trailing}")
+        print(f"      trailing 觸發:   {state.strategy_trailing_triggers} 次")
+        print(f"      最近 rolling 倍率: {state.strategy_recent_ev_mult:.2f}x")
+        print()
+
+        print("  [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip()
+        if choice == "0":
+            return
+        elif choice == "1":
+            await _edit_hourly_filter(g)
+        elif choice == "2":
+            await _edit_rolling(g)
+        elif choice == "3":
+            await _edit_trailing(g)
+
+
+async def _edit_hourly_filter(g) -> None:
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*48}\n  ⏰ 時段過濾\n{'═'*48}")
+        print(f"   [1] 啟用 / 停用:     {'✓ 啟用' if g.hourly_filter_enabled else '✗ 停用'}")
+        print(f"   [2] 樣本門檻:        {g.hourly_min_bets}  筆")
+        print(f"   [3] 勝率下限:        {g.hourly_min_winrate:.2%}")
+        print(f"   [4] EV 下限:         {g.hourly_min_ev:.4f}")
+        print()
+        print("   [0] 返回")
+        c = (await ainput("\n  選擇: ")).strip()
+        if c == "0":
+            return
+        elif c == "1":
+            g.hourly_filter_enabled = not g.hourly_filter_enabled
+            print(f"  ✓ → {'啟用' if g.hourly_filter_enabled else '停用'}")
+            await wait_enter()
+        elif c == "2":
+            v = await ask_int("樣本門檻", g.hourly_min_bets, min_val=1, max_val=10000)
+            if v is not None: g.hourly_min_bets = v
+            await wait_enter()
+        elif c == "3":
+            v = await ask_float("勝率下限 (0~1, 例 0.30)", g.hourly_min_winrate,
+                                min_val=0.0, max_val=1.0)
+            if v is not None: g.hourly_min_winrate = v
+            await wait_enter()
+        elif c == "4":
+            v = await ask_float("EV 下限 (例 0.95)", g.hourly_min_ev,
+                                min_val=0.0, max_val=10.0)
+            if v is not None: g.hourly_min_ev = v
+            await wait_enter()
+
+
+async def _edit_rolling(g) -> None:
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*48}\n  📊 滾動 EV 動態下注\n{'═'*48}")
+        print(f"   [1] 啟用 / 停用:     {'✓ 啟用' if g.rolling_enabled else '✗ 停用'}")
+        print(f"   [2] 視窗筆數:        {g.rolling_window_size}")
+        print(f"   [3] 減碼 EV 門檻:    {g.rolling_low_ev:.4f}")
+        print(f"   [4] 減碼倍率:        {g.rolling_low_mult:.2f}x")
+        print(f"   [5] 加碼 EV 門檻:    {g.rolling_high_ev:.4f}")
+        print(f"   [6] 加碼倍率:        {g.rolling_high_mult:.2f}x")
+        print()
+        print("   [0] 返回")
+        c = (await ainput("\n  選擇: ")).strip()
+        if c == "0":
+            return
+        elif c == "1":
+            g.rolling_enabled = not g.rolling_enabled
+            print(f"  ✓ → {'啟用' if g.rolling_enabled else '停用'}")
+            await wait_enter()
+        elif c == "2":
+            v = await ask_int("視窗筆數", g.rolling_window_size,
+                              min_val=10, max_val=100000)
+            if v is not None: g.rolling_window_size = v
+            await wait_enter()
+        elif c == "3":
+            v = await ask_float("減碼 EV 門檻", g.rolling_low_ev,
+                                min_val=0.0, max_val=10.0)
+            if v is not None: g.rolling_low_ev = v
+            await wait_enter()
+        elif c == "4":
+            v = await ask_float("減碼倍率 (0~5)", g.rolling_low_mult,
+                                min_val=0.0, max_val=5.0)
+            if v is not None: g.rolling_low_mult = v
+            await wait_enter()
+        elif c == "5":
+            v = await ask_float("加碼 EV 門檻", g.rolling_high_ev,
+                                min_val=0.0, max_val=10.0)
+            if v is not None: g.rolling_high_ev = v
+            await wait_enter()
+        elif c == "6":
+            v = await ask_float("加碼倍率 (0~5)", g.rolling_high_mult,
+                                min_val=0.0, max_val=5.0)
+            if v is not None: g.rolling_high_mult = v
+            await wait_enter()
+
+
+async def _edit_trailing(g) -> None:
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*48}\n  ⛔ Trailing Stop\n{'═'*48}")
+        print(f"   [1] 啟用 / 停用:     {'✓ 啟用' if g.trailing_stop_enabled else '✗ 停用'}")
+        print(f"   [2] 跌幅門檻 %:      {g.trailing_stop_pct:.1f}")
+        print(f"   [3] 冷卻筆數:        {g.trailing_stop_cooldown_bets}")
+        print()
+        print("   [0] 返回")
+        c = (await ainput("\n  選擇: ")).strip()
+        if c == "0":
+            return
+        elif c == "1":
+            g.trailing_stop_enabled = not g.trailing_stop_enabled
+            print(f"  ✓ → {'啟用' if g.trailing_stop_enabled else '停用'}")
+            await wait_enter()
+        elif c == "2":
+            v = await ask_float("跌幅門檻 %", g.trailing_stop_pct,
+                                min_val=0.1, max_val=100.0)
+            if v is not None: g.trailing_stop_pct = v
+            await wait_enter()
+        elif c == "3":
+            v = await ask_int("冷卻筆數", g.trailing_stop_cooldown_bets,
+                              min_val=0, max_val=100000)
+            if v is not None: g.trailing_stop_cooldown_bets = v
+            await wait_enter()
+
+
 # ── 子選單:版本更新 ──────────────────────────────────────────────────
 async def _sub_menu_updater(config: BotConfig, state: BotState) -> None:
     u = config.updater
@@ -531,13 +688,20 @@ async def run_config_menu(
         print(f"   [5] 💸 自動轉帳     ({'啟用' if config.transfer.enabled else '停用'})")
         print(f"   [6] 🌐 Dashboard    ({'啟用' if config.dashboard.enabled else '停用'}, "
               f"密碼={'已設' if config.dashboard.password else '未設'})")
+        gs = config.gambling
+        active_strats = []
+        if gs.hourly_filter_enabled: active_strats.append("hourly")
+        if gs.rolling_enabled:        active_strats.append("rolling")
+        if gs.trailing_stop_enabled:  active_strats.append("trailing")
+        st_summary = ", ".join(active_strats) if active_strats else "無"
+        print(f"   [7] 🎯 進階下注策略 (啟用: {st_summary})")
         u = config.updater
         upd_summary = (f"自動檢查={'✓' if u.auto_check else '✗'}, "
                        f"自動更新={'✓' if u.auto_update else '✗'}")
         if state.update_available:
             upd_summary += "  🔔 有新版"
-        print(f"   [7] 🔄 版本更新     ({upd_summary})")
-        print("   [8] 🛠️  進階(檔案管理 / 系統更新)")
+        print(f"   [8] 🔄 版本更新     ({upd_summary})")
+        print("   [9] 🛠️  進階(檔案管理 / 系統更新)")
         print()
         print(f"   📊 Slot 分析:       {sa_spins:,} 筆紀錄")
         print()
@@ -560,10 +724,12 @@ async def run_config_menu(
         elif choice == "6":
             await _sub_menu_dashboard(config)
         elif choice == "7":
+            await _sub_menu_strategies(config, state)
+        elif choice == "8":
             await _sub_menu_updater(config, state)
             if state.quit:
                 break
-        elif choice == "8":
+        elif choice == "9":
             await run_advanced_menu(state, db)
             if state.quit:
                 break

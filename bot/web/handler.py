@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from bot.web.snapshots import (
     build_analysis_snapshot,
     build_state_snapshot,
+    build_strategies_snapshot,
     read_log_tail,
     run_in_main_loop,
 )
@@ -30,6 +31,7 @@ from bot.web.templates import (
     CONTROL_BODY,
     LOGS_BODY,
     OVERVIEW_BODY,
+    STRATEGIES_BODY,
     html_close,
     html_shell,
 )
@@ -144,11 +146,12 @@ def make_handler(
             path = self.path.split("?", 1)[0]
 
             routes_html = {
-                "/":          ("概覽",     OVERVIEW_BODY, "overview"),
-                "/index.html":("概覽",     OVERVIEW_BODY, "overview"),
+                "/":          ("概覽",      OVERVIEW_BODY, "overview"),
+                "/index.html":("概覽",      OVERVIEW_BODY, "overview"),
                 "/analysis":  ("Slot 分析", ANALYSIS_BODY, "analysis"),
-                "/control":   ("系統設定", CONTROL_BODY, "control"),
-                "/logs":      ("即時日誌", LOGS_BODY, "logs"),
+                "/strategies":("策略 Backtest", STRATEGIES_BODY, "strategies"),
+                "/control":   ("系統設定",  CONTROL_BODY, "control"),
+                "/logs":      ("即時日誌",  LOGS_BODY, "logs"),
             }
             if path in routes_html:
                 title, body, active = routes_html[path]
@@ -167,6 +170,12 @@ def make_handler(
             if path == "/api/analysis":
                 self._json(run_in_main_loop(
                     main_loop, state, build_analysis_snapshot, state
+                ))
+                return
+            if path == "/api/strategies":
+                self._json(run_in_main_loop(
+                    main_loop, state, build_strategies_snapshot,
+                    state, config_provider(),
                 ))
                 return
             if path == "/api/config":

@@ -139,10 +139,11 @@ canvas { width: 100%; max-width: 100%; height: 250px; display: block; }
 
 
 NAV_ITEMS = [
-    ("overview", "/",         "📊 概覽"),
-    ("analysis", "/analysis", "🎯 拉霸分析"),
-    ("logs",     "/logs",     "📋 即時日誌"),
-    ("control",  "/control",  "🛠️ 系統設定"),
+    ("overview",   "/",            "📊 概覽"),
+    ("analysis",   "/analysis",    "🎯 拉霸分析"),
+    ("strategies", "/strategies",  "🧪 策略 backtest"),
+    ("logs",       "/logs",        "📋 即時日誌"),
+    ("control",    "/control",     "🛠️ 系統設定"),
 ]
 
 
@@ -860,5 +861,168 @@ async function refreshLogs() {
 }
 refreshLogs();
 setInterval(refreshLogs, 3000);
+</script>
+"""
+
+
+STRATEGIES_BODY = r"""
+<div class="grid">
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>🧪 策略 Backtest 比較</h3>
+    <p class="dim" style="font-size: 12px; margin: 4px 0 12px 0;">
+      在你目前的歷史資料上,模擬「啟用各策略後」的最終淨收 / max drawdown / 下注次數。
+      ⚠ 注意:這只是 in-sample 模擬,過去表現不保證未來;策略無法把負 EV 變正。
+    </p>
+    <table class="right-align">
+      <thead><tr>
+        <th>策略</th><th>最終淨收</th><th>Max Drawdown</th>
+        <th>下注數</th><th>跳過</th><th>勝率</th><th>峰值</th>
+      </tr></thead>
+      <tbody id="bt-body"></tbody>
+    </table>
+  </div>
+
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>⏰ 小時 EV 分布</h3>
+    <p class="dim" style="font-size: 12px; margin: 4px 0 12px 0;">
+      每個小時的歷史 EV(賠付率)+ 勝率 + 樣本數。EV < 1.0 = 該時段不利。
+    </p>
+    <table class="right-align" id="hourly-table">
+      <thead><tr>
+        <th>時段</th><th>下注數</th><th>勝率</th><th>EV</th><th>EV 條形圖</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>📈 Runtime 統計(目前 session 累計)</h3>
+    <div class="row"><span class="label">hourly filter 跳過</span><span class="value" id="rt-hourly">0</span></div>
+    <div class="row"><span class="label">trailing stop 跳過</span><span class="value" id="rt-trailing">0</span></div>
+    <div class="row"><span class="label">trailing stop 觸發次數</span><span class="value" id="rt-triggers">0</span></div>
+    <div class="row"><span class="label">最近 rolling 倍率</span><span class="value" id="rt-mult">1.00x</span></div>
+    <div class="row"><span class="label">trailing 剩餘 cooldown</span><span class="value" id="rt-skip-rem">0</span></div>
+  </div>
+
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>⚙ 目前策略設定(在系統設定頁修改)</h3>
+    <div class="row"><span class="label">hourly_filter</span><span class="value" id="cfg-hourly">─</span></div>
+    <div class="row"><span class="label">rolling EV</span><span class="value" id="cfg-rolling">─</span></div>
+    <div class="row"><span class="label">trailing stop</span><span class="value" id="cfg-trailing">─</span></div>
+  </div>
+</div>
+<div class="footer">自動刷新 5 秒</div>
+<script>
+function fmt(n) { if (n == null) return '─'; return Number(n).toLocaleString(); }
+function fmtSign(n) {
+  if (n == null) return '─';
+  return (n >= 0 ? '+' : '') + Number(n).toLocaleString();
+}
+function appendCell(tr, text, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.textContent = text;
+  tr.appendChild(td);
+}
+function appendCellRich(tr, html, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.innerHTML = html;
+  tr.appendChild(td);
+}
+const STRAT_LABELS = {
+  baseline:      ['baseline (無策略)',     'dim'],
+  hourly_only:   ['hourly filter only',   'blue'],
+  rolling_only:  ['rolling EV only',      'blue'],
+  trailing_only: ['trailing stop only',   'blue'],
+  combined:      ['combined (全開)',       'yellow'],
+};
+async function refresh() {
+  try {
+    const r = await fetch('/api/strategies');
+    const d = await r.json();
+    if (!d.has_data) {
+      document.querySelector('#bt-body').innerHTML =
+        '<tr><td colspan="7" class="dim">尚無歷史資料 — 開始下注後會自動累積</td></tr>';
+      return;
+    }
+
+    // Backtest table
+    const baseline = d.results.baseline || {net: 0};
+    const baseNet = baseline.net || 0;
+    const tbody = document.querySelector('#bt-body');
+    tbody.innerHTML = '';
+    Object.entries(d.results).forEach(([key, r]) => {
+      const [label, _] = STRAT_LABELS[key] || [key, 'dim'];
+      const tr = document.createElement('tr');
+      // 名稱
+      appendCell(tr, label);
+      // 最終淨收(顏色:正綠負紅;對 baseline 比較)
+      const netCls = r.net > 0 ? 'green' : (r.net < 0 ? 'red' : 'dim');
+      let netStr = fmtSign(r.net);
+      if (key !== 'baseline') {
+        const diff = r.net - baseNet;
+        const diffStr = (diff >= 0 ? '+' : '') + fmt(diff);
+        const diffCls = diff > 0 ? 'green' : (diff < 0 ? 'red' : 'dim');
+        netStr += ` (vs base: <span class="${diffCls}">${diffStr}</span>)`;
+        appendCellRich(tr, netStr, netCls);
+      } else {
+        appendCell(tr, netStr, netCls);
+      }
+      appendCell(tr, fmt(r.max_drawdown), 'red');
+      appendCell(tr, fmt(r.n_bets));
+      const skipped = (r.n_skipped_hourly || 0) + (r.n_skipped_trailing || 0);
+      const triggered = r.n_trailing_triggers || 0;
+      let skipStr = String(skipped);
+      if (triggered > 0) skipStr += ` (trail x${triggered})`;
+      appendCell(tr, skipStr, 'dim');
+      appendCell(tr, (r.win_rate * 100).toFixed(1) + '%');
+      appendCell(tr, fmtSign(r.peak), 'green');
+      tbody.appendChild(tr);
+    });
+
+    // Hourly table
+    const hbody = document.querySelector('#hourly-table tbody');
+    hbody.innerHTML = '';
+    const maxBets = Math.max(...d.hourly.map(h => h.bets), 1);
+    d.hourly.forEach(h => {
+      if (h.bets === 0) return;
+      const tr = document.createElement('tr');
+      appendCell(tr, String(h.hour).padStart(2,'0') + ':00');
+      appendCell(tr, fmt(h.bets));
+      appendCell(tr, (h.win_rate * 100).toFixed(1) + '%');
+      const evCls = h.ev >= 1.0 ? 'green' : 'red';
+      appendCell(tr, h.ev.toFixed(4), evCls);
+      // bar chart relative to ev=1.0
+      const deltaPct = (h.ev - 1.0) * 100;
+      const barLen = Math.min(40, Math.abs(Math.floor(deltaPct * 5)));
+      const bar = (h.ev >= 1.0 ? '█' : '▒').repeat(barLen);
+      appendCell(tr, bar, evCls);
+      hbody.appendChild(tr);
+    });
+
+    // Runtime
+    const rt = d.runtime || {};
+    document.getElementById('rt-hourly').textContent  = fmt(rt.skipped_hourly);
+    document.getElementById('rt-trailing').textContent = fmt(rt.skipped_trailing);
+    document.getElementById('rt-triggers').textContent = fmt(rt.trailing_triggers);
+    document.getElementById('rt-mult').textContent     = (rt.recent_ev_mult || 1).toFixed(2) + 'x';
+    document.getElementById('rt-skip-rem').textContent = fmt(rt.trailing_skip_remaining);
+
+    // Config
+    const c = d.config || {};
+    document.getElementById('cfg-hourly').textContent =
+      (c.hourly_filter_enabled ? '✓' : '✗') +
+      `  min_bets=${c.hourly_min_bets}, min_winrate=${(c.hourly_min_winrate*100).toFixed(0)}%, min_ev=${c.hourly_min_ev}`;
+    document.getElementById('cfg-rolling').textContent =
+      (c.rolling_enabled ? '✓' : '✗') +
+      `  window=${c.rolling_window_size}, low=${c.rolling_low_ev}→${c.rolling_low_mult}x, high=${c.rolling_high_ev}→${c.rolling_high_mult}x`;
+    document.getElementById('cfg-trailing').textContent =
+      (c.trailing_stop_enabled ? '✓' : '✗') +
+      `  pct=${c.trailing_stop_pct}%, cooldown=${c.trailing_stop_cooldown_bets} bets`;
+  } catch (err) { console.error(err); }
+}
+refresh();
+setInterval(refresh, 5000);
 </script>
 """

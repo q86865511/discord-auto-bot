@@ -214,6 +214,23 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         dash_str = "[dim]停用[/dim]"
     t2.add_row("🌐 Dashboard", dash_str)
 
+    # ── 進階策略狀態 ──────────────────────────────────────────────
+    strats = []
+    if gcfg.hourly_filter_enabled: strats.append("hourly")
+    if gcfg.rolling_enabled:        strats.append("rolling")
+    if gcfg.trailing_stop_enabled:  strats.append("trailing")
+    if strats:
+        st_str = f"[cyan]{','.join(strats)}[/cyan]"
+        # 顯示 trailing stop 冷卻中
+        if state.trailing_skip_remaining > 0:
+            st_str += f"  [yellow]⏸ trailing -{state.trailing_skip_remaining}[/yellow]"
+        # 顯示 rolling 倍率(只在 != 1 時)
+        if state.strategy_recent_ev_mult != 1.0:
+            st_str += f"  [yellow]roll x{state.strategy_recent_ev_mult:.2f}[/yellow]"
+    else:
+        st_str = "[dim]無[/dim]"
+    t2.add_row("🎯 進階策略", st_str)
+
     # ── 版本檢查 ────────────────────────────────────────────────────
     ucfg = config.updater
     if not ucfg.auto_check:

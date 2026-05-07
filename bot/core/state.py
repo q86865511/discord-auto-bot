@@ -97,6 +97,15 @@ class BotState:
     remote_commit:       str | None = None
     last_update_check:   float | None = None
 
+    # ── 進階策略 runtime 狀態 ──────────────────────────────────────
+    # Trailing stop 觸發後跳過剩餘下注數;歸 0 才會 resume 並重設 peak
+    trailing_skip_remaining: int = 0
+    # 統計顯示用
+    strategy_skipped_hourly:  int = 0    # hourly filter 累計跳過數
+    strategy_skipped_trailing:int = 0
+    strategy_trailing_triggers: int = 0
+    strategy_recent_ev_mult:  float = 1.0  # 最近一次 rolling 倍率(0/1.x)
+
     # ── 識別 ────────────────────────────────────────────────────────
     guild_id:   str = ""
     channel_id: str = ""

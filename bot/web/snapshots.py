@@ -233,6 +233,82 @@ def build_analysis_snapshot(state: BotState) -> dict:
     }
 
 
+def build_strategies_snapshot(state: BotState, config: BotConfig) -> dict:
+    """Backtest 三個進階策略 + runtime 統計。
+
+    回傳給 /api/strategies。前端用來在 dashboard 顯示「策略比較」表格。
+    """
+    from bot.slot.strategies import backtest_all, hourly_stats
+
+    history = state.history or []
+    if not history:
+        return {
+            "has_data": False,
+            "config": _strategy_config_dict(config.gambling),
+            "runtime": _strategy_runtime_dict(state),
+            "results": {},
+            "hourly": [],
+        }
+
+    scfg = _strategy_config_dict(config.gambling)
+    # Backtest 永遠顯示所有 4 個情境(就算 disabled 也算給使用者看效果)
+    # 用「忽略 enabled flag」的方式讓比較更直觀
+    scfg_force = {**scfg,
+                  "hourly_filter_enabled": True,
+                  "rolling_enabled": True,
+                  "trailing_stop_enabled": True}
+    results = backtest_all(history, scfg_force)
+
+    # Hourly stats(供前端畫小時 EV 分布圖用)
+    h_stats = hourly_stats(history)
+    hourly_rows = []
+    for h in range(24):
+        s = h_stats.get(h, {})
+        hourly_rows.append({
+            "hour":     h,
+            "bets":     s.get("bets", 0),
+            "win_rate": s.get("win_rate", 0.0),
+            "ev":       s.get("ev", 0.0),
+        })
+
+    return {
+        "has_data": True,
+        "n_history": len(history),
+        "config":   scfg,
+        "runtime":  _strategy_runtime_dict(state),
+        "results":  results,
+        "hourly":   hourly_rows,
+    }
+
+
+def _strategy_config_dict(g) -> dict:
+    return {
+        "hourly_filter_enabled":  g.hourly_filter_enabled,
+        "hourly_min_bets":        g.hourly_min_bets,
+        "hourly_min_winrate":     g.hourly_min_winrate,
+        "hourly_min_ev":          g.hourly_min_ev,
+        "rolling_enabled":        g.rolling_enabled,
+        "rolling_window_size":    g.rolling_window_size,
+        "rolling_low_ev":         g.rolling_low_ev,
+        "rolling_high_ev":        g.rolling_high_ev,
+        "rolling_low_mult":       g.rolling_low_mult,
+        "rolling_high_mult":      g.rolling_high_mult,
+        "trailing_stop_enabled":      g.trailing_stop_enabled,
+        "trailing_stop_pct":          g.trailing_stop_pct,
+        "trailing_stop_cooldown_bets": g.trailing_stop_cooldown_bets,
+    }
+
+
+def _strategy_runtime_dict(state: BotState) -> dict:
+    return {
+        "skipped_hourly":     state.strategy_skipped_hourly,
+        "skipped_trailing":   state.strategy_skipped_trailing,
+        "trailing_triggers":  state.strategy_trailing_triggers,
+        "recent_ev_mult":     state.strategy_recent_ev_mult,
+        "trailing_skip_remaining": state.trailing_skip_remaining,
+    }
+
+
 def run_in_main_loop(
     main_loop: asyncio.AbstractEventLoop | None,
     state: BotState,

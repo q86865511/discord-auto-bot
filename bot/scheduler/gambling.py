@@ -34,6 +34,11 @@ from bot.notifications.digest import (
     notify_dead,
 )
 from bot.slot.analysis import compute_slot_stats, update_slot_analysis
+from bot.slot.strategies import (
+    realtime_rolling_multiplier,
+    realtime_should_pause_trailing,
+    realtime_should_skip_hourly,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -47,10 +52,13 @@ log = logging.getLogger(__name__)
 # ── 押注策略 ──────────────────────────────────────────────────────────
 def calculate_bet(
     balance: int, gcfg, slot_analysis: dict | None = None,
+    rolling_multiplier: float = 1.0,
 ) -> int:
     """根據策略計算下注金額。回傳 0 = 放棄這把。
 
     `gcfg` 是 GamblingConfig dataclass。
+    `rolling_multiplier`:rolling-EV 策略給的調整倍率(預設 1.0)。
+    若是 0 → 直接回 0(放棄這把)。
     """
     threshold = gcfg.threshold
     min_bet   = gcfg.min_bet
@@ -75,6 +83,10 @@ def calculate_bet(
         bet = min_bet
     else:   # auto
         bet = max(min_bet, int(excess * fraction))
+
+    # Rolling-EV 倍率(在 max_bet cap 之前套用,讓 cap 還是有效)
+    if rolling_multiplier != 1.0:
+        bet = int(bet * rolling_multiplier)
 
     if max_bet > 0:
         bet = min(bet, max_bet)
@@ -183,7 +195,58 @@ async def gambling_loop(
                 await maybe_notify_goal(page, state, config_provider(), on_config_save)
             continue
 
-        bet = calculate_bet(balance, gcfg, state.slot_analysis)
+        # ── 進階策略檢查(全部 opt-in) ────────────────────────────
+        # (a) Trailing stop:從累計淨收峰值跌幅超過 X% 就跳下注 K 筆
+        if state.trailing_skip_remaining > 0:
+            async with state.lock:
+                state.trailing_skip_remaining -= 1
+                state.strategy_skipped_trailing += 1
+                if state.trailing_skip_remaining == 0:
+                    state.queue_log("⏯ trailing-stop 冷卻結束,resume")
+            await interruptible_sleep(state, 30)
+            continue
+
+        if gcfg.trailing_stop_enabled:
+            should_pause, info = realtime_should_pause_trailing(state.history, gcfg)
+            if should_pause:
+                cooldown = max(1, int(gcfg.trailing_stop_cooldown_bets or 100))
+                async with state.lock:
+                    state.trailing_skip_remaining = cooldown
+                    state.strategy_trailing_triggers += 1
+                state.queue_log(
+                    f"⛔ trailing-stop 觸發(從峰值 {info['peak']:+,} 跌 "
+                    f"{info['drawdown_pct']:.1f}% ≥ {info['threshold']:.1f}%),"
+                    f"暫停 {cooldown} 筆"
+                )
+                log.warning("trailing stop 觸發 — 跳過下 %d 筆", cooldown)
+                continue
+
+        # (b) Hourly filter:當前小時歷史 EV/勝率太差就跳過
+        if gcfg.hourly_filter_enabled:
+            now_hour = datetime.now().hour
+            skip_h, reason = realtime_should_skip_hourly(
+                state.history, now_hour, gcfg,
+            )
+            if skip_h:
+                async with state.lock:
+                    state.strategy_skipped_hourly += 1
+                log.info("hourly filter 跳過: %s", reason)
+                await interruptible_sleep(state, 60)
+                continue
+
+        # (c) Rolling EV:近期 EV 差時減碼、好時加碼
+        roll_mult, roll_ev = realtime_rolling_multiplier(state.history, gcfg)
+        if roll_mult != 1.0:
+            async with state.lock:
+                state.strategy_recent_ev_mult = roll_mult
+            ev_str = f"EV={roll_ev:.4f}" if roll_ev is not None else "EV=─"
+            log.info("rolling-EV: %s → 倍率 %.2fx", ev_str, roll_mult)
+        else:
+            async with state.lock:
+                state.strategy_recent_ev_mult = 1.0
+
+        bet = calculate_bet(balance, gcfg, state.slot_analysis,
+                            rolling_multiplier=roll_mult)
         if bet <= 0:
             await interruptible_sleep(state, 30)
             continue

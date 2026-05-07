@@ -72,6 +72,24 @@ class GamblingConfig:
     bigwin_multiplier: float = DEFAULT_BIGWIN_MULTIPLIER
     notify_user_id: str = ""
 
+    # ── 進階策略(全部 opt-in,預設停用) ──────────────────────────
+    # 1) 時段過濾 — 跳過歷史 EV/勝率差的小時
+    hourly_filter_enabled: bool = False
+    hourly_min_bets:        int   = 50      # 該小時樣本 < N → 不過濾
+    hourly_min_winrate:     float = 0.30    # 勝率 < 30% → skip 該小時
+    hourly_min_ev:          float = 0.95    # EV < 0.95 → skip 該小時
+    # 2) 滾動視窗 EV — 近期 EV 差時減碼、好時加碼
+    rolling_enabled:    bool  = False
+    rolling_window_size: int  = 500
+    rolling_low_ev:     float = 0.95
+    rolling_high_ev:    float = 1.02
+    rolling_low_mult:   float = 0.5
+    rolling_high_mult:  float = 1.5
+    # 3) Trailing stop — 從累計淨收峰值跌幅超過 X% → 暫停 K 筆
+    trailing_stop_enabled:        bool  = False
+    trailing_stop_pct:            float = 5.0   # %
+    trailing_stop_cooldown_bets:  int   = 100   # 觸發後跳過幾筆才 resume
+
     def validate(self) -> list[str]:
         errs: list[str] = []
         if self.threshold < 0:
@@ -110,6 +128,25 @@ class GamblingConfig:
             errs.append("中大獎賠率門檻必須 ≥ 1.0x")
         if self.notify_user_id and not self.notify_user_id.isdigit():
             errs.append("通知對象 User ID 必須是純數字(Discord ID)")
+        # 進階策略驗證
+        if self.hourly_min_bets < 1:
+            errs.append("hourly_min_bets 必須 ≥ 1")
+        if not 0.0 <= self.hourly_min_winrate <= 1.0:
+            errs.append("hourly_min_winrate 必須在 0~1")
+        if self.hourly_min_ev < 0:
+            errs.append("hourly_min_ev 不可為負")
+        if self.rolling_window_size < 10:
+            errs.append("rolling_window_size 必須 ≥ 10")
+        if self.rolling_low_ev > self.rolling_high_ev:
+            errs.append("rolling_low_ev 必須 ≤ rolling_high_ev")
+        if not 0 <= self.rolling_low_mult <= 5:
+            errs.append("rolling_low_mult 必須在 0~5")
+        if not 0 <= self.rolling_high_mult <= 5:
+            errs.append("rolling_high_mult 必須在 0~5")
+        if not 0 < self.trailing_stop_pct <= 100:
+            errs.append("trailing_stop_pct 必須在 0~100")
+        if self.trailing_stop_cooldown_bets < 0:
+            errs.append("trailing_stop_cooldown_bets 不可為負")
         return errs
 
 
