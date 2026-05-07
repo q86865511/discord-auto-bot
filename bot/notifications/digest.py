@@ -17,11 +17,10 @@ from bot.core.constants import (
     DEFAULT_LOSS_ACTION,
     DEFAULT_LOSS_STEP,
     DEFAULT_NOTIFY_USER_ID,
-    MIN_KELLY_SAMPLES,
 )
 from bot.core.state import BotState
 from bot.notifications.email import send_email
-from bot.slot.analysis import compute_slot_stats
+from bot.slot.analysis import compute_slot_stats, format_kelly_display
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -91,14 +90,7 @@ def build_digest_body(state: BotState, sa: dict) -> str:
             f"EV:         {sa_stats['ev']:.4f}x  (邊際: {sa_stats['edge']:+.2%})",
             f"標準差:     {sa_stats['std_dev']:.4f}",
         ]
-        if sa_stats.get("sufficient_data"):
-            kf = sa_stats["kelly_fraction"]
-            lines.append(f"Kelly f*:   {kf:.4f}  (半 Kelly: {kf/2:.4f})")
-        else:
-            lines.append(
-                f"Kelly f*:   資料不足(需 {MIN_KELLY_SAMPLES} 筆,目前"
-                f" {sa_stats.get('valid_rr_count', sa_stats['total_spins'])})"
-            )
+        lines.append(f"Kelly f*:   {format_kelly_display(sa_stats)}")
 
     return "\n".join(lines)
 

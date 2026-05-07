@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 
 from bot.core.constants import (
     LOG_FILE_PATH,
-    MIN_KELLY_SAMPLES,
     PAYOUT_BUCKETS,
 )
 from bot.core.log_filter import redact_text
@@ -83,16 +82,12 @@ def build_state_snapshot(state: BotState, config: BotConfig) -> dict:
     n = sa.get("total_spins", 0)
     if n > 0:
         try:
-            from bot.slot.analysis import compute_slot_stats
+            from bot.slot.analysis import compute_slot_stats, format_kelly_display
             stats = compute_slot_stats(sa)
             edge_pct = stats["edge"] * 100
             ev_str = (f"{stats['ev']:.3f}x ({'+' if edge_pct >= 0 else ''}"
                       f"{edge_pct:.2f}%) n={n}")
-            if stats.get("sufficient_data") and stats.get("kelly_fraction", 0) > 0:
-                kf = stats["kelly_fraction"]
-                kelly_str = f"{kf:.4f} (½={kf/2:.4f})"
-            else:
-                kelly_str = f"資料不足 (需 {MIN_KELLY_SAMPLES})"
+            kelly_str = format_kelly_display(stats)
         except Exception:    # noqa: BLE001
             log.exception("compute_slot_stats 失敗")
 
@@ -168,6 +163,7 @@ def build_analysis_snapshot(state: BotState) -> dict:
     from bot.slot.analysis import (
         compute_drawdown,
         compute_slot_stats,
+        format_kelly_display,
         format_symbol_display,
         is_noise_symbol,
     )
@@ -217,12 +213,7 @@ def build_analysis_snapshot(state: BotState) -> dict:
         key=lambda r: -r["hits"],
     )
 
-    if stats.get("sufficient_data") and stats.get("kelly_fraction", 0) > 0:
-        kf = stats["kelly_fraction"]
-        kelly_str = f"{kf:.4f} (½={kf/2:.4f})"
-    else:
-        valid_n = stats.get("valid_rr_count", n)
-        kelly_str = f"資料不足 (需 {MIN_KELLY_SAMPLES},目前 {valid_n})"
+    kelly_str = format_kelly_display(stats)
 
     drawdown = compute_drawdown(state.history or [])
 

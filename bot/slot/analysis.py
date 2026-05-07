@@ -47,7 +47,7 @@ __all__ = [
     "make_slot_analysis", "update_slot_analysis", "compute_slot_stats",
     "compute_hourly_breakdown", "compute_drawdown",
     "format_symbol_display", "is_noise_symbol",
-    "migrate_slot_analysis",
+    "migrate_slot_analysis", "format_kelly_display",
     # 向後相容別名
     "_make_slot_analysis", "_update_slot_analysis",
     "_format_symbol_display", "_is_noise_symbol",
@@ -312,6 +312,29 @@ def compute_slot_stats(sa: dict) -> dict:
         "payout_distribution":  sa.get("payout_distribution", {}),
         "high_mults":           sa.get("high_mults", []),
     }
+
+
+def format_kelly_display(stats: dict) -> str:
+    """格式化 Kelly fraction 顯示文字。
+
+    區分三種情況(避免「資料不足」訊息誤導):
+    - 樣本不足   `sufficient_data=False` → "資料不足 (需 N,目前 M)"
+    - EV 不利     `kelly_fraction=0`、樣本足 → "EV 不利 (CI 下界 X.XXXX)"
+                  (邊際為負或 95% CI 下界 ≤ 1.0,Kelly 公式給 0 是對的)
+    - 正常        → "0.XXXX (½=0.YYYY)"
+    """
+    if not stats.get("sufficient_data"):
+        valid_n = stats.get("valid_rr_count", 0)
+        return f"資料不足 (需 {MIN_KELLY_SAMPLES},目前 {valid_n})"
+
+    kf = stats.get("kelly_fraction", 0.0)
+    if kf > 0:
+        return f"{kf:.4f} (½={kf/2:.4f})"
+
+    # 樣本足但 kelly=0 → EV/CI 下界 ≤ 1
+    lb = stats.get("kelly_lower_bound_ev", stats.get("ev", 0.0))
+    edge_pct = (lb - 1.0) * 100
+    return f"EV 不利 (CI 下界 {lb:.4f}, {edge_pct:+.2f}%)"
 
 
 # ── 時段分析 ──────────────────────────────────────────────────────────

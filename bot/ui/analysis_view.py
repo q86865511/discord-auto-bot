@@ -9,12 +9,12 @@ import os
 from rich.console import Console
 from rich.table import Table
 
-from bot.core.constants import MIN_KELLY_SAMPLES
 from bot.core.state import BotState
 from bot.slot.analysis import (
     compute_drawdown,
     compute_hourly_breakdown,
     compute_slot_stats,
+    format_kelly_display,
     format_symbol_display,
     is_noise_symbol,
 )
@@ -51,13 +51,13 @@ def show_slot_analysis(state: BotState) -> None:
     bt.add_row("期望值 (EV)", f"{stats['ev']:.4f}x  ([{ec}]邊際: {edge:+.2%}[/{ec}])")
     bt.add_row("標準差", f"{stats['std_dev']:.4f}")
     bt.add_row("變異數", f"{stats['variance']:.4f}")
-    kf = stats["kelly_fraction"]
-    if stats["sufficient_data"]:
-        bt.add_row("Kelly f*", f"{kf:.4f}  (半 Kelly: {kf / 2:.4f})")
+    kelly_str = format_kelly_display(stats)
+    # 區分顏色:可下注(數字開頭)用正常色,其他狀況(資料不足 / EV 不利)dim 一下
+    kf = stats.get("kelly_fraction", 0.0)
+    if stats.get("sufficient_data") and kf > 0:
+        bt.add_row("Kelly f*", kelly_str)
     else:
-        valid_n = stats.get("valid_rr_count", n)
-        bt.add_row("Kelly f*",
-                   f"[dim]資料不足(需 {MIN_KELLY_SAMPLES} 筆,目前 {valid_n})[/dim]")
+        bt.add_row("Kelly f*", f"[dim]{kelly_str}[/dim]")
     console.print(bt)
 
     dist = stats.get("payout_distribution", {})
