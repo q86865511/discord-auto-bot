@@ -35,6 +35,7 @@ from bot.core.constants import (
     LOG_FILE_MAX_BYTES,
     LOG_FILE_PATH,
     REBOOT_EXIT_CODE,
+    REBOOT_FLAG_PATH,
     SLOT_DEBUG_LOG_PATH,
     STORAGE_STATE_PATH,
 )
@@ -222,6 +223,13 @@ async def main() -> int:
     """
     # 0) 建立資料夾結構 + 搬舊檔案到新位置
     _bootstrap_layout()
+
+    # 0.5) 清掉上次留下的 reboot sentinel(run.bat 應該已經 del,但保險再做一次)
+    try:
+        if os.path.exists(REBOOT_FLAG_PATH):
+            os.remove(REBOOT_FLAG_PATH)
+    except OSError:
+        pass
 
     # 1) 初始化加密與 DB
     key = load_or_create_key()
@@ -501,20 +509,40 @@ async def main() -> int:
 
     # ── 已退出 async_playwright context;清理已完成 ──────────────────
     if reboot_requested:
+        # 1. 寫 sentinel 檔案 — run.bat 用這個判斷是否要重啟(exit code 在
+        #    Rich Live alt-screen 切換後不一定可靠,sentinel 是雙保險)
+        try:
+            os.makedirs(os.path.dirname(REBOOT_FLAG_PATH), exist_ok=True)
+            with open(REBOOT_FLAG_PATH, "w", encoding="utf-8") as f:
+                f.write("1")
+        except OSError as exc:
+            log.warning("寫入 reboot sentinel 失敗: %s", exc)
+
         log.info("Reboot 已請求,以 exit code %d 退出", REBOOT_EXIT_CODE)
-        # flush 所有 logging handler — 確保 bot.log 寫進最終訊息
+
+        # 2. flush 所有 logging handler — 確保 bot.log 寫進最終訊息
         for h in logging.getLogger().handlers:
             try:
                 h.flush()
             except Exception:    # noqa: BLE001
                 pass
-        # Windows:Rich Live alternate-screen 模式可能殘留終端狀態,
-        # cls 一下讓 run.bat 接手後的 reboot 訊息能正常顯示
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        # 3. 強制離開 alternate screen 模式(Rich Live screen=True 退出
+        #    時應該已經做過,但偶爾會殘留 — 多發一次無害,讓 run.bat 的
+        #    echo 能正常顯示在主 console buffer)
         if os.name == "nt":
             try:
-                os.system("cls")
+                sys.stdout.write("\x1b[?1049l\x1b[0m")
+                sys.stdout.flush()
             except OSError:
                 pass
+
+        # 4. Banner 讓使用者看到 Python 真的有跑到 reboot 路徑
+        print("\n" + "=" * 50)
+        print(f"  REBOOT REQUESTED -- exit code {REBOOT_EXIT_CODE}")
+        print("=" * 50, flush=True)
         return REBOOT_EXIT_CODE
     return 0
 
@@ -522,7 +550,8 @@ async def main() -> int:
 if __name__ == "__main__":
     rc = 0
     try:
-        rc = asyncio.run(main()) or 0
+        result = asyncio.run(main())
+        rc = result if isinstance(result, int) else 0
     except KeyboardInterrupt:
         rc = 0
     sys.exit(rc)

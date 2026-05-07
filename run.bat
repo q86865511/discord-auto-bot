@@ -57,20 +57,36 @@ echo === Setup complete ===
 echo.
 
 :RUN
+REM Clear stale sentinel before each run so we don't false-trigger
+if exist "data\.reboot" del /q "data\.reboot" >nul 2>nul
+
 :loop
 ".venv\Scripts\python.exe" main.py
-REM Capture errorlevel into a stable var (delayed expansion / blocks can lose it)
-set EC=%ERRORLEVEL%
-if "%EC%"=="42" (
+set "EC=%ERRORLEVEL%"
+
+REM Reboot decision: prefer sentinel file (rock-solid), fallback to exit 42.
+REM Why two mechanisms? Rich Live alternate-screen mode on Windows can
+REM occasionally desync the console state in a way that loses the exit
+REM code, but the sentinel file write is unaffected.
+if exist "data\.reboot" (
+    del /q "data\.reboot" >nul 2>nul
     echo.
-    echo === Reboot requested (exit code %EC%), restarting in 3s... ===
-    timeout /t 3 /nobreak >nul
+    echo === Reboot requested via sentinel (exit code: %EC%), restarting in 2s... ===
+    timeout /t 2 /nobreak >nul
     goto loop
 )
+if "%EC%"=="42" (
+    echo.
+    echo === Reboot requested via exit 42, restarting in 2s... ===
+    timeout /t 2 /nobreak >nul
+    goto loop
+)
+
 echo.
 echo === Bot exited with code %EC% ===
+echo Press any key to close this window.
+pause >nul
 endlocal
-pause
 exit /b 0
 
 

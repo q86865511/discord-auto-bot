@@ -43,6 +43,11 @@ GAMBLE_RECHECK_SEC           = 300
 
 # ── 重啟 ──────────────────────────────────────────────────────────────
 REBOOT_EXIT_CODE                          = 42
+# Sentinel 檔案 — Python 退出前寫入,run.bat 讀取後決定是否 loop 重啟。
+# 跟 exit code 42 一起作為雙保險:exit code 在某些 Windows 終端環境(尤其
+# Rich Live alternate-screen 切換)可能取不到正確值,sentinel 檔案是
+# rock-solid signal。
+REBOOT_FLAG_PATH                          = "data/.reboot"
 RECOVER_PAGE_FAILS_BEFORE_BROWSER_RESTART = 3
 
 # ── 打字節奏 ──────────────────────────────────────────────────────────
