@@ -68,10 +68,14 @@ REM Reboot decision: prefer sentinel file (rock-solid), fallback to exit 42.
 REM Why two mechanisms? Rich Live alternate-screen mode on Windows can
 REM occasionally desync the console state in a way that loses the exit
 REM code, but the sentinel file write is unaffected.
+REM IMPORTANT: do NOT put '(' or ')' in echo inside an if block — cmd's parser
+REM treats the inner ')' as the close of the outer if-(...) block, so the rest
+REM of the block (including the goto) is silently skipped and the batch just
+REM falls through and exits. That was the F-restart "閃退" bug.
 if exist "data\.reboot" (
     del /q "data\.reboot" >nul 2>nul
     echo.
-    echo === Reboot requested via sentinel (exit code: %EC%), restarting in 2s... ===
+    echo === Reboot requested via sentinel, restarting in 2s... ===
     timeout /t 2 /nobreak >nul
     goto loop
 )
