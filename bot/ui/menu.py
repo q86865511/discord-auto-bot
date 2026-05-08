@@ -625,9 +625,12 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print("  [⚠️  交易執行(預設關)]")
         trade_state = "✓ 已啟用 — Dashboard 會出現買賣按鈕" if s.trading_enabled else "✗ 停用"
         print(f"   [J] Dashboard 交易:  {trade_state}")
-        print(f"   [K] 單次金額上限:    {s.max_trade_amount} 股")
-        print(f"   [L] 買進指令樣板:    {s.buy_command} {s.buy_param_template}")
-        print(f"   [M] 賣出指令樣板:    {s.sell_command} {s.sell_param_template}")
+        print(f"   [K] 單次股數上限:    {s.max_trade_amount} 股")
+        print(f"   [L] Embed 操作鈕:    「{s.trade_open_button}」")
+        print(f"   [M] 買入選項文字:    「{s.trade_buy_option}」")
+        print(f"   [N] 賣出選項文字:    「{s.trade_sell_option}」")
+        print(f"   [O] Modal 提交鈕:    「{s.trade_submit_button}」")
+        print(f"   [P] 確認按鈕文字:    「{s.trade_confirm_button}」")
         print()
         print("  [說明]")
         print("   [H] 名詞解釋(看不懂分析參數來這)")
@@ -713,26 +716,40 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             if v is not None: s.max_trade_amount = v
             await wait_enter()
         elif choice == "L":
-            print("\n  ⓘ 買進指令樣板。{symbol} {amount} 會自動代換。")
-            print("    例:'action:buy symbol:{symbol} amount:{amount}'")
-            print("        → 實際送出:'action:buy symbol:HOLO amount:10'\n")
-            cmd = await ask_text("買進指令(預設 /stock)",
-                                 s.buy_command, max_len=50, allow_chinese=False)
-            if cmd is not None: s.buy_command = cmd
-            tmpl = await ask_text("買進 param 樣板",
-                                  s.buy_param_template, max_len=200,
-                                  allow_chinese=False)
-            if tmpl is not None: s.buy_param_template = tmpl
+            print("\n  ⓘ /stock 回應 embed 上的「操作」按鈕文字。")
+            print("    bot 用「操作股票」,有些 bot 可能用「Trade」之類。\n")
+            v = await ask_text("Embed 操作按鈕文字",
+                               s.trade_open_button, max_len=30,
+                               allow_chinese=True, allow_empty=False)
+            if v is not None: s.trade_open_button = v
             await wait_enter()
         elif choice == "M":
-            print("\n  ⓘ 賣出指令樣板。{symbol} {amount} 會自動代換。\n")
-            cmd = await ask_text("賣出指令(預設 /stock)",
-                                 s.sell_command, max_len=50, allow_chinese=False)
-            if cmd is not None: s.sell_command = cmd
-            tmpl = await ask_text("賣出 param 樣板",
-                                  s.sell_param_template, max_len=200,
-                                  allow_chinese=False)
-            if tmpl is not None: s.sell_param_template = tmpl
+            print("\n  ⓘ Modal 下拉選單中「買入」選項的文字。\n")
+            v = await ask_text("買入選項文字",
+                               s.trade_buy_option, max_len=30,
+                               allow_chinese=True, allow_empty=False)
+            if v is not None: s.trade_buy_option = v
+            await wait_enter()
+        elif choice == "N":
+            print("\n  ⓘ Modal 下拉選單中「賣出」選項的文字。\n")
+            v = await ask_text("賣出選項文字",
+                               s.trade_sell_option, max_len=30,
+                               allow_chinese=True, allow_empty=False)
+            if v is not None: s.trade_sell_option = v
+            await wait_enter()
+        elif choice == "O":
+            print("\n  ⓘ Modal 上提交按鈕的文字。Discord 預設「提交」,有些 bot 用「Submit」。\n")
+            v = await ask_text("Modal 提交按鈕文字",
+                               s.trade_submit_button, max_len=30,
+                               allow_chinese=True, allow_empty=False)
+            if v is not None: s.trade_submit_button = v
+            await wait_enter()
+        elif choice == "P":
+            print("\n  ⓘ 二階確認 embed 上的「確認」按鈕文字。\n")
+            v = await ask_text("確認按鈕文字",
+                               s.trade_confirm_button, max_len=30,
+                               allow_chinese=True, allow_empty=False)
+            if v is not None: s.trade_confirm_button = v
             await wait_enter()
         elif choice == "H":
             await _show_stock_help()

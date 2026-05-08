@@ -273,15 +273,22 @@ class StockConfig:
     # 不再有 log_raw_text — parser 失敗時會自動寫到 logs/stock_debug.log
 
     # ── 交易執行(預設關閉,操作真錢請審慎) ─────────────────────
+    # 米米警察是 button-based 流程:/stock symbol:X → 點「操作股票」→
+    # modal 下拉選買/賣 → 輸入股數 → 點「提交」→ 確認 embed → 點「確認」
+    # 所以不再用 param 樣板,改用 button label 設定(不同 bot 可能用不同字)
     trading_enabled: bool = False         # 開啟後 Dashboard 才會出現買賣按鈕
-    max_trade_amount: int = 1000          # 單次交易金額上限(防呆,避免一次 all-in)
-    # 指令樣板:每個 bot 命名不同,使用者可自行調整。{symbol} {amount} 會被代換
-    buy_command:        str = "/stock"
-    buy_param_template: str = "action:buy symbol:{symbol} amount:{amount}"
-    sell_command:        str = "/stock"
-    sell_param_template: str = "action:sell symbol:{symbol} amount:{amount}"
-    # 交易完成後等多久才視為「成功」(看回應穩定 N 秒)
-    trade_response_timeout_sec: float = 25.0
+    max_trade_amount: int = 1000          # 單次交易股數上限(防呆)
+    # 步驟 1:embed 上的「操作」按鈕
+    trade_open_button:    str = "操作股票"
+    # 步驟 2:modal 下拉選單裡的選項
+    trade_buy_option:     str = "買入股票"
+    trade_sell_option:    str = "賣出股票"
+    # 步驟 3:modal 的 submit 按鈕(Discord 預設 "提交")
+    trade_submit_button:  str = "提交"
+    # 步驟 4:確認 embed 上的按鈕
+    trade_confirm_button: str = "確認"
+    # 整個流程的超時(button-based 較慢,給長一點)
+    trade_response_timeout_sec: float = 60.0
 
     def validate(self) -> list[str]:
         errs: list[str] = []
@@ -304,12 +311,11 @@ class StockConfig:
         if self.max_trade_amount < 1:
             errs.append("max_trade_amount 必須 ≥ 1")
         if self.trading_enabled:
-            if "{symbol}" not in self.buy_param_template \
-                    or "{amount}" not in self.buy_param_template:
-                errs.append("buy_param_template 必須含 {symbol} 跟 {amount}")
-            if "{symbol}" not in self.sell_param_template \
-                    or "{amount}" not in self.sell_param_template:
-                errs.append("sell_param_template 必須含 {symbol} 跟 {amount}")
+            for fld in ("trade_open_button", "trade_buy_option",
+                        "trade_sell_option", "trade_submit_button",
+                        "trade_confirm_button"):
+                if not getattr(self, fld, "").strip():
+                    errs.append(f"trading 啟用但 {fld} 為空")
         return errs
 
 

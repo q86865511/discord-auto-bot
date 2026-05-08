@@ -411,21 +411,20 @@ async def main() -> int:
                     return {"ok": False, "message": "交易功能未啟用 — C → [8] [J] 開啟"}
                 if amount > cur.max_trade_amount:
                     return {"ok": False,
-                            "message": f"金額 {amount} 超過上限 {cur.max_trade_amount}"}
-                if action == "buy":
-                    cmd = cur.buy_command
-                    tmpl = cur.buy_param_template
-                else:
-                    cmd = cur.sell_command
-                    tmpl = cur.sell_param_template
+                            "message": f"股數 {amount} 超過上限 {cur.max_trade_amount}"}
 
                 from bot.discord.client import execute_stock_trade
 
                 async def _run():
                     return await execute_stock_trade(
                         page, action, symbol, amount,
-                        command=cmd, param_template=tmpl,
-                        timeout=float(cur.trade_response_timeout_sec or 25.0),
+                        open_button=cur.trade_open_button,
+                        buy_option=cur.trade_buy_option,
+                        sell_option=cur.trade_sell_option,
+                        submit_button=cur.trade_submit_button,
+                        confirm_button=cur.trade_confirm_button,
+                        stock_command=cur.stock_command,
+                        timeout=float(cur.trade_response_timeout_sec or 60.0),
                     )
                 fut = asyncio.run_coroutine_threadsafe(_run(), loop)
                 ok, msg = fut.result(timeout=60)
