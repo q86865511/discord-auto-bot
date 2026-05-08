@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from bot.core.constants import DEFAULT_TRANSFER_INTERVAL_MIN
 from bot.core.state import BotState, interruptible_sleep, wait_while_paused

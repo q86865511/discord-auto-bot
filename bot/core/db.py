@@ -22,8 +22,8 @@ import json
 import logging
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
 
 from .constants import DB_PATH, HISTORY_MAX_LEN
 from .crypto import Cipher

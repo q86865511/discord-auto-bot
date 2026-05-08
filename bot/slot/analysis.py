@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import math
 import re
-from collections import deque
 from datetime import datetime
 from typing import Any
 
@@ -32,7 +31,6 @@ from bot.core.constants import (
     SYMBOL_DISPLAY_THRESHOLD,
 )
 from bot.slot.parsers import NON_SLOT_SHORTCODES
-
 
 log = logging.getLogger(__name__)
 

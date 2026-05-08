@@ -714,7 +714,7 @@ async def _edit_tracked_symbols(s) -> None:
                     s.tracked_symbols.append(v)
                     print(f"  ✓ 已加入 {v}")
                 else:
-                    print(f"  (已在清單中)")
+                    print("  (已在清單中)")
             await wait_enter()
         elif choice == "R":
             v = await ask_text("要移除的 symbol", "",

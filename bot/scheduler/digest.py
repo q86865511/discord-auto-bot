@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from bot.core.constants import DEFAULT_DIGEST_HOUR
 from bot.core.state import BotState, interruptible_sleep

@@ -8,14 +8,11 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from bot.core.constants import (
-    DEFAULT_BIGWIN_MULTIPLIER,
     DEFAULT_GOAL_ACTION,
-    DEFAULT_GOAL_STEP,
     DEFAULT_LOSS_ACTION,
-    DEFAULT_LOSS_STEP,
     DEFAULT_NOTIFY_USER_ID,
 )
 from bot.core.state import BotState

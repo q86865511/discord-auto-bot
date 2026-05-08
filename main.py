@@ -21,6 +21,15 @@ import tempfile
 from playwright.async_api import async_playwright
 
 from bot.core.async_io import remove_file
+from bot.core.config import (
+    BotConfig,
+    load_config,
+    merge_partial,
+    migrate_analysis_from_json,
+    migrate_from_json_if_needed,
+    migrate_history_from_json,
+    save_config,
+)
 from bot.core.constants import (
     DATA_DIR,
     DB_PATH,
@@ -38,15 +47,6 @@ from bot.core.constants import (
     REBOOT_FLAG_PATH,
     SLOT_DEBUG_LOG_PATH,
     STORAGE_STATE_PATH,
-)
-from bot.core.config import (
-    BotConfig,
-    load_config,
-    merge_partial,
-    migrate_analysis_from_json,
-    migrate_from_json_if_needed,
-    migrate_history_from_json,
-    save_config,
 )
 from bot.core.crypto import Cipher, load_or_create_key
 from bot.core.db import init_db
@@ -85,7 +85,7 @@ class UILogHandler(logging.Handler):
         try:
             self.state.log_lines.append(self.format(record))
             # log_lines 是 deque(maxlen=UI_LOG_LINES_MAX),自動 trim
-        except (TypeError, ValueError) as e:
+        except (TypeError, ValueError):
             self.handleError(record)
 
 

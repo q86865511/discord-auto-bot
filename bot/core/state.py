@@ -25,7 +25,6 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 from .constants import UI_LOG_LINES_MAX
 

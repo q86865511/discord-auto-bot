@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 log = logging.getLogger(__name__)
 
@@ -192,7 +192,7 @@ async def ask_user_id(prompt: str, current: str = "") -> str | None:
             return None
         norm = _normalize_input(raw)
         if not norm.isdigit():
-            print(f"  ⚠ Discord ID 必須是純數字(目前輸入含非數字字元)")
+            print("  ⚠ Discord ID 必須是純數字(目前輸入含非數字字元)")
             continue
         if not 15 <= len(norm) <= 22:
             print(f"  ⚠ Discord ID 長度通常是 17~19 位數字,你輸入 {len(norm)} 位")

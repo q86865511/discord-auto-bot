@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Literal
+from typing import Any
 
 from .constants import (
     DEFAULT_BIGWIN_MULTIPLIER,
@@ -36,7 +36,6 @@ from .constants import (
     DEFAULT_LOSS_FLOOR,
     DEFAULT_LOSS_STEP,
     DEFAULT_NEKO_INTERVAL_MIN,
-    DEFAULT_NOTIFY_USER_ID,
     DEFAULT_TRANSFER_INTERVAL_MIN,
 )
 

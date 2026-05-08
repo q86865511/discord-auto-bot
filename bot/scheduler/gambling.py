@@ -15,8 +15,9 @@ from __future__ import annotations
 import logging
 import random
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from bot.core.constants import (
     DEFAULT_BIGWIN_MULTIPLIER,
