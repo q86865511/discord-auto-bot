@@ -118,6 +118,21 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
                       f"(歷史最高 {state.max_win_streak}勝/{state.max_loss_streak}敗)")
     t1.add_row("🔥 連勝紀錄",   streak_str)
 
+    # ── 連敗冷靜倒數 ────────────────────────────────────────────────
+    pause_n = int(gcfg.loss_streak_pause or 0)
+    if pause_n > 0:
+        cd_until = state.cooldown_until_ts
+        if cd_until is not None and cd_until > time.time():
+            remain = int(cd_until - time.time())
+            mm, ss = divmod(remain, 60)
+            cd_str = f"[yellow]😤 {mm}m {ss:02d}s[/yellow]" if mm > 0 \
+                     else f"[yellow]😤 {ss}s[/yellow]"
+            cd_str += f"  [dim](連敗 {pause_n} 場觸發 {gcfg.loss_streak_cooldown_min:.0f}m)[/dim]"
+        else:
+            cd_str = (f"[dim]─  (連敗 {pause_n} 場 → "
+                      f"暫停 {gcfg.loss_streak_cooldown_min:.0f} 分鐘)[/dim]")
+        t1.add_row("😤 冷靜倒數",   cd_str)
+
     sess_start = state.session_start_ts
     pp_str = "─"
     if sess_start:
