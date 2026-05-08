@@ -143,23 +143,57 @@ def parse_stock_detail(text: str, expected_symbol: str | None = None) -> dict | 
     }
 
 
-# ── /stock 的 autocomplete dropdown 解析 ─────────────────────────────
-# 格式:`AZGC - 亞馬遜雲創 (36.76 油幣)`
-# 用來一次抓全部 symbols 的「discovery」mode
+# ── /stock(無 symbol param)回應的 embed 解析 ────────────────────────
+# 實際格式(from log dump):
+#     股市行情 (第 1/1 頁)
+#     AZGC - 亞馬遜雲創
+#      價格 : 36.71
+#      趨勢 : -0.15%
+#      成交量 : 323,142 股
+#     GCR - 嘎核心指標
+#      價格 : 65.48
+#      ...
+# 一次拿全部 10 支股票,比 autocomplete dropdown 可靠得多。
+STOCK_LIST_ENTRY = re.compile(
+    r"\b([A-Z][A-Z0-9]{1,6})\s*-\s*\S[^\n]{0,40}?"   # SYMBOL - 名字
+    r"[\s\n]+價格\s*[:：]\s*\$?([0-9,]+(?:\.[0-9]+)?)",  # 價格 : NUMBER
+    re.DOTALL,
+)
+# 舊名 dropdown 格式(`AZGC - 亞馬遜雲創 (36.76 油幣)`)— 留作備援
 DROPDOWN_LINE = re.compile(
     r"([A-Z][A-Z0-9]{1,6})\s*-\s*[^()]+?\s*\(([0-9,]+(?:\.[0-9]+)?)\s*油幣\)",
 )
 
 
-def parse_stock_dropdown(text: str) -> dict[str, float]:
-    """從 stock 自動完成下拉選單抓 {symbol: price}。一次拿全部。"""
+def parse_stock_list(text: str) -> dict[str, float]:
+    """從 `/stock`(無 symbol)的 embed 抓 {symbol: price}。
+
+    優先用 STOCK_LIST_ENTRY(實際 embed 格式);若沒抓到再 fallback 試
+    DROPDOWN_LINE(autocomplete 格式)。
+    """
     if not text:
         return {}
     out: dict[str, float] = {}
-    for m in DROPDOWN_LINE.finditer(text):
+    for m in STOCK_LIST_ENTRY.finditer(text):
         sym = m.group(1).upper()
+        if sym in {"USD", "USDT", "TOTAL", "STOCK"}:
+            continue
         price = _parse_number(m.group(2))
         if price is None or price <= 0:
             continue
         out.setdefault(sym, price)
+
+    if not out:    # fallback to dropdown format
+        for m in DROPDOWN_LINE.finditer(text):
+            sym = m.group(1).upper()
+            price = _parse_number(m.group(2))
+            if price is None or price <= 0:
+                continue
+            out.setdefault(sym, price)
+
     return out
+
+
+# 向後相容別名
+def parse_stock_dropdown(text: str) -> dict[str, float]:
+    return parse_stock_list(text)

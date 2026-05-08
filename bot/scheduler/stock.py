@@ -1,17 +1,13 @@
 """股票監視 + 建議 loop。
 
 工作流程(每 poll_interval_min 分鐘):
-1. **discover_all_stocks**:打 /stock 不送出,讀 autocomplete dropdown 一次拿
-   所有 (symbol, price)。比挨支送 /stock symbol:X 快 N 倍。
-2. **/portfolio**:抓持股(shares + avg_cost + 損益)。dropdown 已經有現價了。
-3. 把所有價格寫進 stock_prices DB。
-4. 對每支股做 buy/sell 建議。
-5. 強訊號(score ≥ threshold)寫進 state.queue_log。
+1. **`/stock`(無 symbol)** → bot 回 embed 列出全部股票 → 一次拿到所有 (symbol, price)
+2. **`/portfolio`** → 抓持股(shares + avg_cost + 損益)
+3. 把所有價格寫進 stock_prices DB
+4. 對每支股做 buy/sell 建議
+5. 強訊號(score ≥ threshold)寫進 state.queue_log
 
 Phase 1-2:純建議,bot 不會自己下單。
-
-Fallback:若 discovery 失敗(Discord DOM 變了等),回退用 /portfolio 抓持股價,
-加上使用者自定的 tracked_symbols 各送一次 /stock symbol:X。
 """
 from __future__ import annotations
 
@@ -22,15 +18,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from bot.core.state import BotState, interruptible_sleep
-from bot.discord.client import (
-    discover_all_stocks,
-    query_stock_text,
-)
+from bot.discord.client import query_stock_text
 from bot.stock.analysis import analyze_symbol, group_by_symbol
 from bot.stock.parser import (
     parse_portfolio,
     parse_stock_detail,
-    parse_stock_dropdown,
+    parse_stock_list,
 )
 
 if TYPE_CHECKING:
@@ -67,48 +60,59 @@ async def stock_loop(
         await interruptible_sleep(state, sleep_sec)
 
 
+def _trim_log(text: str | None, max_chars: int = 800) -> str:
+    """為了 log_raw_text 把超長文字截掉中間,只留尾巴(回應通常在最後)。"""
+    if not text:
+        return "(空)"
+    if len(text) <= max_chars:
+        return text
+    # 留尾巴,前面用 [...] 表示截掉了
+    return f"[...前 {len(text) - max_chars} 字省略]\n{text[-max_chars:]}"
+
+
 async def _poll_once(page, state: BotState, scfg, db) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_prices: dict[str, float] = {}
 
-    # ── 1. 自動 discovery:讀 /stock symbol: 的 autocomplete dropdown ──
-    log.info("stock: discover all stocks via autocomplete")
-    dropdown_text = await discover_all_stocks(page, command=scfg.stock_command)
-    if scfg.log_raw_text and dropdown_text:
-        log.info("stock dropdown raw text:\n%s", dropdown_text[:2000])
-    if dropdown_text:
-        discovered = parse_stock_dropdown(dropdown_text)
+    # ── 1. /stock(無 symbol) → bot 回 embed 列出全部股票 ───────────
+    log.info("stock: 查 stock list (%s)", scfg.stock_command)
+    list_text = await query_stock_text(page, command=scfg.stock_command)
+    if scfg.log_raw_text:
+        log.info("stock list raw text (last 800 chars):\n%s",
+                 _trim_log(list_text, 800))
+    if list_text:
+        discovered = parse_stock_list(list_text)
         if discovered:
-            log.info("stock: 自動抓到 %d 支 — %s", len(discovered),
-                     ", ".join(f"{s}=${p:.2f}" for s, p in list(discovered.items())[:6]))
+            log.info("stock: 抓到 %d 支 — %s", len(discovered),
+                     ", ".join(f"{s}=${p:.2f}"
+                               for s, p in list(discovered.items())[:6]))
             all_prices.update(discovered)
         else:
             log.warning(
-                "stock: discovery 抓到 dropdown 但 parser 無法解析(%d chars)— "
-                "開 stock.log_raw_text 看 raw 文字並提供給開發者",
-                len(dropdown_text),
+                "stock: 從 /stock 回應抓不到任何 symbol;"
+                "開 stock.log_raw_text 看 raw 文字校準 parser",
             )
     else:
-        log.warning("stock: discovery 失敗(autocomplete 沒回應或 DOM 變了),fallback")
+        log.warning("stock: %s 無回應", scfg.stock_command)
 
-    # 等 input UI 完全 settle 再下個指令(discover 後 input 容易有殘留 chip)
     await interruptible_sleep(state, 2)
 
-    # ── 2. /portfolio:抓持股(shares + avg_cost) ─────────────────
+    # ── 2. /portfolio:抓持股(shares + avg_cost + 現價) ──────────
     log.info("stock: 查 portfolio (%s)", scfg.portfolio_command)
     pf_text = await query_stock_text(page, command=scfg.portfolio_command)
     holdings: dict[str, dict] = {}
     if pf_text:
         if scfg.log_raw_text:
-            log.info("portfolio raw text:\n%s", pf_text[:2000])
+            log.info("portfolio raw text (last 800 chars):\n%s",
+                     _trim_log(pf_text, 800))
         holdings = parse_portfolio(pf_text)
         log.info("stock: portfolio 解析到 %d 支持股 — %s", len(holdings),
                  ", ".join(f"{s}×{int(h['shares'])}@{h['avg_cost']:.2f}"
                            for s, h in list(holdings.items())[:6]) or "(無)")
-        # /portfolio 也帶現價 — 補進 all_prices(若 discovery 漏掉的)
+        # /portfolio 的現價優先(更新),沒抓到的就用 /stock list 那邊的
         for sym, info in holdings.items():
             if info.get("current_price", 0) > 0:
-                all_prices.setdefault(sym, info["current_price"])
+                all_prices[sym] = info["current_price"]
         # 持股快照
         await db.clear_stock_holdings()
         for sym, info in holdings.items():
@@ -118,10 +122,11 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
     else:
         log.warning("stock: %s 無回應", scfg.portfolio_command)
 
-    # ── 3. Fallback:tracked_symbols(若 discovery 失敗 + 使用者有設) ──
-    if not dropdown_text and scfg.tracked_symbols:
-        log.info("stock: discovery 失敗,fallback 對 %d 支 tracked symbols 各查",
-                 len(scfg.tracked_symbols))
+    # ── 3. 備援:對 tracked_symbols 各送一次 /stock symbol:X ──────
+    # 通常用不到,只在 /stock 主清單抓不到時補
+    if scfg.tracked_symbols and len(all_prices) < 2:
+        log.info("stock: 主清單只抓到 %d 支,fallback tracked_symbols (%d 支)",
+                 len(all_prices), len(scfg.tracked_symbols))
         for sym in scfg.tracked_symbols:
             sym = sym.upper().strip()
             if not sym or sym in all_prices:

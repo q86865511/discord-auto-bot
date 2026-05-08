@@ -409,110 +409,24 @@ async def do_transfer(page: "Page", target: str, amount: int) -> bool:
 
 
 # ── 股票 ──────────────────────────────────────────────────────────────
-async def _force_clear_input(page: "Page") -> None:
-    """積極清空 Discord input(包含 command chip)。
+def _stock_reply_detected(before: str, current: str) -> bool:
+    """偵測 /stock 或 /portfolio 是否回了新訊息。
 
-    Discord 用 Slate.js 編輯器,單純按 Backspace 可能清不掉 command chip
-    (像 `/stock` 變成 chip 後)。三道保險:
-      1. Escape × 2(關 popup + 清 chip 焦點)
-      2. 點輸入框 + Ctrl+A + Delete(比 Backspace 強)
-      3. 透過 Slate API 強制清掉內容
+    `new_reply_detected` 是給 /balance / /slot 用的(看餘額變化),不適合
+    /stock list(只有價格,沒有 user 餘額更新)。
+
+    偵測邏輯:檢查 stock 相關關鍵字在「最近的回應視窗」(尾巴 4000 字)裡
+    出現次數有沒有增加。任一個變多就算有新回應。
     """
-    try:
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.15)
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.15)
-        input_box = page.locator('[data-slate-editor="true"]')
-        await input_box.click()
-        await asyncio.sleep(0.2)
-        await page.keyboard.press("Control+a")
-        await asyncio.sleep(0.1)
-        await page.keyboard.press("Delete")
-        await asyncio.sleep(0.2)
-        # 用 Slate API 把 editor 內容歸零(若 keyboard.delete 漏掉 chip)
-        try:
-            cleared = await page.evaluate("""
-                () => {
-                    const ed = document.querySelector('[data-slate-editor="true"]');
-                    if (!ed) return false;
-                    const text = (ed.textContent || '').trim();
-                    return text;
-                }
-            """)
-            if cleared:
-                # 還有殘留 → 再 Ctrl+A + Delete 一次
-                await page.keyboard.press("Control+a")
-                await asyncio.sleep(0.1)
-                await page.keyboard.press("Delete")
-                await asyncio.sleep(0.2)
-        except Exception:    # noqa: BLE001
-            pass
-    except Exception as e:    # noqa: BLE001
-        log.debug("_force_clear_input 例外: %s", e)
-
-
-async def discover_all_stocks(
-    page: "Page", command: str = "/stock",
-    autocomplete_wait_sec: float = 2.5,
-) -> str | None:
-    """讀 /stock 指令的 autocomplete 下拉清單,回傳整個 dropdown 文字。
-
-    流程:
-    1. 完全清空 input
-    2. 點 input → 打 `/stock`
-    3. Tab 確認指令(進入 symbol param)
-    4. 等 ~2.5 秒讓 Discord 載入 autocomplete options
-    5. 讀 [role="option"] 的 textContent
-    6. **完全清空 input(關鍵!不然下個指令會壞)**
-    7. 回傳整段文字給 parser
-
-    若任何階段失敗回傳 None。讀到的文字裡可能有非股票項(像 channel
-    的 mention 提示),由 parser 用 regex 過濾。
-    """
-    async with command_lock:
-        try:
-            # 進場先清乾淨
-            await _force_clear_input(page)
-            await asyncio.sleep(0.3)
-
-            input_box = page.locator('[data-slate-editor="true"]')
-            await input_box.click()
-            await asyncio.sleep(random.uniform(0.3, 0.6))
-
-            # 打 /stock 指令名(尾巴 1.5s 讓 command picker 出現)
-            await human_type(page, command)
-            await asyncio.sleep(1.5)
-            # Tab → 確認 command,進入第一個 param(symbol)
-            await page.keyboard.press("Tab")
-            # 等 Discord 跟 bot 拿 autocomplete options
-            await asyncio.sleep(autocomplete_wait_sec)
-
-            # 讀 dropdown options
-            text = await page.evaluate("""
-                () => {
-                    const nodes = document.querySelectorAll('[role="option"]');
-                    return Array.from(nodes)
-                        .map(n => (n.textContent || '').trim())
-                        .filter(t => t)
-                        .join('\\n');
-                }
-            """)
-
-            # 離場前必須完全清空,否則下個 /portfolio 會變成
-            # 「在 /stock chip 後面繼續打 portfolio」→ 整個指令掛掉
-            await _force_clear_input(page)
-            await asyncio.sleep(0.3)
-
-            return text or None
-        except Exception as e:    # noqa: BLE001
-            log.warning("discover_all_stocks 失敗: %s", e)
-            # 失敗也要嘗試清乾淨
-            try:
-                await _force_clear_input(page)
-            except Exception:    # noqa: BLE001
-                pass
-            return None
+    keywords = ("股市行情", "投資組合", "持有:", "持有：",
+                "價格 :", "價格：", "現價:", "現價：")
+    win = 4000
+    bt = before[-win:]
+    ct = current[-win:]
+    for kw in keywords:
+        if ct.count(kw) > bt.count(kw):
+            return True
+    return False
 
 
 async def query_stock_text(
@@ -521,7 +435,7 @@ async def query_stock_text(
 ) -> str | None:
     """送 stock 查詢指令並回傳整頁文字。caller 自行 parse。
 
-    `command` 可以是 /stock / /stocks / /portfolio 等;`param` 是參數(可空)。
+    `command` 可以是 /stock / /portfolio 等;`param` 是參數(可空)。
     """
     async with command_lock:
         try:
@@ -542,7 +456,7 @@ async def query_stock_text(
             except Exception as e:    # noqa: BLE001
                 log.debug("stock 輪詢失敗: %s", e)
                 continue
-            if not new_reply_detected(before_text, cur):
+            if not _stock_reply_detected(before_text, cur):
                 continue
             if cur != last_text:
                 last_text = cur
