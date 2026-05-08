@@ -36,9 +36,7 @@ UI_LOG_LINES_MAX      = 25                 # UI 日誌面板最多保留行數
 # ── 排程 ──────────────────────────────────────────────────────────────
 HOURLY_POST_BOUNDARY_MIN_SEC =  30
 HOURLY_POST_BOUNDARY_MAX_SEC = 180
-DAILY_BASE_SEC               = 86400
-DAILY_JITTER_SEC             = 45 * 60
-DAILY_STARTUP_DELAY_SEC      = 300
+# /daily 改成錨定每日 00:00 觸發(daily.py 內自己算,不用這幾個常數了)
 GAMBLE_RECHECK_SEC           = 300
 
 # ── 重啟 ──────────────────────────────────────────────────────────────

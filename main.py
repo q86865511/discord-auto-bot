@@ -452,7 +452,7 @@ async def main() -> int:
                 name="hourly",
             ),
             asyncio.create_task(
-                daily_loop(page, state, config_provider, on_config_save_async),
+                daily_loop(page, state, config_provider, on_config_save_async, db),
                 name="daily",
             ),
             asyncio.create_task(

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import time
 from typing import TYPE_CHECKING
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING
 from bot.core.constants import (
     RECOVER_PAGE_FAILS_BEFORE_BROWSER_RESTART,
     REPLY_WINDOW_CHARS,
+    STORAGE_STATE_PATH,
     TYPING_DELAY_MAX_MS,
     TYPING_DELAY_MIN_MS,
 )
@@ -331,7 +333,13 @@ async def navigate_to_channel(page: "Page", guild_id: str, channel_id: str) -> N
 async def recover_page(
     page: "Page", state: BotState, guild_id: str, channel_id: str,
 ) -> bool:
-    """頁面變糟時重新載入頻道。連續失敗 N 次會請求整個 browser 重啟。"""
+    """頁面變糟時重新載入頻道。連續失敗 N 次會請求整個 browser 重啟。
+
+    特殊情況:若偵測到 Discord session 已過期(URL 跳到 /login),立刻刪除
+    storage_state.json + 設 reboot,讓 run.bat 重啟後 main.py 自動跑登入精靈。
+    這樣使用者隔幾天碰到認證失敗時不用手動操作 — bot 自己重啟、開瀏覽器、
+    使用者輸入帳密就能繼續跑。
+    """
     if not guild_id or not channel_id:
         return False
     async with command_lock:
@@ -345,6 +353,22 @@ async def recover_page(
             return True
         except Exception as e:    # noqa: BLE001
             log.error("頻道復原失敗: %s", e)
+            # session 過期 → 刪 storage_state + 立刻 reboot 跑登入精靈
+            # navigate_to_channel 會在 URL 跳到 /login 時拋含此字串的 RuntimeError
+            if "session 已過期" in str(e):
+                log.error("Discord session 已過期 — 刪除 storage_state,"
+                          "重啟後會跑登入精靈讓你重新登入")
+                state.queue_log("⚠ Discord session 過期,即將重啟跑登入精靈")
+                try:
+                    if os.path.exists(STORAGE_STATE_PATH):
+                        os.remove(STORAGE_STATE_PATH)
+                        log.info("已刪除 %s", STORAGE_STATE_PATH)
+                except OSError as oe:
+                    log.warning("刪除 storage_state 失敗: %s", oe)
+                async with state.lock:
+                    state.reboot = True
+                    state.quit = True
+                return False
             async with state.lock:
                 state.recover_fail_streak += 1
                 fails = state.recover_fail_streak
