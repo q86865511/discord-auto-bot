@@ -85,10 +85,12 @@ class GamblingConfig:
     rolling_high_ev:    float = 1.02
     rolling_low_mult:   float = 0.5
     rolling_high_mult:  float = 1.5
-    # 3) Trailing stop — 從累計淨收峰值跌幅超過 X% → 暫停 K 筆
-    trailing_stop_enabled:        bool  = False
-    trailing_stop_pct:            float = 5.0   # %
-    trailing_stop_cooldown_bets:  int   = 100   # 觸發後跳過幾筆才 resume
+    # 3) Trailing stop — 從累計淨收峰值跌幅超過 X% → 暫停 N 分鐘
+    trailing_stop_enabled:       bool  = False
+    trailing_stop_pct:           float = 10.0   # 跌幅門檻 %(預設 10% 比 5% 寬鬆)
+    trailing_stop_cooldown_min:  float = 30.0   # 觸發後冷卻幾分鐘
+    # 重設策略:冷卻結束時 baseline 跳到當下 history 長度,後續 drawdown
+    # 重新從 0 算起。這樣不會因為「peak 還是過去歷史最高」而立刻又觸發。
 
     def validate(self) -> list[str]:
         errs: list[str] = []
@@ -145,8 +147,8 @@ class GamblingConfig:
             errs.append("rolling_high_mult 必須在 0~5")
         if not 0 < self.trailing_stop_pct <= 100:
             errs.append("trailing_stop_pct 必須在 0~100")
-        if self.trailing_stop_cooldown_bets < 0:
-            errs.append("trailing_stop_cooldown_bets 不可為負")
+        if self.trailing_stop_cooldown_min < 0:
+            errs.append("trailing_stop_cooldown_min 不可為負")
         return errs
 
 
@@ -245,6 +247,44 @@ class DashboardConfig:
 
 
 @dataclass
+class StockConfig:
+    """股票監視 + 建議。Phase 1-2:純建議,不會自動買賣。"""
+    enabled: bool = False
+    poll_interval_min: float = 15.0   # 多久抓一次價格(分鐘)
+    # 指令名稱(不同 bot 命名不同 — 可改)
+    list_command:      str = "/stock"      # 查詢全部股價
+    list_param:        str = ""            # 額外參數(若需要)
+    portfolio_command: str = "/portfolio"  # 查持股
+    portfolio_param:   str = ""
+    # 自訂 regex(parser fallback 抓不到時用)
+    custom_price_pattern: str = ""    # symbol + price (2 groups)
+    # 分析參數
+    ma_short: int   = 5
+    ma_long:  int   = 20
+    take_profit_pct: float = 15.0    # 持股獲利 ≥ 此 % → 建議賣
+    stop_loss_pct:   float = 10.0    # 持股虧損 ≥ 此 % → 建議賣
+    # 通知
+    notify_strong_signal: bool = False    # 強訊號時 queue_log + email
+    signal_score_threshold: int = 80      # buy/sell signal score ≥ 此值才視為強訊號
+    # Debug
+    log_raw_text: bool = False    # True = 把每次 stock 回應 dump 到 log
+
+    def validate(self) -> list[str]:
+        errs: list[str] = []
+        if self.poll_interval_min < 1:
+            errs.append("poll_interval_min 必須 ≥ 1")
+        if self.ma_short >= self.ma_long:
+            errs.append(f"ma_short ({self.ma_short}) 必須 < ma_long ({self.ma_long})")
+        if not 0 < self.take_profit_pct <= 1000:
+            errs.append("take_profit_pct 必須在 0~1000")
+        if not 0 < self.stop_loss_pct <= 100:
+            errs.append("stop_loss_pct 必須在 0~100")
+        if not 0 <= self.signal_score_threshold <= 100:
+            errs.append("signal_score_threshold 必須在 0~100")
+        return errs
+
+
+@dataclass
 class UpdaterConfig:
     """GitHub 版本檢查 / 自動更新。"""
     auto_check: bool = True              # 開機後自動定期檢查新版
@@ -273,6 +313,7 @@ class BotConfig:
     transfer: TransferConfig = field(default_factory=TransferConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     updater: UpdaterConfig = field(default_factory=UpdaterConfig)
+    stock: StockConfig = field(default_factory=StockConfig)
 
     def validate(self) -> list[str]:
         errs: list[str] = []
@@ -283,7 +324,7 @@ class BotConfig:
         if self.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
             errs.append(f"log_level 必須是 DEBUG/INFO/WARNING/ERROR,目前 {self.log_level!r}")
         for section in (self.gambling, self.email, self.nekomusume,
-                        self.transfer, self.dashboard, self.updater):
+                        self.transfer, self.dashboard, self.updater, self.stock):
             errs.extend(section.validate())
         return errs
 
@@ -328,6 +369,7 @@ async def load_config(db) -> BotConfig:
     cfg.transfer   = _build_dc(TransferConfig,   raw.get("transfer", {}))
     cfg.dashboard  = _build_dc(DashboardConfig,  raw.get("dashboard", {}))
     cfg.updater    = _build_dc(UpdaterConfig,    raw.get("updater", {}))
+    cfg.stock      = _build_dc(StockConfig,      raw.get("stock", {}))
 
     # 從 secrets table 補回敏感欄位的明文(讓記憶體中的 cfg 物件能直接用)
     cfg.email.password = await db.get_secret("email_password")
@@ -369,6 +411,7 @@ async def save_config(db, config: BotConfig) -> list[str]:
         ("transfer",   config.transfer),
         ("dashboard",  config.dashboard),
         ("updater",    config.updater),
+        ("stock",      config.stock),
     ]:
         d = asdict(section_obj)
         for sn, fn in SENSITIVE_FIELDS:
@@ -405,6 +448,7 @@ def merge_partial(config: BotConfig, partial: dict) -> list[str]:
         "transfer":   config.transfer,
         "dashboard":  config.dashboard,
         "updater":    config.updater,
+        "stock":      config.stock,
     }
     for section_name, section_obj in section_map.items():
         section_data = partial.get(section_name)

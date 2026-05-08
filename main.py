@@ -58,6 +58,7 @@ from bot.scheduler.digest import digest_loop
 from bot.scheduler.gambling import gambling_loop
 from bot.scheduler.hourly import hourly_loop
 from bot.scheduler.nekomusume import nekomusume_loop
+from bot.scheduler.stock import stock_loop
 from bot.scheduler.transfer import transfer_loop
 from bot.scheduler.updater import updater_loop
 from bot.slot.analysis import make_slot_analysis, migrate_slot_analysis
@@ -473,6 +474,10 @@ async def main() -> int:
             asyncio.create_task(
                 updater_loop(state, config_provider, on_config_save_async),
                 name="updater",
+            ),
+            asyncio.create_task(
+                stock_loop(page, state, config_provider, on_config_save_async, db),
+                name="stock",
             ),
         ]
 

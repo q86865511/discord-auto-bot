@@ -126,7 +126,10 @@ def compute_drawdown_pct(history: list[dict]) -> tuple[float, int, int]:
 
     回傳 (drawdown_pct, peak, current)。
     用「累計淨收」為基底而非餘額(避免 hourly/daily/transfer 干擾)。
-    drawdown_pct = (peak - current) / max(|peak|, 1) * 100
+    drawdown_pct = (peak - current) / peak * 100,要求 peak > 0。
+
+    若 peak ≤ 0(從沒進入正 cum_net)→ 回傳 0%,trailing stop 不該觸發。
+    語意:trailing stop 是「保護獲利」,沒獲利就沒得保護。
     """
     if not history:
         return 0.0, 0, 0
@@ -135,9 +138,10 @@ def compute_drawdown_pct(history: list[dict]) -> tuple[float, int, int]:
     for r in history:
         cum += r.get("change", 0) or 0
         peak = max(peak, cum)
+    if peak <= 0:
+        return 0.0, peak, cum    # 沒進入正收益 → trailing stop 不觸發
     drawdown = peak - cum
-    base = max(abs(peak), 1)    # 用 |peak| 處理 peak < 0 的 edge case
-    return drawdown / base * 100, peak, cum
+    return drawdown / peak * 100, peak, cum
 
 
 # ── Backtest engine ──────────────────────────────────────────────────
@@ -307,12 +311,19 @@ def realtime_rolling_multiplier(history: list[dict], gcfg) -> tuple[float, float
     return mult, ev
 
 
-def realtime_should_pause_trailing(history: list[dict], gcfg) -> tuple[bool, dict]:
-    """即時檢查 trailing stop。回傳 (should_pause, info_dict)。"""
+def realtime_should_pause_trailing(
+    history: list[dict], gcfg, baseline_idx: int = 0,
+) -> tuple[bool, dict]:
+    """即時檢查 trailing stop。回傳 (should_pause, info_dict)。
+
+    baseline_idx:從這個 history index 之後才算 drawdown 的 peak。
+    觸發後重設 baseline_idx 是必要的,避免 peak 永遠卡在歷史最高。
+    """
     if not getattr(gcfg, "trailing_stop_enabled", False):
         return False, {}
-    pct, peak, cur = compute_drawdown_pct(history)
-    threshold = float(getattr(gcfg, "trailing_stop_pct", 5.0))
+    sub_history = history[baseline_idx:] if baseline_idx > 0 else history
+    pct, peak, cur = compute_drawdown_pct(sub_history)
+    threshold = float(getattr(gcfg, "trailing_stop_pct", 10.0))
     return pct >= threshold, {
         "drawdown_pct": pct, "peak": peak, "current": cur, "threshold": threshold,
     }

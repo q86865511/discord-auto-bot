@@ -408,6 +408,48 @@ async def do_transfer(page: "Page", target: str, amount: int) -> bool:
         return await _click_button_with_text(page, "確認轉錢", timeout=15.0)
 
 
+# ── 股票 ──────────────────────────────────────────────────────────────
+async def query_stock_text(
+    page: "Page", command: str = "/stock", param: str = "",
+    timeout: float = 20.0, stability_sec: float = 1.5,
+) -> str | None:
+    """送 stock 查詢指令並回傳整頁文字。caller 自行 parse。
+
+    `command` 可以是 /stock / /stocks / /portfolio 等;`param` 是參數(可空)。
+    """
+    async with command_lock:
+        try:
+            before_text = await page.evaluate("() => document.body.textContent")
+        except Exception as e:    # noqa: BLE001
+            log.warning("讀取 before_text 失敗(stock): %s", e)
+            return None
+
+        await _send_slash_command(page, command, param)
+
+        deadline = time.time() + timeout
+        last_text = None
+        last_change = time.time()
+        while time.time() < deadline:
+            await asyncio.sleep(0.5)
+            try:
+                cur = await page.evaluate("() => document.body.textContent")
+            except Exception as e:    # noqa: BLE001
+                log.debug("stock 輪詢失敗: %s", e)
+                continue
+            if not new_reply_detected(before_text, cur):
+                continue
+            if cur != last_text:
+                last_text = cur
+                last_change = time.time()
+                continue
+            if time.time() - last_change >= stability_sec:
+                return cur
+        if last_text is not None:
+            return last_text
+        log.warning("%s %s 在 %.0fs 內未取得新回應", command, param, timeout)
+        return None
+
+
 # ── 貓娘 ──────────────────────────────────────────────────────────────
 async def auto_claim_and_redispatch_neko(page: "Page") -> bool:
     """送 /nekomusume status → 等 ephemeral embed → 點「領取並再派遣」按鈕。

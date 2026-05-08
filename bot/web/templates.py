@@ -142,6 +142,7 @@ NAV_ITEMS = [
     ("overview",   "/",            "📊 概覽"),
     ("analysis",   "/analysis",    "🎯 拉霸分析"),
     ("strategies", "/strategies",  "🧪 策略 backtest"),
+    ("stocks",     "/stocks",      "📈 股票"),
     ("logs",       "/logs",        "📋 即時日誌"),
     ("control",    "/control",     "🛠️ 系統設定"),
 ]
@@ -901,7 +902,8 @@ STRATEGIES_BODY = r"""
     <div class="row"><span class="label">trailing stop 跳過</span><span class="value" id="rt-trailing">0</span></div>
     <div class="row"><span class="label">trailing stop 觸發次數</span><span class="value" id="rt-triggers">0</span></div>
     <div class="row"><span class="label">最近 rolling 倍率</span><span class="value" id="rt-mult">1.00x</span></div>
-    <div class="row"><span class="label">trailing 剩餘 cooldown</span><span class="value" id="rt-skip-rem">0</span></div>
+    <div class="row"><span class="label">trailing cooldown 剩餘</span><span class="value" id="rt-skip-rem">─</span></div>
+    <div class="row"><span class="label">trailing baseline idx</span><span class="value" id="rt-baseline">0</span></div>
   </div>
 
   <div class="card" style="grid-column: 1/-1;">
@@ -1007,7 +1009,16 @@ async function refresh() {
     document.getElementById('rt-trailing').textContent = fmt(rt.skipped_trailing);
     document.getElementById('rt-triggers').textContent = fmt(rt.trailing_triggers);
     document.getElementById('rt-mult').textContent     = (rt.recent_ev_mult || 1).toFixed(2) + 'x';
-    document.getElementById('rt-skip-rem').textContent = fmt(rt.trailing_skip_remaining);
+    const cdSec = rt.trailing_cooldown_remaining_sec || 0;
+    if (cdSec > 0) {
+      const m = Math.floor(cdSec / 60);
+      const s = cdSec % 60;
+      document.getElementById('rt-skip-rem').textContent =
+        m > 0 ? `${m}m ${String(s).padStart(2,'0')}s` : `${s}s`;
+    } else {
+      document.getElementById('rt-skip-rem').textContent = '─';
+    }
+    document.getElementById('rt-baseline').textContent = fmt(rt.trailing_baseline_idx);
 
     // Config
     const c = d.config || {};
@@ -1019,10 +1030,173 @@ async function refresh() {
       `  window=${c.rolling_window_size}, low=${c.rolling_low_ev}→${c.rolling_low_mult}x, high=${c.rolling_high_ev}→${c.rolling_high_mult}x`;
     document.getElementById('cfg-trailing').textContent =
       (c.trailing_stop_enabled ? '✓' : '✗') +
-      `  pct=${c.trailing_stop_pct}%, cooldown=${c.trailing_stop_cooldown_bets} bets`;
+      `  pct=${c.trailing_stop_pct}%, cooldown=${c.trailing_stop_cooldown_min}min`;
   } catch (err) { console.error(err); }
 }
 refresh();
 setInterval(refresh, 5000);
+</script>
+"""
+
+
+STOCKS_BODY = r"""
+<div class="grid">
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>📈 股票 — 即時建議</h3>
+    <p class="dim" style="font-size: 12px; margin: 4px 0 8px 0;">
+      ⚠ Phase 1-2:純建議,bot <strong>不會自動下單</strong>。所有買賣由你手動執行。
+      訊號是基於均線 / momentum 的啟發式分析,不構成投資建議。
+    </p>
+    <div id="stock-status" class="dim" style="font-size: 12px;"></div>
+  </div>
+
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>💼 目前持股</h3>
+    <table class="right-align" id="holdings-table">
+      <thead><tr>
+        <th>Symbol</th><th>持有股數</th><th>平均成本</th>
+        <th>現價</th><th>損益 %</th><th>建議</th><th>說明</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="no-holdings" class="dim" style="margin-top: 8px;"></div>
+  </div>
+
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>🟢 買進機會 (score ≥ 60)</h3>
+    <table class="right-align" id="buy-table">
+      <thead><tr>
+        <th>Symbol</th><th>現價</th><th>短均</th><th>長均</th>
+        <th>Score</th><th>說明</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="no-buy" class="dim" style="margin-top: 8px;"></div>
+  </div>
+
+  <div class="card" style="grid-column: 1/-1;">
+    <h3>📊 全部股票報價</h3>
+    <table class="right-align" id="prices-table">
+      <thead><tr><th>Symbol</th><th>現價</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+<div class="footer">自動刷新 10 秒</div>
+<script>
+function fmt(n) { if (n == null) return '─'; return Number(n).toLocaleString(); }
+function fmtFloat(n, d) { return n != null ? n.toFixed(d) : '─'; }
+function appendCell(tr, text, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.textContent = text;
+  tr.appendChild(td);
+}
+function fmtTime(epoch) {
+  if (!epoch) return '─';
+  const d = new Date(epoch * 1000);
+  return d.toLocaleTimeString();
+}
+async function refresh() {
+  try {
+    const r = await fetch('/api/stocks');
+    const d = await r.json();
+    const status = document.getElementById('stock-status');
+    if (!d.enabled) {
+      status.textContent = '⚠ 股票功能尚未啟用 — 請至 系統設定 → 股票 啟用';
+      return;
+    }
+    if (!d.ts) {
+      status.textContent = '尚未取得報價(loop 啟動後 60s 開始 polling,'
+        + 'poll 間隔 ' + d.config.poll_interval_min + ' 分鐘)';
+      return;
+    }
+    status.textContent = `最近一次 poll: ${d.ts} (${fmtTime(d.last_poll_ts)})  •  `
+      + `策略: MA${d.config.ma_short}/${d.config.ma_long}  •  `
+      + `+${d.config.take_profit_pct}% / -${d.config.stop_loss_pct}%`;
+
+    // Holdings + sell signals
+    const holdingsBody = document.querySelector('#holdings-table tbody');
+    holdingsBody.innerHTML = '';
+    const noHold = document.getElementById('no-holdings');
+    const heldSyms = Object.keys(d.holdings || {});
+    if (heldSyms.length === 0) {
+      noHold.textContent = '— 目前沒有持股(或解析失敗)';
+    } else {
+      noHold.textContent = '';
+      heldSyms.forEach(sym => {
+        const h = d.holdings[sym];
+        const sig = (d.signals || []).find(s => s.symbol === sym);
+        const sellEval = sig ? sig.sell_eval : null;
+        const tr = document.createElement('tr');
+        appendCell(tr, sym);
+        appendCell(tr, fmt(h.shares));
+        appendCell(tr, fmtFloat(h.avg_cost, 2));
+        const cur = sellEval ? sellEval.current : (d.prices[sym] || null);
+        appendCell(tr, fmtFloat(cur, 2));
+        if (sellEval && sellEval.profit_pct != null) {
+          const pct = sellEval.profit_pct;
+          const cls = pct > 0 ? 'green' : (pct < 0 ? 'red' : 'dim');
+          appendCell(tr, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', cls);
+        } else {
+          appendCell(tr, '─');
+        }
+        if (sellEval) {
+          let s = sellEval.signal;
+          let cls = 'dim';
+          if (s === 'sell') cls = 'red';
+          else if (s === 'buy_more') cls = 'green';
+          appendCell(tr, s.toUpperCase() + ' (' + sellEval.score + ')', cls);
+          appendCell(tr, sellEval.reason);
+        } else {
+          appendCell(tr, '─');
+          appendCell(tr, '─');
+        }
+        holdingsBody.appendChild(tr);
+      });
+    }
+
+    // Buy signals
+    const buyBody = document.querySelector('#buy-table tbody');
+    buyBody.innerHTML = '';
+    const noBuy = document.getElementById('no-buy');
+    const buyCandidates = (d.signals || [])
+      .filter(s => s.buy_eval && s.buy_eval.score >= 60)
+      .sort((a, b) => b.buy_eval.score - a.buy_eval.score);
+    if (buyCandidates.length === 0) {
+      noBuy.textContent = '— 目前沒有 score ≥ 60 的買進機會';
+    } else {
+      noBuy.textContent = '';
+      buyCandidates.forEach(s => {
+        const ev = s.buy_eval;
+        const tr = document.createElement('tr');
+        appendCell(tr, s.symbol);
+        appendCell(tr, fmtFloat(ev.current, 2));
+        appendCell(tr, fmtFloat(ev.ma_short, 2));
+        appendCell(tr, fmtFloat(ev.ma_long, 2));
+        const cls = ev.score >= 80 ? 'green' : (ev.score >= 70 ? 'yellow' : 'dim');
+        appendCell(tr, ev.score + ' / 100', cls);
+        appendCell(tr, ev.reason);
+        buyBody.appendChild(tr);
+      });
+    }
+
+    // All prices
+    const pricesBody = document.querySelector('#prices-table tbody');
+    pricesBody.innerHTML = '';
+    Object.entries(d.prices || {}).forEach(([sym, p]) => {
+      const tr = document.createElement('tr');
+      appendCell(tr, sym);
+      appendCell(tr, fmtFloat(p, 2));
+      pricesBody.appendChild(tr);
+    });
+  } catch (err) {
+    console.error(err);
+    document.getElementById('stock-status').textContent =
+      '⚠ 載入失敗: ' + err.message;
+  }
+}
+refresh();
+setInterval(refresh, 10000);
 </script>
 """

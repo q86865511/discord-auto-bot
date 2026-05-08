@@ -196,29 +196,40 @@ async def gambling_loop(
             continue
 
         # ── 進階策略檢查(全部 opt-in) ────────────────────────────
-        # (a) Trailing stop:從累計淨收峰值跌幅超過 X% 就跳下注 K 筆
-        if state.trailing_skip_remaining > 0:
+        # (a) Trailing stop 冷卻檢查
+        cd_until = state.trailing_cooldown_until_ts
+        if cd_until is not None:
+            remaining = cd_until - time.time()
+            if remaining > 0:
+                async with state.lock:
+                    state.strategy_skipped_trailing += 1
+                await interruptible_sleep(state, min(remaining, 30))
+                continue
+            # 冷卻結束 → 重設 baseline 到當下 history 長度,
+            # 之後的 drawdown 重新從 0 起算(避免立刻又觸發死循環)
             async with state.lock:
-                state.trailing_skip_remaining -= 1
-                state.strategy_skipped_trailing += 1
-                if state.trailing_skip_remaining == 0:
-                    state.queue_log("⏯ trailing-stop 冷卻結束,resume")
-            await interruptible_sleep(state, 30)
-            continue
+                state.trailing_cooldown_until_ts = None
+                state.trailing_baseline_idx = len(state.history)
+            state.queue_log("⏯ trailing-stop 冷卻結束,baseline reset → resume")
+            log.info("trailing stop cooldown ended, baseline_idx=%d",
+                     state.trailing_baseline_idx)
 
         if gcfg.trailing_stop_enabled:
-            should_pause, info = realtime_should_pause_trailing(state.history, gcfg)
+            should_pause, info = realtime_should_pause_trailing(
+                state.history, gcfg,
+                baseline_idx=state.trailing_baseline_idx,
+            )
             if should_pause:
-                cooldown = max(1, int(gcfg.trailing_stop_cooldown_bets or 100))
+                cooldown_min = max(1.0, float(gcfg.trailing_stop_cooldown_min or 30.0))
                 async with state.lock:
-                    state.trailing_skip_remaining = cooldown
+                    state.trailing_cooldown_until_ts = time.time() + cooldown_min * 60
                     state.strategy_trailing_triggers += 1
                 state.queue_log(
                     f"⛔ trailing-stop 觸發(從峰值 {info['peak']:+,} 跌 "
                     f"{info['drawdown_pct']:.1f}% ≥ {info['threshold']:.1f}%),"
-                    f"暫停 {cooldown} 筆"
+                    f"暫停 {cooldown_min:.0f} 分鐘"
                 )
-                log.warning("trailing stop 觸發 — 跳過下 %d 筆", cooldown)
+                log.warning("trailing stop 觸發 — 暫停 %.0f 分鐘", cooldown_min)
                 continue
 
         # (b) Hourly filter:當前小時歷史 EV/勝率太差就跳過

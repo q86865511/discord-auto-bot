@@ -436,10 +436,10 @@ async def _sub_menu_strategies(config: BotConfig, state: BotState) -> None:
         print(f"      加碼門檻 EV: {g.rolling_high_ev:.4f}  → 倍率 {g.rolling_high_mult:.2f}x")
         print()
 
-        print("  [3] Trailing stop -- 累計淨收從峰值跌幅 > X% → 暫停 K 筆")
+        print("  [3] Trailing stop -- 累計淨收從峰值跌幅 > X% → 暫停 N 分鐘")
         print(f"      啟用:        {'✓' if g.trailing_stop_enabled else '✗'}")
         print(f"      跌幅門檻:    {g.trailing_stop_pct:.1f}%")
-        print(f"      冷卻筆數:    {g.trailing_stop_cooldown_bets}")
+        print(f"      冷卻分鐘:    {g.trailing_stop_cooldown_min:.0f}")
         print()
 
         print("  [Runtime 統計]")
@@ -546,7 +546,10 @@ async def _edit_trailing(g) -> None:
         print(f"\n{'═'*48}\n  ⛔ Trailing Stop\n{'═'*48}")
         print(f"   [1] 啟用 / 停用:     {'✓ 啟用' if g.trailing_stop_enabled else '✗ 停用'}")
         print(f"   [2] 跌幅門檻 %:      {g.trailing_stop_pct:.1f}")
-        print(f"   [3] 冷卻筆數:        {g.trailing_stop_cooldown_bets}")
+        print(f"   [3] 冷卻分鐘:        {g.trailing_stop_cooldown_min:.0f}")
+        print()
+        print("  ⓘ 觸發後暫停 N 分鐘,結束時 baseline 會 reset 到當下,")
+        print("    避免「peak 還是過去歷史最高」造成立刻又觸發。")
         print()
         print("   [0] 返回")
         c = (await ainput("\n  選擇: ")).strip()
@@ -562,9 +565,115 @@ async def _edit_trailing(g) -> None:
             if v is not None: g.trailing_stop_pct = v
             await wait_enter()
         elif c == "3":
-            v = await ask_int("冷卻筆數", g.trailing_stop_cooldown_bets,
-                              min_val=0, max_val=100000)
-            if v is not None: g.trailing_stop_cooldown_bets = v
+            v = await ask_float("冷卻分鐘", g.trailing_stop_cooldown_min,
+                                min_val=1.0, max_val=10080.0)
+            if v is not None: g.trailing_stop_cooldown_min = v
+            await wait_enter()
+
+
+# ── 子選單:股票 ──────────────────────────────────────────────────────
+async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
+    s = config.stock
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*52}\n  📈 股票監視 / 建議\n{'═'*52}")
+        print()
+        print("  ⓘ Phase 1-2:純建議,bot 不會自動下單。")
+        print("  ⓘ 若 parser 抓不到價格,開 [B] log_raw_text 看實際 embed 格式。")
+        print()
+
+        snap = state.stock_last_snapshot or {}
+        print("  [目前狀態]")
+        print(f"    啟用:        {'✓' if s.enabled else '✗'}")
+        if snap:
+            ts = snap.get("ts", "─")
+            n_prices = len(snap.get("prices", {}))
+            n_holds  = len(snap.get("holdings", {}))
+            print(f"    最近 poll:   {ts}  (價格 {n_prices} 支,持股 {n_holds} 支)")
+        else:
+            print("    最近 poll:   尚未 poll(loop 啟動 60 秒後第一次 poll)")
+        print()
+
+        print("  [基本設定]")
+        print(f"   [1] 啟用 / 停用:    {'✓ 啟用' if s.enabled else '✗ 停用'}")
+        print(f"   [2] poll 間隔分鐘:  {s.poll_interval_min}")
+        print(f"   [3] 查價指令:       {s.list_command} {s.list_param}".rstrip())
+        print(f"   [4] 查持股指令:     {s.portfolio_command} {s.portfolio_param}".rstrip())
+        print()
+        print("  [分析參數]")
+        print(f"   [5] 短均線(MA):    {s.ma_short}")
+        print(f"   [6] 長均線(MA):    {s.ma_long}")
+        print(f"   [7] 獲利了結 %:     {s.take_profit_pct}")
+        print(f"   [8] 停損 %:         {s.stop_loss_pct}")
+        print(f"   [9] 強訊號分數門檻: {s.signal_score_threshold}")
+        print()
+        print("  [Debug / 進階]")
+        print(f"   [A] log raw text:   {'✓' if s.log_raw_text else '✗'}  (parser 抓不到時開這個看原文)")
+        print(f"   [B] custom regex:   {s.custom_price_pattern or '(空)'}")
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip().upper()
+        if choice == "0":
+            return
+        elif choice == "1":
+            s.enabled = not s.enabled
+            print(f"  ✓ → {'啟用' if s.enabled else '停用'}")
+            await wait_enter()
+        elif choice == "2":
+            v = await ask_float("poll 間隔分鐘", s.poll_interval_min,
+                                min_val=1.0, max_val=1440.0)
+            if v is not None: s.poll_interval_min = v
+            await wait_enter()
+        elif choice == "3":
+            v = await ask_text("查價指令(如 /stock 或 /stocks)",
+                               s.list_command, max_len=50, allow_chinese=False)
+            if v is not None: s.list_command = v
+            p = await ask_text("查價指令參數(可空)",
+                               s.list_param, max_len=100, allow_empty=True)
+            if p is not None: s.list_param = p
+            await wait_enter()
+        elif choice == "4":
+            v = await ask_text("查持股指令(如 /portfolio)",
+                               s.portfolio_command, max_len=50, allow_chinese=False)
+            if v is not None: s.portfolio_command = v
+            p = await ask_text("查持股指令參數(可空)",
+                               s.portfolio_param, max_len=100, allow_empty=True)
+            if p is not None: s.portfolio_param = p
+            await wait_enter()
+        elif choice == "5":
+            v = await ask_int("短均線 N", s.ma_short, min_val=2, max_val=200)
+            if v is not None: s.ma_short = v
+            await wait_enter()
+        elif choice == "6":
+            v = await ask_int("長均線 N", s.ma_long, min_val=5, max_val=500)
+            if v is not None: s.ma_long = v
+            await wait_enter()
+        elif choice == "7":
+            v = await ask_float("獲利了結 %", s.take_profit_pct,
+                                min_val=0.5, max_val=1000.0)
+            if v is not None: s.take_profit_pct = v
+            await wait_enter()
+        elif choice == "8":
+            v = await ask_float("停損 %", s.stop_loss_pct,
+                                min_val=0.5, max_val=100.0)
+            if v is not None: s.stop_loss_pct = v
+            await wait_enter()
+        elif choice == "9":
+            v = await ask_int("強訊號分數門檻 (0~100)",
+                              s.signal_score_threshold, min_val=0, max_val=100)
+            if v is not None: s.signal_score_threshold = v
+            await wait_enter()
+        elif choice == "A":
+            s.log_raw_text = not s.log_raw_text
+            print(f"  ✓ log_raw_text → {'開' if s.log_raw_text else '關'}")
+            await wait_enter()
+        elif choice == "B":
+            print("  custom regex:必須有 2 個 group(symbol, price);留空用內建。")
+            print("  範例: \\b([A-Z]{1,6})\\s+\\$([0-9.]+)")
+            v = await ask_text("custom regex(留空清掉)",
+                               s.custom_price_pattern, max_len=200,
+                               allow_chinese=False, allow_empty=True)
+            if v is not None: s.custom_price_pattern = v
             await wait_enter()
 
 
@@ -695,20 +804,26 @@ async def run_config_menu(
         if gs.trailing_stop_enabled:  active_strats.append("trailing")
         st_summary = ", ".join(active_strats) if active_strats else "無"
         print(f"   [7] 🎯 進階下注策略 (啟用: {st_summary})")
+        st_cfg = config.stock
+        st_n_held = len((state.stock_last_snapshot or {}).get("holdings", {}))
+        stock_summary = ('啟用' if st_cfg.enabled else '停用')
+        if st_cfg.enabled and st_n_held > 0:
+            stock_summary += f", 持股 {st_n_held} 支"
+        print(f"   [8] 📈 股票監視     ({stock_summary})")
         u = config.updater
         upd_summary = (f"自動檢查={'✓' if u.auto_check else '✗'}, "
                        f"自動更新={'✓' if u.auto_update else '✗'}")
         if state.update_available:
             upd_summary += "  🔔 有新版"
-        print(f"   [8] 🔄 版本更新     ({upd_summary})")
-        print("   [9] 🛠️  進階(檔案管理 / 系統更新)")
+        print(f"   [9] 🔄 版本更新     ({upd_summary})")
+        print("   [A] 🛠️  進階(檔案管理 / 系統更新)")
         print()
         print(f"   📊 Slot 分析:       {sa_spins:,} 筆紀錄")
         print()
         print("   [0] 儲存並返回")
         print()
 
-        choice = (await ainput("  選擇: ")).strip()
+        choice = (await ainput("  選擇: ")).strip().upper()
         if choice == "0":
             break
         elif choice == "1":
@@ -726,10 +841,12 @@ async def run_config_menu(
         elif choice == "7":
             await _sub_menu_strategies(config, state)
         elif choice == "8":
+            await _sub_menu_stock(config, state)
+        elif choice == "9":
             await _sub_menu_updater(config, state)
             if state.quit:
                 break
-        elif choice == "9":
+        elif choice == "A":
             await run_advanced_menu(state, db)
             if state.quit:
                 break

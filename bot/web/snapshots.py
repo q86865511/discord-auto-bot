@@ -233,6 +233,30 @@ def build_analysis_snapshot(state: BotState) -> dict:
     }
 
 
+def build_stocks_snapshot(state: BotState, config: BotConfig) -> dict:
+    """股票快照 — 最新價格 / 持股 / 買賣訊號。"""
+    snap = state.stock_last_snapshot or {}
+    scfg = config.stock
+    return {
+        "enabled":        scfg.enabled,
+        "last_poll_ts":   state.stock_last_poll_ts,
+        "ts":             snap.get("ts"),
+        "prices":         snap.get("prices", {}),
+        "holdings":       snap.get("holdings", {}),
+        "signals":        snap.get("signals", []),
+        "config": {
+            "poll_interval_min":      scfg.poll_interval_min,
+            "ma_short":               scfg.ma_short,
+            "ma_long":                scfg.ma_long,
+            "take_profit_pct":        scfg.take_profit_pct,
+            "stop_loss_pct":          scfg.stop_loss_pct,
+            "signal_score_threshold": scfg.signal_score_threshold,
+            "list_command":           scfg.list_command,
+            "portfolio_command":      scfg.portfolio_command,
+        },
+    }
+
+
 def build_strategies_snapshot(state: BotState, config: BotConfig) -> dict:
     """Backtest 三個進階策略 + runtime 統計。
 
@@ -282,6 +306,8 @@ def build_strategies_snapshot(state: BotState, config: BotConfig) -> dict:
 
 
 def _strategy_config_dict(g) -> dict:
+    # Backtest 內部用 cooldown_bets;從 cooldown_min 估算(~30s/bet → 2 bets/min)
+    cooldown_bets_est = int(g.trailing_stop_cooldown_min * 2)
     return {
         "hourly_filter_enabled":  g.hourly_filter_enabled,
         "hourly_min_bets":        g.hourly_min_bets,
@@ -295,17 +321,22 @@ def _strategy_config_dict(g) -> dict:
         "rolling_high_mult":      g.rolling_high_mult,
         "trailing_stop_enabled":      g.trailing_stop_enabled,
         "trailing_stop_pct":          g.trailing_stop_pct,
-        "trailing_stop_cooldown_bets": g.trailing_stop_cooldown_bets,
+        "trailing_stop_cooldown_min": g.trailing_stop_cooldown_min,
+        "trailing_stop_cooldown_bets": cooldown_bets_est,    # 給 backtest 用
     }
 
 
 def _strategy_runtime_dict(state: BotState) -> dict:
+    import time as _time
+    cd_until = state.trailing_cooldown_until_ts
+    cd_remain_sec = max(0.0, cd_until - _time.time()) if cd_until else 0.0
     return {
         "skipped_hourly":     state.strategy_skipped_hourly,
         "skipped_trailing":   state.strategy_skipped_trailing,
         "trailing_triggers":  state.strategy_trailing_triggers,
         "recent_ev_mult":     state.strategy_recent_ev_mult,
-        "trailing_skip_remaining": state.trailing_skip_remaining,
+        "trailing_cooldown_remaining_sec": int(cd_remain_sec),
+        "trailing_baseline_idx":           state.trailing_baseline_idx,
     }
 
 

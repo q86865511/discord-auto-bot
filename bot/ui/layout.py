@@ -221,9 +221,11 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
     if gcfg.trailing_stop_enabled:  strats.append("trailing")
     if strats:
         st_str = f"[cyan]{','.join(strats)}[/cyan]"
-        # 顯示 trailing stop 冷卻中
-        if state.trailing_skip_remaining > 0:
-            st_str += f"  [yellow]⏸ trailing -{state.trailing_skip_remaining}[/yellow]"
+        # 顯示 trailing stop 冷卻中(剩餘分鐘)
+        cd_until = state.trailing_cooldown_until_ts
+        if cd_until is not None and cd_until > time.time():
+            remain_min = (cd_until - time.time()) / 60
+            st_str += f"  [yellow]⏸ trailing {remain_min:.0f}m[/yellow]"
         # 顯示 rolling 倍率(只在 != 1 時)
         if state.strategy_recent_ev_mult != 1.0:
             st_str += f"  [yellow]roll x{state.strategy_recent_ev_mult:.2f}[/yellow]"

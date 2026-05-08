@@ -67,6 +67,24 @@ CREATE TABLE IF NOT EXISTS history (
     lines_json     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_history_ts ON history(ts);
+
+-- 股票價格快照 - 由 stock_loop 定期寫入
+CREATE TABLE IF NOT EXISTS stock_prices (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts     TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    price  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stock_ts ON stock_prices(ts);
+CREATE INDEX IF NOT EXISTS idx_stock_symbol_ts ON stock_prices(symbol, ts);
+
+-- 使用者持股快照 - 由 stock_loop 在抓 /portfolio 時更新
+CREATE TABLE IF NOT EXISTS stock_holdings (
+    symbol     TEXT PRIMARY KEY,
+    shares     REAL NOT NULL,
+    avg_cost   REAL NOT NULL DEFAULT 0,
+    last_seen  TEXT NOT NULL
+);
 """
 
 
@@ -364,6 +382,85 @@ class Database:
                 rows,
             )
         return len(rows)
+
+    # ── Stock prices ─────────────────────────────────────────────────
+    async def append_stock_prices(self, ts: str, prices: dict[str, float]) -> int:
+        """批次寫入單次抓到的所有股票價格。回傳寫入筆數。"""
+        if not prices:
+            return 0
+        async with self._lock:
+            return await asyncio.to_thread(self._append_stock_prices_sync, ts, prices)
+
+    def _append_stock_prices_sync(self, ts: str, prices: dict[str, float]) -> int:
+        rows = [(ts, sym, float(p)) for sym, p in prices.items()]
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO stock_prices (ts, symbol, price) VALUES (?, ?, ?)",
+                rows,
+            )
+        return len(rows)
+
+    async def load_stock_history(
+        self, symbol: str | None = None, limit: int = 500,
+    ) -> list[dict]:
+        """讀取股票歷史。symbol=None 表全部 symbols。"""
+        return await asyncio.to_thread(self._load_stock_history_sync, symbol, limit)
+
+    def _load_stock_history_sync(self, symbol, limit):
+        with self._conn() as c:
+            if symbol:
+                rows = c.execute(
+                    "SELECT ts, symbol, price FROM stock_prices "
+                    "WHERE symbol=? ORDER BY id DESC LIMIT ?",
+                    (symbol, limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT ts, symbol, price FROM stock_prices "
+                    "ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(r) for r in reversed(rows)]   # 升序回傳
+
+    async def upsert_stock_holding(
+        self, symbol: str, shares: float, avg_cost: float, ts: str,
+    ) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._upsert_holding_sync, symbol, shares, avg_cost, ts,
+            )
+
+    def _upsert_holding_sync(self, symbol, shares, avg_cost, ts):
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO stock_holdings (symbol, shares, avg_cost, last_seen)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    shares=excluded.shares,
+                    avg_cost=excluded.avg_cost,
+                    last_seen=excluded.last_seen""",
+                (symbol, float(shares), float(avg_cost), ts),
+            )
+
+    async def load_stock_holdings(self) -> list[dict]:
+        return await asyncio.to_thread(self._load_holdings_sync)
+
+    def _load_holdings_sync(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT symbol, shares, avg_cost, last_seen FROM stock_holdings "
+                "WHERE shares > 0 ORDER BY symbol"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    async def clear_stock_holdings(self) -> None:
+        """清空所有 holdings(每次抓 portfolio 後重寫,避免賣掉的還在裡面)。"""
+        async with self._lock:
+            await asyncio.to_thread(self._clear_holdings_sync)
+
+    def _clear_holdings_sync(self):
+        with self._conn() as c:
+            c.execute("DELETE FROM stock_holdings")
 
     # ── Meta ─────────────────────────────────────────────────────────
     async def get_meta(self, key: str) -> str | None:

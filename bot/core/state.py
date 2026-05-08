@@ -97,9 +97,17 @@ class BotState:
     remote_commit:       str | None = None
     last_update_check:   float | None = None
 
+    # ── 股票 runtime 狀態(stock_loop 維護) ──────────────────────
+    # 最近一次 poll 的快照:{ts, prices, holdings, signals}
+    stock_last_snapshot: dict = field(default_factory=dict)
+    stock_last_poll_ts:  float | None = None
+
     # ── 進階策略 runtime 狀態 ──────────────────────────────────────
-    # Trailing stop 觸發後跳過剩餘下注數;歸 0 才會 resume 並重設 peak
-    trailing_skip_remaining: int = 0
+    # Trailing stop 冷卻:用 epoch 秒數,跟 cooldown_until_ts 同模式
+    trailing_cooldown_until_ts: float | None = None
+    # 觸發後 baseline 重設成當下的 history 長度;之後的 drawdown 只算此之後
+    # 這個機制避免冷卻結束時 peak 還是歷史最高 → 立刻又觸發 → 死循環
+    trailing_baseline_idx: int = 0
     # 統計顯示用
     strategy_skipped_hourly:  int = 0    # hourly filter 累計跳過數
     strategy_skipped_trailing:int = 0

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from bot.web.snapshots import (
     build_analysis_snapshot,
     build_state_snapshot,
+    build_stocks_snapshot,
     build_strategies_snapshot,
     read_log_tail,
     run_in_main_loop,
@@ -31,6 +32,7 @@ from bot.web.templates import (
     CONTROL_BODY,
     LOGS_BODY,
     OVERVIEW_BODY,
+    STOCKS_BODY,
     STRATEGIES_BODY,
     html_close,
     html_shell,
@@ -150,6 +152,7 @@ def make_handler(
                 "/index.html":("概覽",      OVERVIEW_BODY, "overview"),
                 "/analysis":  ("Slot 分析", ANALYSIS_BODY, "analysis"),
                 "/strategies":("策略 Backtest", STRATEGIES_BODY, "strategies"),
+                "/stocks":    ("股票",      STOCKS_BODY, "stocks"),
                 "/control":   ("系統設定",  CONTROL_BODY, "control"),
                 "/logs":      ("即時日誌",  LOGS_BODY, "logs"),
             }
@@ -175,6 +178,12 @@ def make_handler(
             if path == "/api/strategies":
                 self._json(run_in_main_loop(
                     main_loop, state, build_strategies_snapshot,
+                    state, config_provider(),
+                ))
+                return
+            if path == "/api/stocks":
+                self._json(run_in_main_loop(
+                    main_loop, state, build_stocks_snapshot,
                     state, config_provider(),
                 ))
                 return
