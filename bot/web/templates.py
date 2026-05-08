@@ -1202,6 +1202,7 @@ STOCKS_BODY = r"""
       <thead><tr>
         <th>Symbol</th><th>現價</th><th>持股</th>
         <th>樣本數</th><th>買 score</th><th>賣 score</th>
+        <th style="text-align:center">操作</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1221,6 +1222,16 @@ function appendCell(tr, text, cls) {
   td.textContent = text;
   tr.appendChild(td);
 }
+function _makeActionBtn(action, symbol, suggested, max) {
+  const btn = document.createElement('button');
+  btn.className = 'btn ' + (action === 'buy' ? 'primary' : 'danger');
+  btn.style.padding = '4px 10px';
+  btn.style.fontSize = '12px';
+  btn.style.marginRight = '4px';
+  btn.textContent = action === 'buy' ? '買' : '賣';
+  btn.onclick = () => openTradeModal(action, symbol, suggested, max);
+  return btn;
+}
 function appendActionCell(tr, action, symbol, suggested, max, enabled) {
   const td = document.createElement('td');
   td.style.textAlign = 'center';
@@ -1228,13 +1239,23 @@ function appendActionCell(tr, action, symbol, suggested, max, enabled) {
     td.className = 'dim';
     td.textContent = '需開啟交易';
   } else {
-    const btn = document.createElement('button');
-    btn.className = 'btn ' + (action === 'buy' ? 'primary' : 'danger');
-    btn.style.padding = '4px 10px';
-    btn.style.fontSize = '12px';
-    btn.textContent = action === 'buy' ? '買進' : '賣出';
-    btn.onclick = () => openTradeModal(action, symbol, suggested, max);
-    td.appendChild(btn);
+    td.appendChild(_makeActionBtn(action, symbol, suggested, max));
+  }
+  tr.appendChild(td);
+}
+// 同欄塞買 + 賣兩顆按鈕(全部股票分頁用)
+function appendBothActionsCell(tr, symbol, heldShares, max, enabled) {
+  const td = document.createElement('td');
+  td.style.textAlign = 'center';
+  td.style.whiteSpace = 'nowrap';
+  if (!enabled) {
+    td.className = 'dim';
+    td.textContent = '需開啟交易';
+  } else {
+    td.appendChild(_makeActionBtn('buy', symbol, 1, max));
+    if (heldShares > 0) {
+      td.appendChild(_makeActionBtn('sell', symbol, Math.min(heldShares, max), max));
+    }
   }
   tr.appendChild(td);
 }
@@ -1528,6 +1549,7 @@ async function refresh() {
       const tr = document.createElement('tr');
       appendCell(tr, sym);
       appendCell(tr, fmtFloat(cur, 2));
+      const heldShares = holdings[sym] ? holdings[sym].shares : 0;
       const heldCell = holdings[sym]
         ? `${fmt(holdings[sym].shares)} @${fmtFloat(holdings[sym].avg_cost, 2)}`
         : '─';
@@ -1539,6 +1561,8 @@ async function refresh() {
                  buyScore >= 70 ? 'green' : (buyScore >= 60 ? 'yellow' : 'dim'));
       appendCell(tr, sellScore != null ? sellScore : '─',
                  sellScore >= 65 ? 'red' : 'dim');
+      // 操作:買按鈕一定在,賣按鈕只在持有時出現
+      appendBothActionsCell(tr, sym, heldShares, tradeMax, tradeOn);
       allBody.appendChild(tr);
     });
   } catch (err) {
