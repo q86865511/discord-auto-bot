@@ -270,8 +270,7 @@ class StockConfig:
     take_profit_pct: float = 15.0    # 持股獲利達此 % → 建議賣(獲利了結)
     stop_loss_pct:   float = 10.0    # 持股虧損達此 % → 建議賣(止損)
     signal_score_threshold: int = 80     # 評分 ≥ 此值才視為「強訊號」
-    # Debug
-    log_raw_text: bool = False    # True = dump /portfolio 跟 /stock 原文到 log
+    # 不再有 log_raw_text — parser 失敗時會自動寫到 logs/stock_debug.log
 
     def validate(self) -> list[str]:
         errs: list[str] = []

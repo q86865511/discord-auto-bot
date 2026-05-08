@@ -613,9 +613,9 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print(f"   [8] 停損 %:          {s.stop_loss_pct:>4}  ← 持股虧到此 % → 建議賣")
         print(f"   [9] 強訊號門檻:      {s.signal_score_threshold:>4}  ← log 只顯示分數高於此的訊號")
         print()
-        print("  [Debug]")
-        print(f"   [A] log_raw_text:   {'✓ 開' if s.log_raw_text else '✗ 關'}  (parser 抓不到時打開看 raw 文字)")
-        print(f"   [H] 名詞解釋(看不懂分析參數來這)")
+        print("  [說明]")
+        print("   [H] 名詞解釋(看不懂分析參數來這)")
+        print("   ⓘ parser 抓不到時會自動把 raw 文字寫到 logs/stock_debug.log")
         print()
         print("   [0] 返回主選單")
         choice = (await ainput("\n  選擇: ")).strip().upper()
@@ -674,12 +674,6 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             v = await ask_int("強訊號分數門檻 (0~100)",
                               s.signal_score_threshold, min_val=0, max_val=100)
             if v is not None: s.signal_score_threshold = v
-            await wait_enter()
-        elif choice == "A":
-            s.log_raw_text = not s.log_raw_text
-            print(f"  ✓ log_raw_text → {'開' if s.log_raw_text else '關'}")
-            print("    開了之後 stock loop 會把 /portfolio 跟 /stock 的回應原文")
-            print("    寫進 logs/bot.log,parser 失敗時可以給開發者看。")
             await wait_enter()
         elif choice == "H":
             await _show_stock_help()

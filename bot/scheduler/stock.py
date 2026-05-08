@@ -35,6 +35,25 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _dump_parse_debug(label: str, text: str) -> None:
+    """parser 抓不到時,把原文寫到獨立 debug 檔(不污染 bot.log)。
+
+    每次蓋寫(不累積),只保留最後一次失敗的 raw text — 方便對照原始
+    embed 校準 parser regex,但又不會把 logs/bot.log 撐爆。
+    """
+    import os
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/stock_debug.log", "w", encoding="utf-8") as f:
+            f.write(f"=== {label} parse failed @ {datetime.now()} ===\n")
+            f.write(f"length: {len(text)} chars\n")
+            f.write("--- last 2000 chars ---\n")
+            f.write(text[-2000:])
+            f.write("\n=== end ===\n")
+    except OSError as e:
+        log.debug("無法寫 stock_debug.log: %s", e)
+
+
 async def stock_loop(
     page: "Page",
     state: BotState,
@@ -60,16 +79,6 @@ async def stock_loop(
         await interruptible_sleep(state, sleep_sec)
 
 
-def _trim_log(text: str | None, max_chars: int = 800) -> str:
-    """為了 log_raw_text 把超長文字截掉中間,只留尾巴(回應通常在最後)。"""
-    if not text:
-        return "(空)"
-    if len(text) <= max_chars:
-        return text
-    # 留尾巴,前面用 [...] 表示截掉了
-    return f"[...前 {len(text) - max_chars} 字省略]\n{text[-max_chars:]}"
-
-
 async def _poll_once(page, state: BotState, scfg, db) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_prices: dict[str, float] = {}
@@ -77,9 +86,6 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
     # ── 1. /stock(無 symbol) → bot 回 embed 列出全部股票 ───────────
     log.info("stock: 查 stock list (%s)", scfg.stock_command)
     list_text = await query_stock_text(page, command=scfg.stock_command)
-    if scfg.log_raw_text:
-        log.info("stock list raw text (last 800 chars):\n%s",
-                 _trim_log(list_text, 800))
     if list_text:
         discovered = parse_stock_list(list_text)
         if discovered:
@@ -88,9 +94,11 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
                                for s, p in list(discovered.items())[:6]))
             all_prices.update(discovered)
         else:
+            # 抓不到 → 把 raw 文字寫到獨立 debug 檔(不污染 bot.log)
+            _dump_parse_debug("stock_list", list_text)
             log.warning(
-                "stock: 從 /stock 回應抓不到任何 symbol;"
-                "開 stock.log_raw_text 看 raw 文字校準 parser",
+                "stock: 從 /stock 回應抓不到 symbol — "
+                "原文已寫到 logs/stock_debug.log",
             )
     else:
         log.warning("stock: %s 無回應", scfg.stock_command)
@@ -102,10 +110,9 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
     pf_text = await query_stock_text(page, command=scfg.portfolio_command)
     holdings: dict[str, dict] = {}
     if pf_text:
-        if scfg.log_raw_text:
-            log.info("portfolio raw text (last 800 chars):\n%s",
-                     _trim_log(pf_text, 800))
         holdings = parse_portfolio(pf_text)
+        if not holdings:
+            _dump_parse_debug("portfolio", pf_text)
         log.info("stock: portfolio 解析到 %d 支持股 — %s", len(holdings),
                  ", ".join(f"{s}×{int(h['shares'])}@{h['avg_cost']:.2f}"
                            for s, h in list(holdings.items())[:6]) or "(無)")

@@ -223,20 +223,31 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         snap = state.stock_last_snapshot or {}
         n_held = len(snap.get("holdings", {}))
         n_disc = len(snap.get("prices", {}))
+
+        def _fmt_remain(sec: int) -> str:
+            mm, ss = divmod(max(0, sec), 60)
+            return f"{mm}m {ss:02d}s" if mm > 0 else f"{ss}s"
+
         if last_ts is None:
-            stock_str = f"[yellow]啟動中... 啟動 60s 後第一次 poll[/yellow]"
+            # stock_loop 啟動後 60 秒做第一次 poll(見 scheduler/stock.py)
+            first_poll = state.session_start_ts + 60
+            remain = int(first_poll - time.time())
+            if remain > 0:
+                stock_str = (f"[yellow]首次 poll 倒數 "
+                             f"[cyan]{_fmt_remain(remain)}[/cyan][/yellow]")
+            else:
+                stock_str = "[yellow]首次 poll 進行中...[/yellow]"
         else:
             interval_sec = max(60, int(float(scfg.poll_interval_min) * 60))
             next_poll = last_ts + interval_sec
-            remain = max(0, int(next_poll - time.time()))
-            mm, ss = divmod(remain, 60)
-            countdown = f"{mm}m {ss:02d}s" if mm > 0 else f"{ss}s"
-            # 強訊號計數
+            remain = int(next_poll - time.time())
+            countdown = _fmt_remain(remain)
+            # 強訊號計數(注意:sell_eval/buy_eval 可能是 None)
             sigs = snap.get("signals", [])
             n_sell = sum(1 for s in sigs
-                         if s.get("sell_eval", {}) and s["sell_eval"].get("signal") == "sell")
+                         if (s.get("sell_eval") or {}).get("signal") == "sell")
             n_buy_strong = sum(1 for s in sigs
-                               if s.get("buy_eval", {}) and s["buy_eval"].get("score", 0) >= 80)
+                               if (s.get("buy_eval") or {}).get("score", 0) >= 80)
             sig_part = ""
             if n_sell > 0:
                 sig_part += f" [red]🔴賣{n_sell}[/red]"

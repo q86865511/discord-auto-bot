@@ -53,12 +53,15 @@ def show_stock_analysis(state: BotState) -> None:
         total_value += h["shares"] * cur
         total_pnl   += h["shares"] * (cur - h.get("avg_cost", 0))
 
-    sells = [s for s in signals if s.get("sell_eval", {}).get("signal") == "sell"]
+    # Bug-prone:`sell_eval` 對未持有的股是 None,不是 dict;
+    # `s.get("sell_eval", {})` 會回 None 而不是 {}(default 只在 key 缺時用)
+    sells = [s for s in signals
+             if (s.get("sell_eval") or {}).get("signal") == "sell"]
     strong_buys = [s for s in signals
-                   if s.get("buy_eval", {}).get("signal") == "buy"
-                   and s["buy_eval"]["score"] >= 80]
+                   if (s.get("buy_eval") or {}).get("signal") == "buy"
+                   and (s.get("buy_eval") or {}).get("score", 0) >= 80]
     mid_buys = [s for s in signals
-                if s.get("buy_eval") and 60 <= s["buy_eval"]["score"] < 80]
+                if 60 <= (s.get("buy_eval") or {}).get("score", 0) < 80]
 
     summary = Table(box=None, show_header=False, padding=(0, 2), expand=True)
     summary.add_column(style="dim", width=18)
