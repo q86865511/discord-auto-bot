@@ -59,6 +59,12 @@ def buy_signal(
 ) -> dict[str, Any]:
     """以單一 symbol 的價格序列判斷是否該買。
 
+    對齊技術分析慣例,讓買 / 賣訊號互斥(同一形態不會雙邊都加分):
+      - 黃金交叉(短均 > 長均)= 多頭 → 加分
+      - 死亡交叉(短均 < 長均)= 空頭 → 扣分
+      - buy-the-dip:遠低於長均 + 近期 momentum 翻正 = 加分
+      - 純跌不接:近期 momentum 仍負 = 扣分
+
     series 是 [{ts, price}, ...] 升序。需要至少 max(ma_long, momentum_window+1) 筆。
     """
     prices = [r["price"] for r in series]
@@ -83,23 +89,38 @@ def buy_signal(
     score = 50    # 中性
     reasons: list[str] = []
 
+    # ── 趨勢方向(主要訊號) ───────────────────────────────────────
     if ma_s is not None and ma_l is not None:
-        if cur < ma_l * 0.95:
-            score += 20
-            reasons.append(f"現價 {cur:.2f} < 長均 {ma_l:.2f} -5%")
-        if ma_s < ma_l:
-            score += 10
-            reasons.append(f"短均 {ma_s:.2f} < 長均 {ma_l:.2f}(被低估)")
-        if cur < ma_s:
-            score += 5
-            reasons.append("現價 < 短均")
+        # 0.2% 緩衝,避免兩條線幾乎相等時雜訊閃爍
+        ratio = ma_s / ma_l if ma_l > 0 else 1.0
+        if ratio > 1.002:
+            score += 15
+            reasons.append(f"短均 {ma_s:.2f} > 長均 {ma_l:.2f}(多頭趨勢)")
+        elif ratio < 0.998:
+            score -= 15
+            reasons.append(f"短均 {ma_s:.2f} < 長均 {ma_l:.2f}(空頭趨勢,不宜接)")
 
-    if pct_recent > 1.0:
+    # ── 短期動能 ────────────────────────────────────────────────────
+    if ma_s is not None:
+        if cur > ma_s * 1.005:
+            score += 5
+            reasons.append("現價 > 短均(短期動能向上)")
+        elif cur < ma_s * 0.995:
+            score -= 5
+            reasons.append("現價 < 短均(短期走弱)")
+
+    # ── Buy-the-dip:遠低於長均但 momentum 開始翻正 ─────────────────
+    if ma_l is not None and cur < ma_l * 0.95 and pct_recent > 1.0:
         score += 15
-        reasons.append(f"近 {momentum_window} 筆 momentum +{pct_recent:.1f}%")
+        reasons.append(f"現價 < 長均 -5% 但近期反彈 +{pct_recent:.1f}%(可能築底)")
+
+    # ── 動能 ────────────────────────────────────────────────────────
+    if pct_recent > 2.0:
+        score += 10
+        reasons.append(f"近 {momentum_window} 筆漲 +{pct_recent:.1f}%")
     elif pct_recent < -3.0:
-        score -= 20
-        reasons.append(f"近期跌幅 {pct_recent:.1f}% — 還在下跌不接")
+        score -= 15
+        reasons.append(f"近 {momentum_window} 筆跌 {pct_recent:.1f}%(動能為負)")
 
     # 高波動扣分
     if sd > cur * 0.10:
