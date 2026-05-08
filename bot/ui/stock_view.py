@@ -128,6 +128,7 @@ def show_stock_analysis(state: BotState) -> None:
         ht.add_column("均買價",   justify="right")
         ht.add_column("現價",     justify="right")
         ht.add_column("損益 %",  justify="right")
+        ht.add_column("盈虧",    justify="right")
         ht.add_column("建議",     justify="right")
         ht.add_column("說明")
         for sym, h in sorted(holdings.items()):
@@ -135,12 +136,21 @@ def show_stock_analysis(state: BotState) -> None:
             sev = sig.get("sell_eval") if sig else None
             cur = prices.get(sym, h.get("current_price", 0))
             avg = h.get("avg_cost", 0)
+            shares = h.get("shares", 0)
             if avg > 0:
                 pct = (cur - avg) / avg * 100
                 pct_color = "green" if pct > 0 else ("red" if pct < 0 else "dim")
                 pct_str = f"[{pct_color}]{pct:+.2f}%[/{pct_color}]"
+                # 優先用 portfolio embed 的精確盈虧;parser 沒抓到才自算
+                # (自算會因 avg/cur 已 round 而偏差幾塊到數十塊)
+                pnl = h.get("pnl")
+                if pnl is None:
+                    pnl = shares * (cur - avg)
+                pnl_color = "green" if pnl > 0 else ("red" if pnl < 0 else "dim")
+                pnl_str = f"[{pnl_color}]{pnl:+,.2f}[/{pnl_color}]"
             else:
                 pct_str = "─"
+                pnl_str = "─"
             if sev:
                 sig_name = sev["signal"].upper()
                 sig_color = "red" if sev["signal"] == "sell" else (
@@ -153,10 +163,10 @@ def show_stock_analysis(state: BotState) -> None:
                 reason = "─"
             ht.add_row(
                 f"[bold]{sym}[/bold]",
-                f"{int(h['shares']):,}",
+                f"{int(shares):,}",
                 f"{avg:.2f}" if avg else "─",
                 f"{cur:.2f}",
-                pct_str, sig_str, reason,
+                pct_str, pnl_str, sig_str, reason,
             )
         console.print(ht)
 

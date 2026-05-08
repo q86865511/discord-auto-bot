@@ -1122,7 +1122,7 @@ STOCKS_BODY = r"""
     <table class="right-align" id="holdings-table">
       <thead><tr>
         <th>Symbol</th><th>股數</th><th>均買價</th>
-        <th>現價</th><th>損益 %</th><th>建議</th><th>說明</th>
+        <th>現價</th><th>損益 %</th><th>盈虧</th><th>建議</th><th>說明</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1315,7 +1315,17 @@ async function refresh() {
           const pct = (cur - h.avg_cost) / h.avg_cost * 100;
           const cls = pct > 0 ? 'green' : (pct < 0 ? 'red' : 'dim');
           appendCell(tr, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', cls);
+          // 優先用 portfolio embed 的精確盈虧(parser 抓「盈虧:」那行);
+          // 沒有就 fallback shares*(cur-avg) 自算
+          const pnl = (h.pnl !== undefined && h.pnl !== null)
+            ? h.pnl
+            : h.shares * (cur - h.avg_cost);
+          const pnlCls = pnl > 0 ? 'green' : (pnl < 0 ? 'red' : 'dim');
+          const pnlStr = (pnl >= 0 ? '+' : '') + pnl.toLocaleString(undefined,
+            { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          appendCell(tr, pnlStr, pnlCls);
         } else {
+          appendCell(tr, '─');
           appendCell(tr, '─');
         }
         if (sellEval) {

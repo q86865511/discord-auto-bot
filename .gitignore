@@ -44,8 +44,9 @@ env/
 .DS_Store
 Thumbs.db
 
-# Claude Code 本地設定
+# Claude Code 本地設定 + 接手筆記(CLAUDE.md 是 AI session 用,不入 repo)
 .claude/
+CLAUDE.md
 
 # Playwright 暫存
 playwright-report/

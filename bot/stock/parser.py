@@ -63,17 +63,33 @@ PORTFOLIO_HOLDING_BLOCK = re.compile(
     r".*?現價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)",   # 現價: Y.YY
     re.DOTALL,
 )
+# 「盈虧」欄位獨立抓 — Discord 給的是內部精確值(我們自己 shares*(cur-avg) 算
+# 會因 avg/cur 顯示時被 round 而偏差幾塊到數十塊,user 對照 Discord 會困惑)。
+# 這 regex 抓「市值 ... 盈虧 : ±NUM」,綁定在「現價 ... 」之後;不指定具體
+# symbol,在 parse_portfolio 內按出現順序對應到 holding。
+PORTFOLIO_PNL = re.compile(
+    r"市值[:\s]*\$?[0-9,]+(?:\.[0-9]+)?"          # 市值: X.XX
+    r"\s*盈虧[:\s]*([+\-]?[0-9,]+(?:\.[0-9]+)?)",  # 盈虧: ±Y.YY
+    re.DOTALL,
+)
 
 
 def parse_portfolio(text: str) -> dict[str, dict]:
-    """從 /portfolio 抓所有持股,順便回傳現價。
+    """從 /portfolio 抓所有持股,順便回傳現價、盈虧。
 
-    回傳 {symbol: {shares, avg_cost, current_price}}。
+    回傳 {symbol: {shares, avg_cost, current_price, pnl}}。pnl 抓不到時為
+    None,UI 端會 fallback 用 shares*(current-avg) 自算。
     """
     if not text:
         return {}
+    # 先用 holding block 抓 symbol/shares/avg/cur,記錄每筆 match 的結束位置
+    blocks = list(PORTFOLIO_HOLDING_BLOCK.finditer(text))
+    # 依「文字中出現順序」抓盈虧,跟 holding block 一一對應
+    pnls = [_parse_number(m.group(1).replace("+", ""))
+            for m in PORTFOLIO_PNL.finditer(text)]
+
     out: dict[str, dict] = {}
-    for m in PORTFOLIO_HOLDING_BLOCK.finditer(text):
+    for i, m in enumerate(blocks):
         sym = m.group(1).upper()
         shares = _parse_number(m.group(2))
         avg = _parse_number(m.group(3))
@@ -84,6 +100,7 @@ def parse_portfolio(text: str) -> dict[str, dict]:
             "shares":        shares,
             "avg_cost":      avg or 0.0,
             "current_price": cur or 0.0,
+            "pnl":           pnls[i] if i < len(pnls) else None,
         }
     return out
 
