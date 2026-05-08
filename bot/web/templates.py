@@ -1083,6 +1083,7 @@ STOCKS_BODY = r"""
   <button class="stock-tab active" data-pane="pane-overview">📊 總覽</button>
   <button class="stock-tab" data-pane="pane-holdings">💼 持股 <span class="badge" id="badge-hold">0</span></button>
   <button class="stock-tab" data-pane="pane-buy">🟢 買進建議 <span class="badge" id="badge-buy">0</span></button>
+  <button class="stock-tab" data-pane="pane-sell">🔴 賣出建議 <span class="badge" id="badge-sell">0</span></button>
   <button class="stock-tab" data-pane="pane-all">📋 全部股票 <span class="badge" id="badge-all">0</span></button>
 </div>
 
@@ -1143,6 +1144,24 @@ STOCKS_BODY = r"""
       <tbody></tbody>
     </table>
     <div id="no-buy" class="dim" style="margin-top: 8px;"></div>
+  </div>
+</div>
+
+<div id="pane-sell" class="stock-pane">
+  <div class="card">
+    <h3>🔴 賣出建議(score 由高至低)</h3>
+    <p class="dim" style="font-size: 12px; margin: 0 0 8px 0;">
+      score ≥ 80 = 強烈建議(紅);65~79 = 中等(黃)。只列出有持股的標的 —
+      賣出訊號需要持股才有意義。觸發來源:獲利達 +%、虧損達 -%、或趨勢轉空。
+    </p>
+    <table class="right-align" id="sell-table">
+      <thead><tr>
+        <th>Symbol</th><th>持有</th><th>均買價</th><th>現價</th>
+        <th>損益 %</th><th>Score</th><th>說明</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="no-sell" class="dim" style="margin-top: 8px;"></div>
   </div>
 </div>
 
@@ -1243,6 +1262,8 @@ async function refresh() {
     document.getElementById('badge-hold').className = heldSyms.length ? 'badge' : 'badge warn';
     document.getElementById('badge-buy').textContent = buyStrong + buyMid;
     document.getElementById('badge-buy').className = buyStrong > 0 ? 'badge' : 'badge warn';
+    document.getElementById('badge-sell').textContent = sellCount;
+    document.getElementById('badge-sell').className = sellCount > 0 ? 'badge danger' : 'badge';
     document.getElementById('badge-all').textContent = allSyms.length;
 
     // Top 3 建議:賣出 + 強買進混排,依 score 排序取 3
@@ -1333,6 +1354,43 @@ async function refresh() {
         appendCell(tr, ev.score + ' / 100', cls);
         appendCell(tr, ev.reason);
         buyBody.appendChild(tr);
+      });
+    }
+
+    // ── 賣出建議 ────────────────────────────────────────────────
+    const sellBody = document.querySelector('#sell-table tbody');
+    sellBody.innerHTML = '';
+    const noSell = document.getElementById('no-sell');
+    const sellCandidates = signals
+      .filter(s => s.sell_eval && s.sell_eval.score >= 60
+                  && holdings[s.symbol])
+      .sort((a, b) => b.sell_eval.score - a.sell_eval.score);
+    if (sellCandidates.length === 0) {
+      if (heldSyms.length === 0) {
+        noSell.textContent = '— 目前沒有持股(賣出訊號需要持股才有意義)';
+      } else {
+        noSell.textContent = '— 目前沒有 score ≥ 60 的賣出訊號(可在「持股」分頁看完整評估)';
+      }
+    } else {
+      noSell.textContent = '';
+      sellCandidates.forEach(s => {
+        const ev = s.sell_eval;
+        const h  = holdings[s.symbol];
+        const tr = document.createElement('tr');
+        appendCell(tr, s.symbol);
+        appendCell(tr, fmt(h.shares));
+        appendCell(tr, fmtFloat(h.avg_cost, 2));
+        appendCell(tr, fmtFloat(ev.current, 2));
+        if (ev.profit_pct != null) {
+          const cls = ev.profit_pct > 0 ? 'green' : (ev.profit_pct < 0 ? 'red' : 'dim');
+          appendCell(tr, (ev.profit_pct >= 0 ? '+' : '') + ev.profit_pct.toFixed(2) + '%', cls);
+        } else {
+          appendCell(tr, '─');
+        }
+        const cls = ev.score >= 80 ? 'red' : 'yellow';
+        appendCell(tr, ev.score + ' / 100', cls);
+        appendCell(tr, ev.reason);
+        sellBody.appendChild(tr);
       });
     }
 

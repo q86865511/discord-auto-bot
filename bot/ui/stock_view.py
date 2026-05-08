@@ -161,7 +161,51 @@ def show_stock_analysis(state: BotState) -> None:
             )
         console.print(ht)
 
-    # ── 4. 買進建議 ──────────────────────────────────────────────
+    # ── 4. 賣出建議(score ≥ 60 的持股) ──────────────────────────
+    sell_candidates = [
+        s for s in signals
+        if (s.get("sell_eval") or {}).get("score", 0) >= 60
+        and s["symbol"] in holdings
+    ]
+    sell_candidates.sort(key=lambda s: -s["sell_eval"]["score"])
+    console.print()
+    console.rule("[bold]🔴 賣出建議(score ≥ 60)[/]")
+    if sell_candidates:
+        st = Table(show_header=True, header_style="bold cyan")
+        st.add_column("Symbol")
+        st.add_column("持有",   justify="right")
+        st.add_column("均買價", justify="right")
+        st.add_column("現價",   justify="right")
+        st.add_column("損益 %", justify="right")
+        st.add_column("Score", justify="right")
+        st.add_column("說明")
+        for s in sell_candidates:
+            ev = s["sell_eval"]
+            h  = holdings[s["symbol"]]
+            sc = ev["score"]
+            cls = "red" if sc >= 80 else "yellow"
+            pp = ev.get("profit_pct")
+            if pp is None:
+                pp_str = "─"
+            else:
+                pp_color = "green" if pp > 0 else ("red" if pp < 0 else "dim")
+                pp_str = f"[{pp_color}]{pp:+.2f}%[/{pp_color}]"
+            st.add_row(
+                f"[bold]{s['symbol']}[/bold]",
+                f"{int(h['shares']):,}",
+                f"{h.get('avg_cost', 0):.2f}",
+                f"{ev.get('current', 0):.2f}",
+                pp_str,
+                f"[{cls}]{sc}[/{cls}]",
+                ev.get("reason", "")[:60],
+            )
+        console.print(st)
+    elif not holdings:
+        console.print("  [dim]目前沒有持股(賣出訊號需要持股才有意義)[/dim]")
+    else:
+        console.print("  [dim]目前沒有 score ≥ 60 的賣出訊號 — 可在「持股明細」看完整評估[/dim]")
+
+    # ── 5. 買進建議 ──────────────────────────────────────────────
     buy_candidates = [
         s for s in signals
         if s.get("buy_eval") and s["buy_eval"].get("score", 0) >= 60
@@ -197,7 +241,7 @@ def show_stock_analysis(state: BotState) -> None:
         console.rule("[bold]🟢 買進建議[/]")
         console.print("  [dim]目前沒有 score ≥ 60 的買進機會(或樣本不足)[/dim]")
 
-    # ── 5. 全部股票報價 ──────────────────────────────────────────
+    # ── 6. 全部股票報價 ──────────────────────────────────────────
     console.print()
     console.rule(f"[bold]📋 全部股票({len(prices)} 支)[/]")
     if not prices:
