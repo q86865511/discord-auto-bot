@@ -429,6 +429,51 @@ def _stock_reply_detected(before: str, current: str) -> bool:
     return False
 
 
+async def execute_stock_trade(
+    page: "Page", action: str, symbol: str, amount: int,
+    command: str, param_template: str,
+    timeout: float = 25.0,
+) -> tuple[bool, str]:
+    """執行買賣交易。回傳 (success, message)。
+
+    `action` ∈ {"buy", "sell"};`param_template` 用 {symbol} {amount} 代換。
+    送出後等 timeout 秒看 bot 回應,不解析正確性 — 只看是否有任何回應。
+    呼叫端應自己跑下次 /portfolio 確認結果。
+    """
+    if action not in ("buy", "sell"):
+        return False, f"未知 action: {action}"
+    param = param_template.format(symbol=symbol.upper(), amount=int(amount))
+    log.info("trade exec: %s %s × %d → %s %s", action, symbol, amount, command, param)
+
+    async with command_lock:
+        try:
+            before = await page.evaluate("() => document.body.textContent")
+        except Exception as e:    # noqa: BLE001
+            return False, f"讀 before_text 失敗: {e}"
+
+        try:
+            await _send_slash_command(page, command, param)
+        except Exception as e:    # noqa: BLE001
+            return False, f"送指令失敗: {e}"
+
+        # 等 stock-related reply
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            await asyncio.sleep(0.5)
+            try:
+                cur = await page.evaluate("() => document.body.textContent")
+            except Exception as e:    # noqa: BLE001
+                log.debug("trade poll 失敗: %s", e)
+                continue
+            if _stock_reply_detected(before, cur):
+                # 簡單判斷:回應裡有 "成功" / "錯誤" / "失敗" 關鍵字
+                tail = cur[-2000:]
+                if any(k in tail for k in ("交易失敗", "餘額不足", "錯誤", "失敗")):
+                    return False, f"bot 回報失敗(關鍵字觸發)"
+                return True, f"已送出 {action} {symbol} × {amount}"
+        return False, f"在 {timeout}s 內沒收到 bot 回應"
+
+
 async def query_stock_text(
     page: "Page", command: str = "/stock", param: str = "",
     timeout: float = 20.0, stability_sec: float = 1.5,

@@ -214,6 +214,8 @@ async def _sub_menu_email(config: BotConfig) -> None:
         print(f"   [8] 停擺通知:        {'✓' if e.notify_dead else '✗'}  失敗門檻={e.dead_threshold}")
         print(f"   [9] 貓娘完成通知:    {'✓' if e.notify_neko else '✗'}")
         print(f"   [A] 每日摘要:        {'✓' if e.notify_digest else '✗'}  時段={e.digest_hour:02d}:00")
+        print(f"   [B] 股票強訊號:      {'✓' if e.notify_stock_signal else '✗'}  "
+              f"(score ≥ stock 的 [9] 門檻才寄)")
         print()
         print("   [0] 返回主選單")
         choice = (await ainput("\n  選擇: ")).strip().upper()
@@ -288,6 +290,13 @@ async def _sub_menu_email(config: BotConfig) -> None:
             elif sub == "P":
                 v = await ask_int("摘要時段(0~23 整點)", e.digest_hour, min_val=0, max_val=23)
                 if v is not None: e.digest_hour = v
+            await wait_enter()
+        elif choice == "B":
+            e.notify_stock_signal = not e.notify_stock_signal
+            print(f"  ✓ 股票強訊號 email → {'啟用' if e.notify_stock_signal else '停用'}")
+            if e.notify_stock_signal:
+                print("    觸發條件:某支股 buy/sell score ≥ 強訊號門檻(stock [9] 設)。")
+                print("    防爆量:同 symbol/類型只通知一次,訊號消失後重新出現才會再寄。")
             await wait_enter()
 
 
@@ -613,9 +622,17 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print(f"   [8] 停損 %:          {s.stop_loss_pct:>4}  ← 持股虧到此 % → 建議賣")
         print(f"   [9] 強訊號門檻:      {s.signal_score_threshold:>4}  ← log 只顯示分數高於此的訊號")
         print()
+        print("  [⚠️  交易執行(預設關)]")
+        trade_state = "✓ 已啟用 — Dashboard 會出現買賣按鈕" if s.trading_enabled else "✗ 停用"
+        print(f"   [J] Dashboard 交易:  {trade_state}")
+        print(f"   [K] 單次金額上限:    {s.max_trade_amount} 股")
+        print(f"   [L] 買進指令樣板:    {s.buy_command} {s.buy_param_template}")
+        print(f"   [M] 賣出指令樣板:    {s.sell_command} {s.sell_param_template}")
+        print()
         print("  [說明]")
         print("   [H] 名詞解釋(看不懂分析參數來這)")
         print("   ⓘ parser 抓不到時會自動把 raw 文字寫到 logs/stock_debug.log")
+        print("   ⓘ 強訊號 email 通知:在 [3] Email → [B] 開")
         print()
         print("   [0] 返回主選單")
         choice = (await ainput("\n  選擇: ")).strip().upper()
@@ -674,6 +691,48 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             v = await ask_int("強訊號分數門檻 (0~100)",
                               s.signal_score_threshold, min_val=0, max_val=100)
             if v is not None: s.signal_score_threshold = v
+            await wait_enter()
+        elif choice == "J":
+            print("\n  ⚠ 啟用後 Dashboard 會出現買賣按鈕,點擊會真正送出 /stock 指令")
+            print("    對你的帳戶執行交易。確定要啟用嗎?(預設關閉是為了安全)")
+            print()
+            from bot.ui.input_validation import ask_yes_no as _ayn
+            confirm = await _ayn(
+                f"目前 {'已啟用' if s.trading_enabled else '已停用'},"
+                f"要切換到 {'停用' if s.trading_enabled else '啟用'} 嗎?"
+            )
+            if confirm:
+                s.trading_enabled = not s.trading_enabled
+                print(f"  ✓ Dashboard 交易 → {'啟用' if s.trading_enabled else '停用'}")
+            await wait_enter()
+        elif choice == "K":
+            print("\n  ⓘ 單次最大金額上限,防止手滑一次下太多。")
+            print("    Dashboard 上的買賣按鈕會強制 amount ≤ 此值。\n")
+            v = await ask_int("單次上限(股數)", s.max_trade_amount,
+                              min_val=1, max_val=100000)
+            if v is not None: s.max_trade_amount = v
+            await wait_enter()
+        elif choice == "L":
+            print("\n  ⓘ 買進指令樣板。{symbol} {amount} 會自動代換。")
+            print("    例:'action:buy symbol:{symbol} amount:{amount}'")
+            print("        → 實際送出:'action:buy symbol:HOLO amount:10'\n")
+            cmd = await ask_text("買進指令(預設 /stock)",
+                                 s.buy_command, max_len=50, allow_chinese=False)
+            if cmd is not None: s.buy_command = cmd
+            tmpl = await ask_text("買進 param 樣板",
+                                  s.buy_param_template, max_len=200,
+                                  allow_chinese=False)
+            if tmpl is not None: s.buy_param_template = tmpl
+            await wait_enter()
+        elif choice == "M":
+            print("\n  ⓘ 賣出指令樣板。{symbol} {amount} 會自動代換。\n")
+            cmd = await ask_text("賣出指令(預設 /stock)",
+                                 s.sell_command, max_len=50, allow_chinese=False)
+            if cmd is not None: s.sell_command = cmd
+            tmpl = await ask_text("賣出 param 樣板",
+                                  s.sell_param_template, max_len=200,
+                                  allow_chinese=False)
+            if tmpl is not None: s.sell_param_template = tmpl
             await wait_enter()
         elif choice == "H":
             await _show_stock_help()

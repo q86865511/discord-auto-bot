@@ -1087,6 +1087,30 @@ STOCKS_BODY = r"""
   <button class="stock-tab" data-pane="pane-all">📋 全部股票 <span class="badge" id="badge-all">0</span></button>
 </div>
 
+<!-- Trade modal -->
+<div id="trade-modal" style="
+  display:none; position:fixed; top:0; left:0; right:0; bottom:0;
+  background:rgba(0,0,0,0.7); z-index:1000;
+  align-items:center; justify-content:center;
+">
+  <div style="
+    background:#161b22; border:1px solid #30363d; border-radius:8px;
+    padding:20px; max-width:420px; width:90%;
+  ">
+    <h3 id="trade-title" style="margin:0 0 12px 0;">交易</h3>
+    <div id="trade-info" class="dim" style="font-size:13px; margin-bottom:12px;"></div>
+    <div class="field">
+      <label>數量(股)</label>
+      <input type="number" id="trade-amount" min="1" placeholder="輸入股數">
+    </div>
+    <div id="trade-warn" class="red" style="font-size:12px; margin-bottom:8px;"></div>
+    <div class="btn-row">
+      <button class="btn primary" id="trade-confirm">確認執行</button>
+      <button class="btn" onclick="closeTradeModal()">取消</button>
+    </div>
+  </div>
+</div>
+
 <div id="pane-overview" class="stock-pane active">
   <div class="grid">
     <div class="card">
@@ -1123,6 +1147,7 @@ STOCKS_BODY = r"""
       <thead><tr>
         <th>Symbol</th><th>股數</th><th>均買價</th>
         <th>現價</th><th>損益 %</th><th>建議</th><th>說明</th>
+        <th style="text-align:center">操作</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1140,6 +1165,7 @@ STOCKS_BODY = r"""
       <thead><tr>
         <th>Symbol</th><th>現價</th><th>短均</th><th>長均</th>
         <th>Score</th><th>說明</th>
+        <th style="text-align:center">操作</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1158,6 +1184,7 @@ STOCKS_BODY = r"""
       <thead><tr>
         <th>Symbol</th><th>持有</th><th>均買價</th><th>現價</th>
         <th>損益 %</th><th>Score</th><th>說明</th>
+        <th style="text-align:center">操作</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1194,11 +1221,96 @@ function appendCell(tr, text, cls) {
   td.textContent = text;
   tr.appendChild(td);
 }
+function appendActionCell(tr, action, symbol, suggested, max, enabled) {
+  const td = document.createElement('td');
+  td.style.textAlign = 'center';
+  if (!enabled) {
+    td.className = 'dim';
+    td.textContent = '需開啟交易';
+  } else {
+    const btn = document.createElement('button');
+    btn.className = 'btn ' + (action === 'buy' ? 'primary' : 'danger');
+    btn.style.padding = '4px 10px';
+    btn.style.fontSize = '12px';
+    btn.textContent = action === 'buy' ? '買進' : '賣出';
+    btn.onclick = () => openTradeModal(action, symbol, suggested, max);
+    td.appendChild(btn);
+  }
+  tr.appendChild(td);
+}
 function fmtTime(epoch) {
   if (!epoch) return '─';
   const d = new Date(epoch * 1000);
   return d.toLocaleTimeString();
 }
+
+// ── Trade modal ────────────────────────────────────────────────
+let _tradeCtx = null;   // {action, symbol, suggested, max}
+function openTradeModal(action, symbol, suggested, max) {
+  _tradeCtx = {action, symbol, suggested, max};
+  const isBuy = action === 'buy';
+  document.getElementById('trade-title').textContent =
+    (isBuy ? '🟢 買進' : '🔴 賣出') + ' ' + symbol;
+  document.getElementById('trade-info').innerHTML =
+    `動作:<b>${action.toUpperCase()}</b>  ` +
+    `標的:<b>${symbol}</b>  ` +
+    `<br>單次上限:${max} 股`;
+  const inp = document.getElementById('trade-amount');
+  inp.value = suggested || '';
+  inp.max = max;
+  document.getElementById('trade-warn').textContent = '';
+  document.getElementById('trade-modal').style.display = 'flex';
+  inp.focus();
+}
+function closeTradeModal() {
+  _tradeCtx = null;
+  document.getElementById('trade-modal').style.display = 'none';
+}
+document.getElementById('trade-confirm').addEventListener('click', async () => {
+  if (!_tradeCtx) return;
+  const amount = parseInt(document.getElementById('trade-amount').value, 10);
+  const warn = document.getElementById('trade-warn');
+  if (!amount || amount <= 0) {
+    warn.textContent = '⚠ 請輸入有效股數';
+    return;
+  }
+  if (amount > _tradeCtx.max) {
+    warn.textContent = `⚠ 超過單次上限 ${_tradeCtx.max}`;
+    return;
+  }
+  if (!confirm(
+    `確定 ${_tradeCtx.action.toUpperCase()} ${_tradeCtx.symbol} × ${amount} ?`
+  )) return;
+  const btn = document.getElementById('trade-confirm');
+  btn.disabled = true;
+  btn.textContent = '執行中...';
+  try {
+    const r = await fetch('/api/stock_trade', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Requested-With': 'fetch'},
+      body: JSON.stringify({action: _tradeCtx.action, symbol: _tradeCtx.symbol, amount}),
+    });
+    const d = await r.json();
+    showToast(d.message || (d.ok ? '完成' : '失敗'), !d.ok);
+    if (d.ok) {
+      closeTradeModal();
+      setTimeout(refresh, 500);   // 0.5 秒後重抓 portfolio
+    } else {
+      warn.textContent = d.message || '失敗';
+    }
+  } catch (e) {
+    warn.textContent = '網路錯誤: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '確認執行';
+  }
+});
+// ESC 關 modal
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('trade-modal').style.display === 'flex') {
+    closeTradeModal();
+  }
+});
 
 // Tabs
 document.getElementById('stock-tabs').addEventListener('click', e => {
@@ -1223,10 +1335,13 @@ async function refresh() {
         + 'poll 間隔 ' + d.config.poll_interval_min + ' 分鐘)';
       return;
     }
+    const tradeOn = !!d.config.trading_enabled;
+    const tradeMax = d.config.max_trade_amount || 1000;
     status.innerHTML = `最近一次 poll: <span class="value">${d.ts}</span>` +
       ` (${fmtTime(d.last_poll_ts)})  •  ` +
       `策略: MA${d.config.ma_short}/${d.config.ma_long}` +
-      `  •  獲利了結 +${d.config.take_profit_pct}% / 停損 -${d.config.stop_loss_pct}%`;
+      `  •  獲利了結 +${d.config.take_profit_pct}% / 停損 -${d.config.stop_loss_pct}%` +
+      `  •  交易 ${tradeOn ? '<span class="green">✓ 啟用</span>' : '<span class="dim">✗ 停用</span>'}`;
 
     const prices    = d.prices    || {};
     const holdings  = d.holdings  || {};
@@ -1328,6 +1443,9 @@ async function refresh() {
           appendCell(tr, '─');
           appendCell(tr, '─');
         }
+        // 操作:賣出按鈕(買更多走 buy 流程在 buy 分頁)
+        appendActionCell(tr, 'sell', sym, Math.min(h.shares, tradeMax),
+                         tradeMax, tradeOn);
         holdingsBody.appendChild(tr);
       });
     }
@@ -1353,6 +1471,8 @@ async function refresh() {
         const cls = ev.score >= 80 ? 'green' : 'yellow';
         appendCell(tr, ev.score + ' / 100', cls);
         appendCell(tr, ev.reason);
+        // 操作:買進(預設建議 = 1 股,使用者自己改)
+        appendActionCell(tr, 'buy', s.symbol, 1, tradeMax, tradeOn);
         buyBody.appendChild(tr);
       });
     }
@@ -1390,6 +1510,9 @@ async function refresh() {
         const cls = ev.score >= 80 ? 'red' : 'yellow';
         appendCell(tr, ev.score + ' / 100', cls);
         appendCell(tr, ev.reason);
+        // 操作:賣出全部(預設建議 = 持有全部,但要 ≤ tradeMax)
+        appendActionCell(tr, 'sell', s.symbol,
+                         Math.min(h.shares, tradeMax), tradeMax, tradeOn);
         sellBody.appendChild(tr);
       });
     }

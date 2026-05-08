@@ -165,6 +165,7 @@ class EmailConfig:
     notify_dead: bool = True
     notify_neko: bool = True
     notify_digest: bool = True
+    notify_stock_signal: bool = False    # 強股票訊號(buy/sell score ≥ 門檻)
     digest_hour: int = DEFAULT_DIGEST_HOUR
     dead_threshold: int = DEFAULT_DEAD_THRESHOLD
 
@@ -271,6 +272,17 @@ class StockConfig:
     signal_score_threshold: int = 80     # 評分 ≥ 此值才視為「強訊號」
     # 不再有 log_raw_text — parser 失敗時會自動寫到 logs/stock_debug.log
 
+    # ── 交易執行(預設關閉,操作真錢請審慎) ─────────────────────
+    trading_enabled: bool = False         # 開啟後 Dashboard 才會出現買賣按鈕
+    max_trade_amount: int = 1000          # 單次交易金額上限(防呆,避免一次 all-in)
+    # 指令樣板:每個 bot 命名不同,使用者可自行調整。{symbol} {amount} 會被代換
+    buy_command:        str = "/stock"
+    buy_param_template: str = "action:buy symbol:{symbol} amount:{amount}"
+    sell_command:        str = "/stock"
+    sell_param_template: str = "action:sell symbol:{symbol} amount:{amount}"
+    # 交易完成後等多久才視為「成功」(看回應穩定 N 秒)
+    trade_response_timeout_sec: float = 25.0
+
     def validate(self) -> list[str]:
         errs: list[str] = []
         if self.poll_interval_min < 1:
@@ -288,6 +300,16 @@ class StockConfig:
             if not (isinstance(s, str) and s and s.upper() == s
                     and all(c.isalnum() for c in s)):
                 errs.append(f"tracked_symbols 含異常 symbol: {s!r}")
+        # 交易參數
+        if self.max_trade_amount < 1:
+            errs.append("max_trade_amount 必須 ≥ 1")
+        if self.trading_enabled:
+            if "{symbol}" not in self.buy_param_template \
+                    or "{amount}" not in self.buy_param_template:
+                errs.append("buy_param_template 必須含 {symbol} 跟 {amount}")
+            if "{symbol}" not in self.sell_param_template \
+                    or "{amount}" not in self.sell_param_template:
+                errs.append("sell_param_template 必須含 {symbol} 跟 {amount}")
         return errs
 
 

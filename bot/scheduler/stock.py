@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from bot.core.state import BotState, interruptible_sleep
 from bot.discord.client import query_stock_text
+from bot.notifications.digest import notify_stock_signal
 from bot.stock.analysis import analyze_symbol, group_by_symbol
 from bot.stock.parser import (
     parse_portfolio,
@@ -65,13 +66,14 @@ async def stock_loop(
     await interruptible_sleep(state, 60)
 
     while not state.quit:
-        scfg = config_provider().stock
+        cfg = config_provider()
+        scfg = cfg.stock
         if not scfg.enabled:
             await interruptible_sleep(state, 60)
             continue
 
         try:
-            await _poll_once(page, state, scfg, db)
+            await _poll_once(page, state, cfg, db)
         except Exception:    # noqa: BLE001
             log.exception("stock loop 例外")
 
@@ -79,7 +81,8 @@ async def stock_loop(
         await interruptible_sleep(state, sleep_sec)
 
 
-async def _poll_once(page, state: BotState, scfg, db) -> None:
+async def _poll_once(page, state: BotState, cfg, db) -> None:
+    scfg = cfg.stock
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_prices: dict[str, float] = {}
 
@@ -165,7 +168,11 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
     by_sym = group_by_symbol(full_history)
 
     signals: list[dict] = []
-    for sym, cur_price in all_prices.items():
+    threshold = int(scfg.signal_score_threshold or 80)
+    # 本輪偵測到的強訊號 → 跟 state.stock_notified_signals 比對 → 寄 email
+    current_strong: dict[tuple[str, str], int] = {}
+
+    for sym, _cur_price in all_prices.items():
         series = by_sym.get(sym, [])
         held_info = holdings.get(sym, {"shares": 0, "avg_cost": 0})
         result = analyze_symbol(
@@ -176,8 +183,7 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
         )
         signals.append(result)
 
-        # 強訊號 → queue_log
-        threshold = int(scfg.signal_score_threshold or 80)
+        # 強訊號 → queue_log + (anti-spam) email
         for eval_key in ("buy_eval", "sell_eval"):
             ev = result.get(eval_key)
             if ev is None:
@@ -190,6 +196,23 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
                        f"@{ev.get('current', 0):.2f} — {ev.get('reason', '')[:80]}")
                 state.queue_log(msg)
                 log.info("stock signal: %s", msg)
+                key = (sym, sig)
+                current_strong[key] = sc
+                # Email anti-spam:只在「之前沒通知過 / 之前分數較低」時寄
+                already = state.stock_notified_signals.get(key)
+                if already is None or sc > already + 5:
+                    try:
+                        await notify_stock_signal(state, cfg, sym, sig, ev)
+                    except Exception:    # noqa: BLE001
+                        log.exception("notify_stock_signal 失敗")
+                    async with state.lock:
+                        state.stock_notified_signals[key] = sc
+
+    # 移除已不再強的訊號(訊號消失 → 下次再出現要重新通知)
+    async with state.lock:
+        for key in list(state.stock_notified_signals.keys()):
+            if key not in current_strong:
+                del state.stock_notified_signals[key]
 
     # ── 6. 把最新快照存到 state ────────────────────────────────────
     async with state.lock:

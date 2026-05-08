@@ -38,6 +38,7 @@ def start_dashboard_thread(
     config_provider: Callable[[], BotConfig],
     on_action: Callable[[str], dict],
     on_config_save_sync: Callable[[dict], dict],
+    on_stock_trade: Callable[[str, str, int], dict] | None = None,
     host: str | None = None,
     port: int | None = None,
     main_loop: asyncio.AbstractEventLoop | None = None,
@@ -53,7 +54,8 @@ def start_dashboard_thread(
         return None
 
     handler_cls = make_handler(state, config_provider, on_action,
-                                on_config_save_sync, main_loop=main_loop)
+                                on_config_save_sync, main_loop=main_loop,
+                                on_stock_trade=on_stock_trade)
     try:
         server = ReusableTCPServer((host, port), handler_cls)
     except OSError as e:

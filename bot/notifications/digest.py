@@ -265,6 +265,50 @@ async def notify_bigwin(
     )
 
 
+async def notify_stock_signal(
+    state: BotState, config: "BotConfig",
+    symbol: str, signal_type: str, eval_dict: dict,
+) -> None:
+    """強股票訊號 → email。signal_type ∈ {"buy", "sell"}。
+
+    呼叫端要負責 anti-spam(用 state.stock_notified_signals 追蹤)。
+    """
+    ecfg = config.email
+    if not (ecfg.enabled and getattr(ecfg, "notify_stock_signal", False)):
+        return
+
+    score = eval_dict.get("score", 0)
+    cur   = eval_dict.get("current", 0)
+    reason = eval_dict.get("reason", "")
+    emoji = "🟢" if signal_type == "buy" else "🔴"
+    action_zh = "買進" if signal_type == "buy" else "賣出"
+    subj = f"[Discord Bot] {emoji} 強{action_zh}訊號 {symbol} (score={score})"
+
+    body_lines = [
+        f"{emoji} 股票{action_zh}建議",
+        "",
+        f"標的:    {symbol}",
+        f"現價:    {cur:.4f}",
+        f"分數:    {score} / 100",
+        f"訊號類型: {signal_type.upper()}",
+        f"理由:    {reason}",
+    ]
+    if signal_type == "sell":
+        avg = eval_dict.get("avg_cost")
+        pp  = eval_dict.get("profit_pct")
+        if avg is not None:
+            body_lines.append(f"均買價:  {avg:.4f}")
+        if pp is not None:
+            body_lines.append(f"損益 %:   {pp:+.2f}%")
+    body_lines.extend([
+        "",
+        "⚠ 系統建議僅供參考,bot 不會自動執行交易。",
+        "  在 Dashboard /stocks 頁手動操作,或進主程式按 T 看完整分析。",
+    ])
+
+    await send_email(ecfg, subj, "\n".join(body_lines))
+
+
 async def notify_dead(
     state: BotState, config: "BotConfig",
     fail_count: int, context: str = "",

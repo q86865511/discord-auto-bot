@@ -254,6 +254,8 @@ def build_stocks_snapshot(state: BotState, config: BotConfig) -> dict:
             "stock_command":          scfg.stock_command,
             "portfolio_command":      scfg.portfolio_command,
             "tracked_symbols":        list(scfg.tracked_symbols),
+            "trading_enabled":        scfg.trading_enabled,
+            "max_trade_amount":       scfg.max_trade_amount,
         },
     }
 
