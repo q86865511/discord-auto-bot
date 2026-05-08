@@ -251,8 +251,9 @@ def build_stocks_snapshot(state: BotState, config: BotConfig) -> dict:
             "take_profit_pct":        scfg.take_profit_pct,
             "stop_loss_pct":          scfg.stop_loss_pct,
             "signal_score_threshold": scfg.signal_score_threshold,
-            "list_command":           scfg.list_command,
+            "stock_command":          scfg.stock_command,
             "portfolio_command":      scfg.portfolio_command,
+            "tracked_symbols":        list(scfg.tracked_symbols),
         },
     }
 

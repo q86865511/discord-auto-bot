@@ -248,26 +248,30 @@ class DashboardConfig:
 
 @dataclass
 class StockConfig:
-    """股票監視 + 建議。Phase 1-2:純建議,不會自動買賣。"""
+    """股票監視 + 建議。Phase 1-2:純建議,不會自動買賣。
+
+    工作流程:
+    1. 每 poll_interval_min 分鐘:跑 /portfolio,抓所有持股 + 現價
+    2. 對 tracked_symbols(使用者想觀察但沒持有的)各跑一次
+       /stock symbol:XXX 抓現價
+    3. 把所有價格存進 stock_prices DB,做技術分析建議
+    """
     enabled: bool = False
     poll_interval_min: float = 15.0   # 多久抓一次價格(分鐘)
-    # 指令名稱(不同 bot 命名不同 — 可改)
-    list_command:      str = "/stock"      # 查詢全部股價
-    list_param:        str = ""            # 額外參數(若需要)
-    portfolio_command: str = "/portfolio"  # 查持股
-    portfolio_param:   str = ""
-    # 自訂 regex(parser fallback 抓不到時用)
-    custom_price_pattern: str = ""    # symbol + price (2 groups)
-    # 分析參數
-    ma_short: int   = 5
-    ma_long:  int   = 20
-    take_profit_pct: float = 15.0    # 持股獲利 ≥ 此 % → 建議賣
-    stop_loss_pct:   float = 10.0    # 持股虧損 ≥ 此 % → 建議賣
-    # 通知
-    notify_strong_signal: bool = False    # 強訊號時 queue_log + email
-    signal_score_threshold: int = 80      # buy/sell signal score ≥ 此值才視為強訊號
+    # 指令名稱(可調,通常不用改)
+    portfolio_command: str = "/portfolio"   # 查所有持股
+    stock_command:     str = "/stock"       # 查單一股票(需 symbol param)
+    # 觀察清單:這些 symbol 即使沒持有也會抓價,讓 buy signal 能評估
+    # 例:["HOLO", "MAID", "SEGA"]
+    tracked_symbols: list[str] = field(default_factory=list)
+    # 分析參數(預設值對中等波動股已適用,不熟可不調)
+    ma_short: int   = 5      # 短均線(看近期趨勢):5 筆 = 75 分(15min × 5)
+    ma_long:  int   = 20     # 長均線(看大方向):20 筆 = 5 小時
+    take_profit_pct: float = 15.0    # 持股獲利達此 % → 建議賣(獲利了結)
+    stop_loss_pct:   float = 10.0    # 持股虧損達此 % → 建議賣(止損)
+    signal_score_threshold: int = 80     # 評分 ≥ 此值才視為「強訊號」
     # Debug
-    log_raw_text: bool = False    # True = 把每次 stock 回應 dump 到 log
+    log_raw_text: bool = False    # True = dump /portfolio 跟 /stock 原文到 log
 
     def validate(self) -> list[str]:
         errs: list[str] = []
@@ -281,6 +285,11 @@ class StockConfig:
             errs.append("stop_loss_pct 必須在 0~100")
         if not 0 <= self.signal_score_threshold <= 100:
             errs.append("signal_score_threshold 必須在 0~100")
+        # 衛生:tracked_symbols 應為大寫字母+數字
+        for s in self.tracked_symbols:
+            if not (isinstance(s, str) and s and s.upper() == s
+                    and all(c.isalnum() for c in s)):
+                errs.append(f"tracked_symbols 含異常 symbol: {s!r}")
         return errs
 
 

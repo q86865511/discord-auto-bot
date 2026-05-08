@@ -1,11 +1,13 @@
 """股票監視 + 建議 loop。
 
-每 N 分鐘:
-1. 送 /stock 查全部股價 → parse → 寫 DB stock_prices
-2. 送 /portfolio 查持股 → parse → 更新 stock_holdings
-3. 對每支股(含未持有)用歷史價格做 buy/sell 分析
-4. 強訊號(score ≥ threshold)寫進 state.queue_log + state.stock_signals
-   (Phase 1-2:不會自動下單 — 純建議)
+工作流程(每 poll_interval_min 分鐘一次):
+1. 送 /portfolio → 一次拿所有持股 + 現價,寫進 stock_prices + stock_holdings
+2. 對 tracked_symbols(使用者觀察名單,沒持有的)各送一次 /stock symbol:X
+   抓現價,寫 stock_prices
+3. 對所有有歷史的 symbol 做 buy/sell 分析
+4. 強訊號(score ≥ threshold)寫進 state.queue_log
+
+Phase 1-2 純建議,不自動下單。
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from typing import TYPE_CHECKING
 from bot.core.state import BotState, interruptible_sleep
 from bot.discord.client import query_stock_text
 from bot.stock.analysis import analyze_symbol, group_by_symbol
-from bot.stock.parser import parse_holdings, parse_stock_prices
+from bot.stock.parser import parse_portfolio, parse_stock_detail
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -36,7 +38,7 @@ async def stock_loop(
     on_config_save: Callable[["BotConfig"], Awaitable[None]],   # noqa: ARG001
     db: "Database",
 ) -> None:
-    # 啟動延遲(讓其他 loop 先穩定)
+    # 啟動延遲(讓其他 loop 先穩定 + 避免跟 /balance 撞在一起)
     await interruptible_sleep(state, 60)
 
     while not state.quit:
@@ -56,68 +58,87 @@ async def stock_loop(
 
 async def _poll_once(page, state: BotState, scfg, db) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    all_prices: dict[str, float] = {}
 
-    # ── 1. 抓股價 ───────────────────────────────────────────────────
-    log.info("stock: 查詢價格 (%s)", scfg.list_command)
-    text = await query_stock_text(
-        page, command=scfg.list_command, param=scfg.list_param,
-    )
-    if not text:
-        log.warning("stock: %s 無回應", scfg.list_command)
-        return
-
-    if scfg.log_raw_text:
-        log.info("stock raw text:\n%s", text[:2000])
-
-    custom = [scfg.custom_price_pattern] if scfg.custom_price_pattern else None
-    prices = parse_stock_prices(text, custom_patterns=custom)
-    if not prices:
-        log.warning("stock: 從回應抓不到任何 (symbol, price);"
-                    "請開啟 stock.log_raw_text 看原文 + 調整 custom_price_pattern")
-        return
-
-    log.info("stock: 抓到 %d 支股票 — %s", len(prices),
-             ", ".join(f"{s}=${p:.2f}" for s, p in list(prices.items())[:6]))
-    n = await db.append_stock_prices(ts, prices)
-    log.debug("stock: 寫入 %d 筆價格快照", n)
-
-    # ── 2. 抓持股(獨立指令) ───────────────────────────────────────
-    holdings = {}
-    pf_text = await query_stock_text(
-        page, command=scfg.portfolio_command, param=scfg.portfolio_param,
-    )
+    # ── 1. /portfolio:抓所有持股 + 現價 ───────────────────────────
+    log.info("stock: 查 portfolio (%s)", scfg.portfolio_command)
+    pf_text = await query_stock_text(page, command=scfg.portfolio_command)
+    holdings: dict[str, dict] = {}
     if pf_text:
         if scfg.log_raw_text:
             log.info("portfolio raw text:\n%s", pf_text[:2000])
-        holdings = parse_holdings(pf_text)
-        # 全部清掉重寫 — 保證已賣出的不會殘留
+        holdings = parse_portfolio(pf_text)
+        log.info("stock: portfolio 解析到 %d 支持股 — %s", len(holdings),
+                 ", ".join(f"{s}×{int(h['shares'])}@{h['current_price']:.2f}"
+                           for s, h in list(holdings.items())[:6]) or "(無)")
+        # 現價寫進 prices 累計
+        for sym, info in holdings.items():
+            if info.get("current_price", 0) > 0:
+                all_prices[sym] = info["current_price"]
+        # 持股快照 — 全部清掉重寫,確保已賣的不殘留
         await db.clear_stock_holdings()
         for sym, info in holdings.items():
             await db.upsert_stock_holding(
                 sym, info["shares"], info["avg_cost"], ts,
             )
-    log.info("stock: 持股 %d 支 — %s", len(holdings),
-             ", ".join(f"{s}x{int(h['shares'])}" for s, h in list(holdings.items())[:6])
-             or "(無)")
+    else:
+        log.warning("stock: %s 無回應", scfg.portfolio_command)
 
-    # ── 3. 分析每支股 ───────────────────────────────────────────────
-    # 拉最近 N=200 筆歷史(每 symbol)
-    full_history = await db.load_stock_history(limit=5000)
+    # ── 2. tracked_symbols:對沒持有的觀察清單,各送一次 /stock ────
+    held_set = set(holdings.keys())
+    tracked = [
+        s.upper().strip() for s in (scfg.tracked_symbols or [])
+        if s and s.strip()
+    ]
+    to_query = [s for s in tracked if s not in held_set]
+    for sym in to_query:
+        if state.quit:
+            return
+        try:
+            stock_text = await query_stock_text(
+                page, command=scfg.stock_command, param=f"symbol: {sym}",
+            )
+            if not stock_text:
+                log.warning("stock: %s symbol:%s 無回應", scfg.stock_command, sym)
+                continue
+            if scfg.log_raw_text:
+                log.info("stock %s raw text:\n%s", sym, stock_text[:1500])
+            detail = parse_stock_detail(stock_text, expected_symbol=sym)
+            if detail and detail.get("current_price", 0) > 0:
+                all_prices[detail["symbol"]] = detail["current_price"]
+                log.info("stock: %s @ %.2f", detail["symbol"], detail["current_price"])
+            else:
+                log.warning("stock: 無法解析 %s 的 detail", sym)
+        except Exception:    # noqa: BLE001
+            log.exception("stock: 查詢 %s 失敗", sym)
+        # 各支股之間小間隔,避免 rate-limited
+        await interruptible_sleep(state, 3)
+
+    # ── 3. 寫入 DB ─────────────────────────────────────────────────
+    if all_prices:
+        n = await db.append_stock_prices(ts, all_prices)
+        log.debug("stock: 寫入 %d 筆價格", n)
+    else:
+        log.warning("stock: 本次沒抓到任何價格 — 開 stock.log_raw_text 看原文")
+        return
+
+    # ── 4. 分析每支有歷史的股 ──────────────────────────────────────
+    full_history = await db.load_stock_history(limit=10000)
     by_sym = group_by_symbol(full_history)
 
     signals: list[dict] = []
-    for sym in prices:    # 只分析「目前還活著」的股票
+    for sym in all_prices:
         series = by_sym.get(sym, [])
-        held = holdings.get(sym, {"shares": 0, "avg_cost": 0})
+        held_info = holdings.get(sym, {"shares": 0, "avg_cost": 0})
         result = analyze_symbol(
             sym, series,
-            held_shares=held.get("shares", 0),
-            avg_cost=held.get("avg_cost", 0),
+            held_shares=held_info.get("shares", 0),
+            avg_cost=held_info.get("avg_cost", 0),
             cfg=scfg,
         )
         signals.append(result)
 
-        # 強訊號 → queue_log + ev counter
+        # 強訊號 → queue_log
         threshold = int(scfg.signal_score_threshold or 80)
         for eval_key in ("buy_eval", "sell_eval"):
             ev = result.get(eval_key)
@@ -132,11 +153,11 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
                 state.queue_log(msg)
                 log.info("stock signal: %s", msg)
 
-    # 把最新分析快照存到 state(讓 dashboard / UI 讀)
+    # ── 5. 把最新快照存到 state(讓 dashboard / UI 讀) ────────────
     async with state.lock:
         state.stock_last_snapshot = {
             "ts":       ts,
-            "prices":   prices,
+            "prices":   all_prices,
             "holdings": holdings,
             "signals":  signals,
         }

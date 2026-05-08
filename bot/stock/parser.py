@@ -1,129 +1,165 @@
-"""股票文字解析 — 從 Discord embed text 抓 symbol/price/holdings。
+"""股票文字解析 — 抓 Discord embed 中的 symbol/price/holdings。
 
-設計原則:
-- 不知道使用者環境的確切 /stock embed 格式 → 採用「多 pattern 容錯」
-- 解析失敗時 dump 完整 raw text 到 SLOT_DEBUG_LOG_PATH-ish 位置
-- 使用者可在 config.stock.parse_patterns 自訂 regex(可空,fallback 到內建)
+兩種來源:
+1. /portfolio embed —— 一次拿到全部持股 + 現價(最有用)
+2. /stock symbol:XXX embed —— 單一股票的詳細價格
 
-預設支援的格式(常見 economy bot):
-    AAPL: $123.45
-    AAPL  $123.45
-    [AAPL] 123.45
-    AAPL — 123.45
-    AAPL Price: 123.45
+實際格式範例(from 截圖):
+
+/portfolio:
+    HOLO (Hololive)
+        持有: 100 股
+        均買價: 479.44
+        現價: 476.95
+        市值: 47695.34
+        盈虧: -248.87
+
+/stock symbol: HOLO:
+    HOLO - Hololive
+    全球領先的虛擬偶像娛樂集團...
+    當前價格   基礎波動率   波動放大因子
+    476.95 油幣  0.007       1.20
+    ...
+    您持有 HOLO
+    100 股
+
+Autocomplete dropdown(打 `/stock symbol:` 時 Discord 顯示):
+    AZGC - 亞馬遜雲創 (36.76 油幣)
+    GCR - 嘎核心指標 (65.52 油幣)
+    HOLO - Hololive (476.95 油幣)
 """
 from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable
 
 log = logging.getLogger(__name__)
 
 
-# ── Symbol + price 解析 ─────────────────────────────────────────────
-# 多種 pattern,逐一嘗試。Symbol 是 1-6 個英數字大寫字母。
-# Price 接受帶 $、千分位逗號、小數點。
-DEFAULT_PRICE_PATTERNS = [
-    # AAPL: $123.45  或  AAPL: 123.45
-    re.compile(r"\b([A-Z]{1,6})\s*[:\-—]\s*\$?\s*([0-9][0-9,]*\.?\d*)"),
-    # [AAPL] 123.45
-    re.compile(r"\[([A-Z]{1,6})\]\s*\$?\s*([0-9][0-9,]*\.?\d*)"),
-    # AAPL Price: 123.45 或 AAPL price 123.45
-    re.compile(r"\b([A-Z]{1,6})\s+(?:price|Price)[\s:]+\$?\s*([0-9][0-9,]*\.?\d*)"),
-    # 純表格:AAPL  ⋮  123.45  (空白分隔,符號在前)
-    re.compile(r"^\s*([A-Z]{2,6})\s+\$?([0-9][0-9,]*\.?\d*)\s*$", re.MULTILINE),
-]
-
-
 def _parse_number(s: str) -> float | None:
+    if s is None:
+        return None
     try:
-        return float(s.replace(",", ""))
+        return float(str(s).replace(",", "").strip())
     except (ValueError, TypeError):
         return None
 
 
-def parse_stock_prices(
-    text: str, custom_patterns: Iterable[str] | None = None,
-) -> dict[str, float]:
-    """從整頁文字抓所有 (symbol, price) pair。
+# ── /portfolio 解析(主要來源) ──────────────────────────────────────
+# 每筆 holding entry 大致長這樣(順序固定):
+#   HOLO (Hololive)
+#       持有: 100 股
+#       均買價: 479.44
+#       現價: 476.95
+#       市值: 47695.34
+#       盈虧: -248.87
+#
+# 用「symbol header + 持有/均買價/現價」去抓
+# Symbol header:大寫字母 + 中括號公司名,後面接「持有: N 股」
+PORTFOLIO_HOLDING_BLOCK = re.compile(
+    r"([A-Z][A-Z0-9]{1,6})\s*\([^)]+\)"          # SYMBOL (Name)
+    r".*?持有[:\s]*([0-9]+(?:\.[0-9]+)?)\s*股"   # 持有: N 股
+    r".*?均買價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)"  # 均買價: X.XX
+    r".*?現價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)",   # 現價: Y.YY
+    re.DOTALL,
+)
 
-    custom_patterns:使用者可給額外 regex(每個須有 2 個 group:symbol, price)。
+
+def parse_portfolio(text: str) -> dict[str, dict]:
+    """從 /portfolio 抓所有持股,順便回傳現價。
+
+    回傳 {symbol: {shares, avg_cost, current_price}}。
     """
     if not text:
         return {}
-
-    patterns = list(DEFAULT_PRICE_PATTERNS)
-    if custom_patterns:
-        for pat in custom_patterns:
-            try:
-                patterns.append(re.compile(pat))
-            except re.error as e:
-                log.warning("使用者 custom pattern 編譯失敗 %r: %s", pat, e)
-
-    found: dict[str, float] = {}
-    for pat in patterns:
-        for m in pat.finditer(text):
-            sym = m.group(1).upper()
-            price = _parse_number(m.group(2))
-            if price is None or price <= 0:
-                continue
-            # 簡單衛生:濾掉一些誤抓的英文單字
-            if sym in {"USD", "USDT", "PRICE", "TOTAL", "BUY", "SELL", "STOCK"}:
-                continue
-            # 第一個 pattern 抓到的優先;後面 pattern 不覆蓋
-            found.setdefault(sym, price)
-
-    return found
+    out: dict[str, dict] = {}
+    for m in PORTFOLIO_HOLDING_BLOCK.finditer(text):
+        sym = m.group(1).upper()
+        shares = _parse_number(m.group(2))
+        avg = _parse_number(m.group(3))
+        cur = _parse_number(m.group(4))
+        if shares is None or shares <= 0:
+            continue
+        out[sym] = {
+            "shares":        shares,
+            "avg_cost":      avg or 0.0,
+            "current_price": cur or 0.0,
+        }
+    return out
 
 
-# ── Holdings 解析 ──────────────────────────────────────────────────────
-# 常見格式:
-#   AAPL: 10 shares @ $120.00
-#   AAPL × 10  ($120.00)
-#   AAPL: 10 stocks
-#   You own 10 AAPL @ $120
-DEFAULT_HOLDING_PATTERNS = [
-    # symbol: N shares @ avg
-    re.compile(
-        r"\b([A-Z]{1,6})[:\s]+(\d+(?:\.\d+)?)\s*(?:shares?|stocks?|股)"
-        r"(?:\s*@\s*\$?\s*([0-9][0-9,]*\.?\d*))?",
-        re.IGNORECASE,
-    ),
-    # symbol × N  ($avg)
-    re.compile(
-        r"\b([A-Z]{1,6})\s*[×x]\s*(\d+(?:\.\d+)?)"
-        r"(?:\s*\(\s*\$?\s*([0-9][0-9,]*\.?\d*)\s*\))?",
-    ),
-    # You own N AAPL @ $avg
-    re.compile(
-        r"(?:own|持有)\s+(\d+(?:\.\d+)?)\s+([A-Z]{1,6})"
-        r"(?:\s*@\s*\$?\s*([0-9][0-9,]*\.?\d*))?",
-    ),
-]
+# ── /stock symbol:XXX embed 解析 ─────────────────────────────────────
+# 抓 "當前價格\n.../n476.95 油幣" 這個 pattern
+# Embed 順序:當前價格 / 基礎波動率 / 波動放大因子,底下接 NUMBER 油幣 …
+# 所以 "當前價格" 後第一個出現的 "X 油幣" 就是現價
+STOCK_DETAIL_PRICE = re.compile(
+    r"當前價格[\s\S]{0,200}?([0-9,]+(?:\.[0-9]+)?)\s*油幣",
+)
+# 您持有 SYMBOL\n  N 股
+STOCK_DETAIL_HOLDING = re.compile(
+    r"您持有\s+([A-Z][A-Z0-9]{1,6})[\s\S]{0,80}?([0-9]+(?:\.[0-9]+)?)\s*股",
+)
+# Symbol/name header(在 embed 最上方),例如 "HOLO - Hololive"
+STOCK_DETAIL_HEADER = re.compile(
+    r"\b([A-Z][A-Z0-9]{1,6})\s*[-—–]\s*[一-鿿A-Za-z]"
+)
 
 
-def parse_holdings(text: str) -> dict[str, dict]:
-    """抓持股。回傳 {symbol: {shares, avg_cost or 0}}。"""
+def parse_stock_detail(text: str, expected_symbol: str | None = None) -> dict | None:
+    """從 /stock symbol:X 的 embed 抓 {symbol, price, held_shares}。
+
+    expected_symbol:呼叫端知道自己問的是哪支,用來校驗 + 萬一 header 抓不到時補。
+    """
+    if not text:
+        return None
+
+    price_m = STOCK_DETAIL_PRICE.search(text)
+    if not price_m:
+        return None
+    price = _parse_number(price_m.group(1))
+    if price is None or price <= 0:
+        return None
+
+    # Symbol:優先從 "您持有 SYM" 抓(最可靠);其次從 header 第一行
+    sym = None
+    held = 0.0
+    held_m = STOCK_DETAIL_HOLDING.search(text)
+    if held_m:
+        sym = held_m.group(1).upper()
+        held = _parse_number(held_m.group(2)) or 0.0
+    if not sym:
+        hdr = STOCK_DETAIL_HEADER.search(text)
+        if hdr:
+            sym = hdr.group(1).upper()
+    if not sym and expected_symbol:
+        sym = expected_symbol.upper()
+    if not sym:
+        return None
+
+    return {
+        "symbol":       sym,
+        "current_price": price,
+        "held_shares":   held,
+    }
+
+
+# ── /stock 的 autocomplete dropdown 解析 ─────────────────────────────
+# 格式:`AZGC - 亞馬遜雲創 (36.76 油幣)`
+# 用來一次抓全部 symbols 的「discovery」mode
+DROPDOWN_LINE = re.compile(
+    r"([A-Z][A-Z0-9]{1,6})\s*-\s*[^()]+?\s*\(([0-9,]+(?:\.[0-9]+)?)\s*油幣\)",
+)
+
+
+def parse_stock_dropdown(text: str) -> dict[str, float]:
+    """從 stock 自動完成下拉選單抓 {symbol: price}。一次拿全部。"""
     if not text:
         return {}
-    found: dict[str, dict] = {}
-    for pat in DEFAULT_HOLDING_PATTERNS:
-        for m in pat.finditer(text):
-            groups = m.groups()
-            # 第三個 pattern 是 (shares, sym, avg);其他是 (sym, shares, avg)
-            if pat is DEFAULT_HOLDING_PATTERNS[2]:
-                shares_str, sym, avg_str = groups[0], groups[1], groups[2]
-            else:
-                sym, shares_str, avg_str = groups[0], groups[1], groups[2]
-            sym = sym.upper()
-            if sym in {"USD", "USDT", "TOTAL", "STOCK"}:
-                continue
-            shares = _parse_number(shares_str)
-            if shares is None or shares <= 0:
-                continue
-            avg = _parse_number(avg_str) if avg_str else 0.0
-            existing = found.get(sym)
-            if existing is None or existing["shares"] < shares:
-                found[sym] = {"shares": shares, "avg_cost": avg or 0.0}
-    return found
+    out: dict[str, float] = {}
+    for m in DROPDOWN_LINE.finditer(text):
+        sym = m.group(1).upper()
+        price = _parse_number(m.group(2))
+        if price is None or price <= 0:
+            continue
+        out.setdefault(sym, price)
+    return out

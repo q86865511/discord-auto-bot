@@ -579,7 +579,7 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print(f"\n{'═'*52}\n  📈 股票監視 / 建議\n{'═'*52}")
         print()
         print("  ⓘ Phase 1-2:純建議,bot 不會自動下單。")
-        print("  ⓘ 若 parser 抓不到價格,開 [B] log_raw_text 看實際 embed 格式。")
+        print("  ⓘ 工作方式:每 poll 跑 /portfolio 抓持股+現價,加上你 [4] 設的觀察名單。")
         print()
 
         snap = state.stock_last_snapshot or {}
@@ -597,19 +597,22 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print("  [基本設定]")
         print(f"   [1] 啟用 / 停用:    {'✓ 啟用' if s.enabled else '✗ 停用'}")
         print(f"   [2] poll 間隔分鐘:  {s.poll_interval_min}")
-        print(f"   [3] 查價指令:       {s.list_command} {s.list_param}".rstrip())
-        print(f"   [4] 查持股指令:     {s.portfolio_command} {s.portfolio_param}".rstrip())
+        print(f"   [3] 查持股指令:     {s.portfolio_command}")
+        print(f"   [3a] 查單股指令:    {s.stock_command}  (用法: /stock symbol:HOLO)")
+        tracked_str = ", ".join(s.tracked_symbols) if s.tracked_symbols else "(空)"
+        if len(tracked_str) > 50: tracked_str = tracked_str[:50] + "..."
+        print(f"   [4] 觀察名單:       {tracked_str}")
         print()
-        print("  [分析參數]")
-        print(f"   [5] 短均線(MA):    {s.ma_short}")
-        print(f"   [6] 長均線(MA):    {s.ma_long}")
-        print(f"   [7] 獲利了結 %:     {s.take_profit_pct}")
-        print(f"   [8] 停損 %:         {s.stop_loss_pct}")
-        print(f"   [9] 強訊號分數門檻: {s.signal_score_threshold}")
+        print("  [分析參數]  ⓘ 不熟可不調,預設值對中等波動股已適用")
+        print(f"   [5] 短均線 ma_short: {s.ma_short:>4}  ← 看「近期」趨勢")
+        print(f"   [6] 長均線 ma_long:  {s.ma_long:>4}  ← 看「大方向」")
+        print(f"   [7] 獲利了結 %:      {s.take_profit_pct:>4}  ← 持股賺到此 % → 建議賣")
+        print(f"   [8] 停損 %:          {s.stop_loss_pct:>4}  ← 持股虧到此 % → 建議賣")
+        print(f"   [9] 強訊號門檻:      {s.signal_score_threshold:>4}  ← log 只顯示分數高於此的訊號")
         print()
-        print("  [Debug / 進階]")
-        print(f"   [A] log raw text:   {'✓' if s.log_raw_text else '✗'}  (parser 抓不到時開這個看原文)")
-        print(f"   [B] custom regex:   {s.custom_price_pattern or '(空)'}")
+        print("  [Debug]")
+        print(f"   [A] log_raw_text:   {'✓ 開' if s.log_raw_text else '✗ 關'}  (parser 抓不到時打開看 raw 文字)")
+        print(f"   [H] 名詞解釋(看不懂分析參數來這)")
         print()
         print("   [0] 返回主選單")
         choice = (await ainput("\n  選擇: ")).strip().upper()
@@ -625,40 +628,46 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             if v is not None: s.poll_interval_min = v
             await wait_enter()
         elif choice == "3":
-            v = await ask_text("查價指令(如 /stock 或 /stocks)",
-                               s.list_command, max_len=50, allow_chinese=False)
-            if v is not None: s.list_command = v
-            p = await ask_text("查價指令參數(可空)",
-                               s.list_param, max_len=100, allow_empty=True)
-            if p is not None: s.list_param = p
-            await wait_enter()
-        elif choice == "4":
-            v = await ask_text("查持股指令(如 /portfolio)",
+            v = await ask_text("查持股指令(預設 /portfolio)",
                                s.portfolio_command, max_len=50, allow_chinese=False)
             if v is not None: s.portfolio_command = v
-            p = await ask_text("查持股指令參數(可空)",
-                               s.portfolio_param, max_len=100, allow_empty=True)
-            if p is not None: s.portfolio_param = p
             await wait_enter()
+        elif choice == "3A":
+            v = await ask_text("查單股指令(預設 /stock,bot 會加 symbol:XXX)",
+                               s.stock_command, max_len=50, allow_chinese=False)
+            if v is not None: s.stock_command = v
+            await wait_enter()
+        elif choice == "4":
+            await _edit_tracked_symbols(s)
         elif choice == "5":
+            print("\n  ⓘ 短均線:近 N 筆價格的平均。N=5 + 15min poll = 看近 75 分鐘趨勢。")
+            print("    用途:配合 [6] 長均線判斷股價現在是「便宜」(現價<長均)還是「貴」。\n")
             v = await ask_int("短均線 N", s.ma_short, min_val=2, max_val=200)
             if v is not None: s.ma_short = v
             await wait_enter()
         elif choice == "6":
+            print("\n  ⓘ 長均線:近 N 筆價格的平均。N=20 + 15min poll = 看近 5 小時趨勢。")
+            print("    通常設成短均線的 3~4 倍。\n")
             v = await ask_int("長均線 N", s.ma_long, min_val=5, max_val=500)
             if v is not None: s.ma_long = v
             await wait_enter()
         elif choice == "7":
+            print("\n  ⓘ 獲利了結 %:當你的持股獲利達到此 % 時,系統會建議賣出鎖利。")
+            print("    例:設 15% → 你 100 元買的,漲到 115 元就建議賣。\n")
             v = await ask_float("獲利了結 %", s.take_profit_pct,
                                 min_val=0.5, max_val=1000.0)
             if v is not None: s.take_profit_pct = v
             await wait_enter()
         elif choice == "8":
+            print("\n  ⓘ 停損 %:當你的持股虧損達到此 % 時,系統會建議賣出止損。")
+            print("    例:設 10% → 你 100 元買的,跌到 90 元就建議賣。\n")
             v = await ask_float("停損 %", s.stop_loss_pct,
                                 min_val=0.5, max_val=100.0)
             if v is not None: s.stop_loss_pct = v
             await wait_enter()
         elif choice == "9":
+            print("\n  ⓘ 強訊號門檻:每個建議都有 0~100 分。只有分數 ≥ 此值才會寫進日誌面板。")
+            print("    設高(例 80)= 只看最強的訊號;設低(例 50)= 連弱的訊號也通知你。\n")
             v = await ask_int("強訊號分數門檻 (0~100)",
                               s.signal_score_threshold, min_val=0, max_val=100)
             if v is not None: s.signal_score_threshold = v
@@ -666,15 +675,110 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         elif choice == "A":
             s.log_raw_text = not s.log_raw_text
             print(f"  ✓ log_raw_text → {'開' if s.log_raw_text else '關'}")
+            print("    開了之後 stock loop 會把 /portfolio 跟 /stock 的回應原文")
+            print("    寫進 logs/bot.log,parser 失敗時可以給開發者看。")
             await wait_enter()
-        elif choice == "B":
-            print("  custom regex:必須有 2 個 group(symbol, price);留空用內建。")
-            print("  範例: \\b([A-Z]{1,6})\\s+\\$([0-9.]+)")
-            v = await ask_text("custom regex(留空清掉)",
-                               s.custom_price_pattern, max_len=200,
-                               allow_chinese=False, allow_empty=True)
-            if v is not None: s.custom_price_pattern = v
+        elif choice == "H":
+            await _show_stock_help()
+
+
+async def _edit_tracked_symbols(s) -> None:
+    """編輯觀察名單。觀察名單裡的 symbol 即使沒持有也會抓現價。"""
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*52}\n  📋 股票觀察名單\n{'═'*52}")
+        print()
+        print("  名單裡的股票即使沒持有,也會每 poll 抓一次現價,")
+        print("  讓系統可以分析「該不該買」。")
+        print()
+        print("  例:HOLO, MAID, SEGA")
+        print("  ⚠ 太多會增加每 poll 的指令數;每支股加 ~5 秒。")
+        print()
+        if s.tracked_symbols:
+            print("  目前清單:")
+            for i, sym in enumerate(s.tracked_symbols, 1):
+                print(f"    {i:2d}. {sym}")
+        else:
+            print("  (清單為空)")
+        print()
+        print("   [A] 新增 symbol")
+        print("   [R] 移除 symbol")
+        print("   [C] 全部清空")
+        print("   [0] 返回")
+        choice = (await ainput("\n  選擇: ")).strip().upper()
+        if choice == "0":
+            return
+        elif choice == "A":
+            v = await ask_text("symbol(例 HOLO)", "",
+                               max_len=10, allow_chinese=False, allow_empty=False)
+            if v:
+                v = v.upper().strip()
+                if v not in s.tracked_symbols:
+                    s.tracked_symbols.append(v)
+                    print(f"  ✓ 已加入 {v}")
+                else:
+                    print(f"  (已在清單中)")
             await wait_enter()
+        elif choice == "R":
+            v = await ask_text("要移除的 symbol", "",
+                               max_len=10, allow_chinese=False, allow_empty=False)
+            if v:
+                v = v.upper().strip()
+                if v in s.tracked_symbols:
+                    s.tracked_symbols.remove(v)
+                    print(f"  ✓ 已移除 {v}")
+                else:
+                    print(f"  ({v} 不在清單中)")
+            await wait_enter()
+        elif choice == "C":
+            from bot.ui.input_validation import ask_yes_no as _ayn
+            if await _ayn("確認清空整份觀察名單?"):
+                s.tracked_symbols.clear()
+                print("  ✓ 已清空")
+                await wait_enter()
+
+
+async def _show_stock_help() -> None:
+    """顯示分析參數的白話解釋。"""
+    os.system("cls")
+    print(f"\n{'═'*60}\n  📚 股票分析參數說明\n{'═'*60}")
+    print("""
+  📊 短均線 / 長均線 (Moving Average, MA)
+  ────────────────────────────────────────
+  把「最近 N 筆價格」平均起來,平滑掉短期雜訊看趨勢。
+  - 短均線(預設 5):反應快,看近期動向
+  - 長均線(預設 20):反應慢,看大方向
+
+  系統用兩條均線判斷:
+    現價 < 短均線 < 長均線  →  價格被低估,適合買進
+    現價 > 短均線 > 長均線  →  價格走高,適合賣出
+
+  💰 獲利了結 % (take_profit_pct)
+  ────────────────────────────────────────
+  你買進後股價上漲多少 % 時,系統會建議「賣出鎖利」。
+  預設 15% — 賺 15% 就跑,適合波動股。
+  保守的人可以設 8~10%;敢賭的人設 25~30%。
+
+  ⛔ 停損 % (stop_loss_pct)
+  ────────────────────────────────────────
+  你買進後股價下跌多少 % 時,系統建議「認賠賣出」。
+  預設 10% — 跌超過 10% 不抱了,避免越套越深。
+  注意:設太緊(< 5%)會頻繁被洗出場;太寬(> 20%)等於沒設。
+
+  🎯 強訊號門檻 (signal_score_threshold)
+  ────────────────────────────────────────
+  每個買賣建議都會給 0~100 分。只有分數高於此門檻
+  的「強訊號」才會寫進日誌面板提醒你。
+  預設 80 — 只看最強的;設 60 = 中等以上都通知。
+
+  💡 建議:
+  ────────────────────────────────────────
+  - 第一次用,全部保持預設值就好
+  - 開啟後跑幾天累積資料,Dashboard「📈 股票」分頁
+    會顯示建議,直接看就好
+  - 等你熟悉了再回來調這些參數
+""")
+    await wait_enter()
 
 
 # ── 子選單:版本更新 ──────────────────────────────────────────────────
