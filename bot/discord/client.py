@@ -409,6 +409,49 @@ async def do_transfer(page: "Page", target: str, amount: int) -> bool:
 
 
 # ── 股票 ──────────────────────────────────────────────────────────────
+async def _force_clear_input(page: "Page") -> None:
+    """積極清空 Discord input(包含 command chip)。
+
+    Discord 用 Slate.js 編輯器,單純按 Backspace 可能清不掉 command chip
+    (像 `/stock` 變成 chip 後)。三道保險:
+      1. Escape × 2(關 popup + 清 chip 焦點)
+      2. 點輸入框 + Ctrl+A + Delete(比 Backspace 強)
+      3. 透過 Slate API 強制清掉內容
+    """
+    try:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.15)
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.15)
+        input_box = page.locator('[data-slate-editor="true"]')
+        await input_box.click()
+        await asyncio.sleep(0.2)
+        await page.keyboard.press("Control+a")
+        await asyncio.sleep(0.1)
+        await page.keyboard.press("Delete")
+        await asyncio.sleep(0.2)
+        # 用 Slate API 把 editor 內容歸零(若 keyboard.delete 漏掉 chip)
+        try:
+            cleared = await page.evaluate("""
+                () => {
+                    const ed = document.querySelector('[data-slate-editor="true"]');
+                    if (!ed) return false;
+                    const text = (ed.textContent || '').trim();
+                    return text;
+                }
+            """)
+            if cleared:
+                # 還有殘留 → 再 Ctrl+A + Delete 一次
+                await page.keyboard.press("Control+a")
+                await asyncio.sleep(0.1)
+                await page.keyboard.press("Delete")
+                await asyncio.sleep(0.2)
+        except Exception:    # noqa: BLE001
+            pass
+    except Exception as e:    # noqa: BLE001
+        log.debug("_force_clear_input 例外: %s", e)
+
+
 async def discover_all_stocks(
     page: "Page", command: str = "/stock",
     autocomplete_wait_sec: float = 2.5,
@@ -416,25 +459,26 @@ async def discover_all_stocks(
     """讀 /stock 指令的 autocomplete 下拉清單,回傳整個 dropdown 文字。
 
     流程:
-    1. 點 input → 清空 → 打 `/stock`
-    2. Tab 確認指令(進入 symbol param)
-    3. 等 ~2.5 秒讓 Discord 載入 autocomplete options
-    4. 讀 [role="option"] 的 textContent
-    5. **Esc 取消輸入,絕對不送出**
-    6. 回傳整段文字給 parser
+    1. 完全清空 input
+    2. 點 input → 打 `/stock`
+    3. Tab 確認指令(進入 symbol param)
+    4. 等 ~2.5 秒讓 Discord 載入 autocomplete options
+    5. 讀 [role="option"] 的 textContent
+    6. **完全清空 input(關鍵!不然下個指令會壞)**
+    7. 回傳整段文字給 parser
 
     若任何階段失敗回傳 None。讀到的文字裡可能有非股票項(像 channel
     的 mention 提示),由 parser 用 regex 過濾。
     """
     async with command_lock:
         try:
+            # 進場先清乾淨
+            await _force_clear_input(page)
+            await asyncio.sleep(0.3)
+
             input_box = page.locator('[data-slate-editor="true"]')
             await input_box.click()
             await asyncio.sleep(random.uniform(0.3, 0.6))
-            # 確保 input 是空的
-            await page.keyboard.press("Control+a")
-            await page.keyboard.press("Backspace")
-            await asyncio.sleep(0.2)
 
             # 打 /stock 指令名(尾巴 1.5s 讓 command picker 出現)
             await human_type(page, command)
@@ -455,24 +499,17 @@ async def discover_all_stocks(
                 }
             """)
 
-            # 取消輸入(Esc 兩次:第一次關 popup,第二次清 param 焦點)
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.2)
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.2)
-            # 保險再清空 input(避免殘留 /stock)
-            await page.keyboard.press("Control+a")
-            await page.keyboard.press("Backspace")
-            await asyncio.sleep(0.2)
+            # 離場前必須完全清空,否則下個 /portfolio 會變成
+            # 「在 /stock chip 後面繼續打 portfolio」→ 整個指令掛掉
+            await _force_clear_input(page)
+            await asyncio.sleep(0.3)
 
             return text or None
         except Exception as e:    # noqa: BLE001
             log.warning("discover_all_stocks 失敗: %s", e)
-            # 嘗試清掉 input 避免殘留
+            # 失敗也要嘗試清乾淨
             try:
-                await page.keyboard.press("Escape")
-                await page.keyboard.press("Control+a")
-                await page.keyboard.press("Backspace")
+                await _force_clear_input(page)
             except Exception:    # noqa: BLE001
                 pass
             return None

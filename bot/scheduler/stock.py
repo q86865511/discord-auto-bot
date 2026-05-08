@@ -91,6 +91,9 @@ async def _poll_once(page, state: BotState, scfg, db) -> None:
     else:
         log.warning("stock: discovery 失敗(autocomplete 沒回應或 DOM 變了),fallback")
 
+    # 等 input UI 完全 settle 再下個指令(discover 後 input 容易有殘留 chip)
+    await interruptible_sleep(state, 2)
+
     # ── 2. /portfolio:抓持股(shares + avg_cost) ─────────────────
     log.info("stock: 查 portfolio (%s)", scfg.portfolio_command)
     pf_text = await query_stock_text(page, command=scfg.portfolio_command)

@@ -214,6 +214,38 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         dash_str = "[dim]停用[/dim]"
     t2.add_row("🌐 Dashboard", dash_str)
 
+    # ── 股票檢查倒數 ────────────────────────────────────────────
+    scfg = config.stock
+    if not scfg.enabled:
+        stock_str = "[dim]停用[/dim]"
+    else:
+        last_ts = state.stock_last_poll_ts
+        snap = state.stock_last_snapshot or {}
+        n_held = len(snap.get("holdings", {}))
+        n_disc = len(snap.get("prices", {}))
+        if last_ts is None:
+            stock_str = f"[yellow]啟動中... 啟動 60s 後第一次 poll[/yellow]"
+        else:
+            interval_sec = max(60, int(float(scfg.poll_interval_min) * 60))
+            next_poll = last_ts + interval_sec
+            remain = max(0, int(next_poll - time.time()))
+            mm, ss = divmod(remain, 60)
+            countdown = f"{mm}m {ss:02d}s" if mm > 0 else f"{ss}s"
+            # 強訊號計數
+            sigs = snap.get("signals", [])
+            n_sell = sum(1 for s in sigs
+                         if s.get("sell_eval", {}) and s["sell_eval"].get("signal") == "sell")
+            n_buy_strong = sum(1 for s in sigs
+                               if s.get("buy_eval", {}) and s["buy_eval"].get("score", 0) >= 80)
+            sig_part = ""
+            if n_sell > 0:
+                sig_part += f" [red]🔴賣{n_sell}[/red]"
+            if n_buy_strong > 0:
+                sig_part += f" [green]🟢買{n_buy_strong}[/green]"
+            stock_str = (f"倒數 [cyan]{countdown}[/cyan]  "
+                         f"持股 {n_held}/{n_disc}{sig_part}")
+    t2.add_row("📈 股票檢查", stock_str)
+
     # ── 進階策略狀態 ──────────────────────────────────────────────
     strats = []
     if gcfg.hourly_filter_enabled: strats.append("hourly")
@@ -266,13 +298,14 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         else "[bold]P[/bold] 暫停系統"
     )
     footer = Panel(
-        f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改系統設定  "
+        f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改設定  "
         f"{pause_label}  "
-        f"[bold]E[/bold] 匯出分析結果  "
-        f"[bold]S[/bold] 分析賭博機率  "
-        f"[bold]W[/bold] 開啟 Dashboard  "
-        f"[bold]K[/bold] 開啟 QR 圖  "
-        f"[bold]F[/bold] 重啟程式[/dim]",
+        f"[bold]E[/bold] 匯出  "
+        f"[bold]S[/bold] 拉霸分析  "
+        f"[bold]T[/bold] 股票分析  "
+        f"[bold]W[/bold] Dashboard  "
+        f"[bold]K[/bold] QR  "
+        f"[bold]F[/bold] 重啟[/dim]",
         style="dim", height=3,
     )
 

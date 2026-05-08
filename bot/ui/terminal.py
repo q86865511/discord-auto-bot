@@ -4,7 +4,8 @@
     bot.ui.keyboard       msvcrt 鍵盤 listener
     bot.ui.layout         Rich Live layout 組裝
     bot.ui.exports        E 鍵 — CSV / 圖表 / Slot 分析報告
-    bot.ui.analysis_view  S 鍵 — 終端內顯示分析
+    bot.ui.analysis_view  S 鍵 — 終端內顯示拉霸分析
+    bot.ui.stock_view     T 鍵 — 終端內顯示股票分析
 
 terminal.py 本身只剩 ui_loop。為了向後相容,常用符號直接 re-export。
 """
@@ -28,6 +29,7 @@ from bot.ui.exports import (
 )
 from bot.ui.keyboard import start_kb_listener
 from bot.ui.layout import build_layout, fmt_remaining
+from bot.ui.stock_view import show_stock_analysis
 
 if TYPE_CHECKING:
     from bot.core.config import BotConfig
@@ -42,6 +44,7 @@ __all__ = [
     "export_slot_analysis",
     "fmt_remaining",
     "show_slot_analysis",
+    "show_stock_analysis",
     "start_kb_listener",
     "ui_loop",
 ]
@@ -82,6 +85,12 @@ async def ui_loop(
                     live.stop()
                     try:
                         show_slot_analysis(state)
+                    finally:
+                        live.start()
+                elif key == "t":
+                    live.stop()
+                    try:
+                        show_stock_analysis(state)
                     finally:
                         live.start()
                 elif key == "f":

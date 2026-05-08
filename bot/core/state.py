@@ -102,6 +102,10 @@ class BotState:
     stock_last_snapshot: dict = field(default_factory=dict)
     stock_last_poll_ts:  float | None = None
 
+    # ── 終端 UI 檢視模式 ────────────────────────────────────────
+    # "main" = 預設賭博/系統面板;"stock" = 股票檢視
+    view_mode: str = "main"
+
     # ── 進階策略 runtime 狀態 ──────────────────────────────────────
     # Trailing stop 冷卻:用 epoch 秒數,跟 cooldown_until_ts 同模式
     trailing_cooldown_until_ts: float | None = None
