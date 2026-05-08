@@ -1040,30 +1040,101 @@ setInterval(refresh, 5000);
 
 
 STOCKS_BODY = r"""
-<div class="grid">
-  <div class="card" style="grid-column: 1/-1;">
-    <h3>📈 股票 — 即時建議</h3>
-    <p class="dim" style="font-size: 12px; margin: 4px 0 8px 0;">
-      ⚠ Phase 1-2:純建議,bot <strong>不會自動下單</strong>。所有買賣由你手動執行。
-      訊號是基於均線 / momentum 的啟發式分析,不構成投資建議。
-    </p>
-    <div id="stock-status" class="dim" style="font-size: 12px;"></div>
-  </div>
+<style>
+  .stock-tabs {
+    display: flex; gap: 4px; margin: 12px 0 16px 0;
+    border-bottom: 1px solid #30363d;
+  }
+  .stock-tab {
+    padding: 8px 14px; cursor: pointer;
+    border: 1px solid transparent; border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    background: transparent; color: #8b949e;
+    font-size: 14px;
+    margin-bottom: -1px;
+    user-select: none;
+  }
+  .stock-tab:hover { background: #21262d; color: #e6edf3; }
+  .stock-tab.active {
+    background: #161b22; color: #e6edf3;
+    border-color: #30363d;
+  }
+  .stock-tab .badge {
+    margin-left: 6px; padding: 0 6px; border-radius: 8px;
+    background: #1f6feb; color: white; font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stock-tab .badge.warn { background: #d29922; }
+  .stock-tab .badge.danger { background: #da3633; }
+  .stock-pane { display: none; }
+  .stock-pane.active { display: block; }
+</style>
 
-  <div class="card" style="grid-column: 1/-1;">
-    <h3>💼 目前持股</h3>
+<div class="card" style="margin-bottom: 12px;">
+  <h3 style="margin-top: 0;">📈 股票監控 — 即時建議</h3>
+  <p class="dim" style="font-size: 12px; margin: 4px 0 8px 0;">
+    ⚠ Phase 1-2:純建議,bot <strong>不會自動下單</strong>。買賣由你手動執行。
+    訊號為均線 / momentum / 持股獲利率啟發式分析,不構成投資建議。
+  </p>
+  <div id="stock-status" class="dim" style="font-size: 12px;"></div>
+</div>
+
+<div class="stock-tabs" id="stock-tabs">
+  <button class="stock-tab active" data-pane="pane-overview">📊 總覽</button>
+  <button class="stock-tab" data-pane="pane-holdings">💼 持股 <span class="badge" id="badge-hold">0</span></button>
+  <button class="stock-tab" data-pane="pane-buy">🟢 買進建議 <span class="badge" id="badge-buy">0</span></button>
+  <button class="stock-tab" data-pane="pane-all">📋 全部股票 <span class="badge" id="badge-all">0</span></button>
+</div>
+
+<div id="pane-overview" class="stock-pane active">
+  <div class="grid">
+    <div class="card">
+      <h3>💰 帳戶概況</h3>
+      <div class="row"><span class="label">已抓到股票數</span><span class="value" id="ov-discovered">─</span></div>
+      <div class="row"><span class="label">持股種類</span><span class="value" id="ov-held-count">─</span></div>
+      <div class="row"><span class="label">持股總市值</span><span class="value" id="ov-total-value">─</span></div>
+      <div class="row"><span class="label">未實現損益</span><span class="value" id="ov-total-pnl">─</span></div>
+    </div>
+    <div class="card">
+      <h3>🎯 訊號摘要</h3>
+      <div class="row"><span class="label">建議賣出 (持股)</span><span class="value red"   id="ov-sell-count">0</span></div>
+      <div class="row"><span class="label">強買進 (score ≥ 80)</span><span class="value green" id="ov-strong-buy">0</span></div>
+      <div class="row"><span class="label">中買進 (60~79)</span><span class="value yellow" id="ov-mid-buy">0</span></div>
+      <div class="row"><span class="label">最新 poll</span><span class="value dim" id="ov-poll-ts">─</span></div>
+    </div>
+    <div class="card" style="grid-column: 1/-1;">
+      <h3>🔥 即時 Top 3 建議</h3>
+      <table class="right-align" id="top-table">
+        <thead><tr>
+          <th>類型</th><th>Symbol</th><th>現價</th><th>分數</th><th>說明</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="no-top" class="dim" style="margin-top: 8px;"></div>
+    </div>
+  </div>
+</div>
+
+<div id="pane-holdings" class="stock-pane">
+  <div class="card">
+    <h3>💼 持股明細</h3>
     <table class="right-align" id="holdings-table">
       <thead><tr>
-        <th>Symbol</th><th>持有股數</th><th>平均成本</th>
+        <th>Symbol</th><th>股數</th><th>均買價</th>
         <th>現價</th><th>損益 %</th><th>建議</th><th>說明</th>
       </tr></thead>
       <tbody></tbody>
     </table>
     <div id="no-holdings" class="dim" style="margin-top: 8px;"></div>
   </div>
+</div>
 
-  <div class="card" style="grid-column: 1/-1;">
-    <h3>🟢 買進機會 (score ≥ 60)</h3>
+<div id="pane-buy" class="stock-pane">
+  <div class="card">
+    <h3>🟢 買進建議(score 由高至低)</h3>
+    <p class="dim" style="font-size: 12px; margin: 0 0 8px 0;">
+      score ≥ 70 = 強訊號(綠);60~69 = 中等(黃)。資料不足的股票不會列。
+    </p>
     <table class="right-align" id="buy-table">
       <thead><tr>
         <th>Symbol</th><th>現價</th><th>短均</th><th>長均</th>
@@ -1073,19 +1144,31 @@ STOCKS_BODY = r"""
     </table>
     <div id="no-buy" class="dim" style="margin-top: 8px;"></div>
   </div>
+</div>
 
-  <div class="card" style="grid-column: 1/-1;">
-    <h3>📊 全部股票報價</h3>
-    <table class="right-align" id="prices-table">
-      <thead><tr><th>Symbol</th><th>現價</th></tr></thead>
+<div id="pane-all" class="stock-pane">
+  <div class="card">
+    <h3>📋 全部股票(自動抓取)</h3>
+    <p class="dim" style="font-size: 12px; margin: 0 0 8px 0;">
+      點欄位排序。「持股」欄會標出你目前持有的股票。
+    </p>
+    <table class="right-align" id="all-table">
+      <thead><tr>
+        <th>Symbol</th><th>現價</th><th>持股</th>
+        <th>樣本數</th><th>買 score</th><th>賣 score</th>
+      </tr></thead>
       <tbody></tbody>
     </table>
   </div>
 </div>
+
 <div class="footer">自動刷新 10 秒</div>
 <script>
 function fmt(n) { if (n == null) return '─'; return Number(n).toLocaleString(); }
-function fmtFloat(n, d) { return n != null ? n.toFixed(d) : '─'; }
+function fmtFloat(n, d) {
+  if (n == null) return '─';
+  return Number(n).toFixed(d);
+}
 function appendCell(tr, text, cls) {
   const td = document.createElement('td');
   if (cls) td.className = cls;
@@ -1097,53 +1180,125 @@ function fmtTime(epoch) {
   const d = new Date(epoch * 1000);
   return d.toLocaleTimeString();
 }
+
+// Tabs
+document.getElementById('stock-tabs').addEventListener('click', e => {
+  if (!e.target.classList.contains('stock-tab')) return;
+  document.querySelectorAll('.stock-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.stock-pane').forEach(p => p.classList.remove('active'));
+  e.target.classList.add('active');
+  document.getElementById(e.target.dataset.pane).classList.add('active');
+});
+
 async function refresh() {
   try {
     const r = await fetch('/api/stocks');
     const d = await r.json();
     const status = document.getElementById('stock-status');
     if (!d.enabled) {
-      status.textContent = '⚠ 股票功能尚未啟用 — 請至 系統設定 → 股票 啟用';
+      status.textContent = '⚠ 股票功能尚未啟用 — 請至 系統設定 → [8] 股票監視 啟用';
       return;
     }
     if (!d.ts) {
-      status.textContent = '尚未取得報價(loop 啟動後 60s 開始 polling,'
+      status.textContent = '尚未取得報價(loop 啟動後 60s 開始第一次 poll,'
         + 'poll 間隔 ' + d.config.poll_interval_min + ' 分鐘)';
       return;
     }
-    status.textContent = `最近一次 poll: ${d.ts} (${fmtTime(d.last_poll_ts)})  •  `
-      + `策略: MA${d.config.ma_short}/${d.config.ma_long}  •  `
-      + `+${d.config.take_profit_pct}% / -${d.config.stop_loss_pct}%`;
+    status.innerHTML = `最近一次 poll: <span class="value">${d.ts}</span>` +
+      ` (${fmtTime(d.last_poll_ts)})  •  ` +
+      `策略: MA${d.config.ma_short}/${d.config.ma_long}` +
+      `  •  獲利了結 +${d.config.take_profit_pct}% / 停損 -${d.config.stop_loss_pct}%`;
 
-    // Holdings + sell signals
+    const prices    = d.prices    || {};
+    const holdings  = d.holdings  || {};
+    const signals   = d.signals   || [];
+    const heldSyms  = Object.keys(holdings);
+    const allSyms   = Object.keys(prices);
+
+    // ── 總覽 ─────────────────────────────────────────────────────
+    document.getElementById('ov-discovered').textContent = allSyms.length;
+    document.getElementById('ov-held-count').textContent = heldSyms.length;
+    let totalValue = 0, totalPnl = 0;
+    heldSyms.forEach(sym => {
+      const h = holdings[sym];
+      const cur = prices[sym] || h.current_price || 0;
+      totalValue += h.shares * cur;
+      totalPnl   += h.shares * (cur - h.avg_cost);
+    });
+    document.getElementById('ov-total-value').textContent = fmt(Math.round(totalValue));
+    const pnlEl = document.getElementById('ov-total-pnl');
+    pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + fmt(Math.round(totalPnl));
+    pnlEl.className = 'value ' + (totalPnl > 0 ? 'green' : (totalPnl < 0 ? 'red' : 'dim'));
+
+    const buyStrong = signals.filter(s => s.buy_eval && s.buy_eval.signal === 'buy'
+                                       && s.buy_eval.score >= 80).length;
+    const buyMid = signals.filter(s => s.buy_eval && s.buy_eval.score >= 60
+                                    && s.buy_eval.score < 80).length;
+    const sellCount = signals.filter(s => s.sell_eval && s.sell_eval.signal === 'sell').length;
+    document.getElementById('ov-sell-count').textContent = sellCount;
+    document.getElementById('ov-strong-buy').textContent = buyStrong;
+    document.getElementById('ov-mid-buy').textContent    = buyMid;
+    document.getElementById('ov-poll-ts').textContent    = fmtTime(d.last_poll_ts);
+    document.getElementById('badge-hold').textContent = heldSyms.length;
+    document.getElementById('badge-hold').className = heldSyms.length ? 'badge' : 'badge warn';
+    document.getElementById('badge-buy').textContent = buyStrong + buyMid;
+    document.getElementById('badge-buy').className = buyStrong > 0 ? 'badge' : 'badge warn';
+    document.getElementById('badge-all').textContent = allSyms.length;
+
+    // Top 3 建議:賣出 + 強買進混排,依 score 排序取 3
+    const topRows = [];
+    signals.forEach(s => {
+      if (s.sell_eval && s.sell_eval.signal === 'sell')
+        topRows.push({type:'賣', sym:s.symbol, ev:s.sell_eval, cls:'red'});
+      if (s.buy_eval && s.buy_eval.signal === 'buy' && s.buy_eval.score >= 70)
+        topRows.push({type:'買', sym:s.symbol, ev:s.buy_eval, cls:'green'});
+    });
+    topRows.sort((a, b) => b.ev.score - a.ev.score);
+    const topBody = document.querySelector('#top-table tbody');
+    topBody.innerHTML = '';
+    const noTop = document.getElementById('no-top');
+    if (topRows.length === 0) {
+      noTop.textContent = '— 目前沒有強買賣訊號';
+    } else {
+      noTop.textContent = '';
+      topRows.slice(0, 3).forEach(row => {
+        const tr = document.createElement('tr');
+        appendCell(tr, row.type, row.cls);
+        appendCell(tr, row.sym);
+        appendCell(tr, fmtFloat(row.ev.current, 2));
+        appendCell(tr, row.ev.score + ' / 100', row.cls);
+        appendCell(tr, row.ev.reason);
+        topBody.appendChild(tr);
+      });
+    }
+
+    // ── 持股 ─────────────────────────────────────────────────────
     const holdingsBody = document.querySelector('#holdings-table tbody');
     holdingsBody.innerHTML = '';
     const noHold = document.getElementById('no-holdings');
-    const heldSyms = Object.keys(d.holdings || {});
     if (heldSyms.length === 0) {
-      noHold.textContent = '— 目前沒有持股(或解析失敗)';
+      noHold.textContent = '— 目前沒有持股(或 /portfolio 解析失敗)';
     } else {
       noHold.textContent = '';
       heldSyms.forEach(sym => {
-        const h = d.holdings[sym];
-        const sig = (d.signals || []).find(s => s.symbol === sym);
+        const h = holdings[sym];
+        const sig = signals.find(s => s.symbol === sym);
         const sellEval = sig ? sig.sell_eval : null;
+        const cur = prices[sym] || h.current_price || 0;
         const tr = document.createElement('tr');
         appendCell(tr, sym);
         appendCell(tr, fmt(h.shares));
         appendCell(tr, fmtFloat(h.avg_cost, 2));
-        const cur = sellEval ? sellEval.current : (d.prices[sym] || null);
         appendCell(tr, fmtFloat(cur, 2));
-        if (sellEval && sellEval.profit_pct != null) {
-          const pct = sellEval.profit_pct;
+        if (h.avg_cost > 0) {
+          const pct = (cur - h.avg_cost) / h.avg_cost * 100;
           const cls = pct > 0 ? 'green' : (pct < 0 ? 'red' : 'dim');
           appendCell(tr, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', cls);
         } else {
           appendCell(tr, '─');
         }
         if (sellEval) {
-          let s = sellEval.signal;
-          let cls = 'dim';
+          let s = sellEval.signal, cls = 'dim';
           if (s === 'sell') cls = 'red';
           else if (s === 'buy_more') cls = 'green';
           appendCell(tr, s.toUpperCase() + ' (' + sellEval.score + ')', cls);
@@ -1156,15 +1311,15 @@ async function refresh() {
       });
     }
 
-    // Buy signals
+    // ── 買進建議 ────────────────────────────────────────────────
     const buyBody = document.querySelector('#buy-table tbody');
     buyBody.innerHTML = '';
     const noBuy = document.getElementById('no-buy');
-    const buyCandidates = (d.signals || [])
+    const buyCandidates = signals
       .filter(s => s.buy_eval && s.buy_eval.score >= 60)
       .sort((a, b) => b.buy_eval.score - a.buy_eval.score);
     if (buyCandidates.length === 0) {
-      noBuy.textContent = '— 目前沒有 score ≥ 60 的買進機會';
+      noBuy.textContent = '— 目前沒有 score ≥ 60 的買進機會(資料累積中或無利可圖)';
     } else {
       noBuy.textContent = '';
       buyCandidates.forEach(s => {
@@ -1174,21 +1329,36 @@ async function refresh() {
         appendCell(tr, fmtFloat(ev.current, 2));
         appendCell(tr, fmtFloat(ev.ma_short, 2));
         appendCell(tr, fmtFloat(ev.ma_long, 2));
-        const cls = ev.score >= 80 ? 'green' : (ev.score >= 70 ? 'yellow' : 'dim');
+        const cls = ev.score >= 80 ? 'green' : 'yellow';
         appendCell(tr, ev.score + ' / 100', cls);
         appendCell(tr, ev.reason);
         buyBody.appendChild(tr);
       });
     }
 
-    // All prices
-    const pricesBody = document.querySelector('#prices-table tbody');
-    pricesBody.innerHTML = '';
-    Object.entries(d.prices || {}).forEach(([sym, p]) => {
+    // ── 全部股票 ────────────────────────────────────────────────
+    const allBody = document.querySelector('#all-table tbody');
+    allBody.innerHTML = '';
+    // sort by current price desc as default
+    const sortedSyms = allSyms.slice().sort();
+    sortedSyms.forEach(sym => {
+      const cur = prices[sym] || 0;
+      const sig = signals.find(s => s.symbol === sym);
       const tr = document.createElement('tr');
       appendCell(tr, sym);
-      appendCell(tr, fmtFloat(p, 2));
-      pricesBody.appendChild(tr);
+      appendCell(tr, fmtFloat(cur, 2));
+      const heldCell = holdings[sym]
+        ? `${fmt(holdings[sym].shares)} @${fmtFloat(holdings[sym].avg_cost, 2)}`
+        : '─';
+      appendCell(tr, heldCell, holdings[sym] ? 'green' : 'dim');
+      appendCell(tr, sig ? sig.n_samples : '─');
+      const buyScore = sig && sig.buy_eval ? sig.buy_eval.score : null;
+      const sellScore = sig && sig.sell_eval ? sig.sell_eval.score : null;
+      appendCell(tr, buyScore != null ? buyScore : '─',
+                 buyScore >= 70 ? 'green' : (buyScore >= 60 ? 'yellow' : 'dim'));
+      appendCell(tr, sellScore != null ? sellScore : '─',
+                 sellScore >= 65 ? 'red' : 'dim');
+      allBody.appendChild(tr);
     });
   } catch (err) {
     console.error(err);

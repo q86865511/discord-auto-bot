@@ -409,6 +409,75 @@ async def do_transfer(page: "Page", target: str, amount: int) -> bool:
 
 
 # ── 股票 ──────────────────────────────────────────────────────────────
+async def discover_all_stocks(
+    page: "Page", command: str = "/stock",
+    autocomplete_wait_sec: float = 2.5,
+) -> str | None:
+    """讀 /stock 指令的 autocomplete 下拉清單,回傳整個 dropdown 文字。
+
+    流程:
+    1. 點 input → 清空 → 打 `/stock`
+    2. Tab 確認指令(進入 symbol param)
+    3. 等 ~2.5 秒讓 Discord 載入 autocomplete options
+    4. 讀 [role="option"] 的 textContent
+    5. **Esc 取消輸入,絕對不送出**
+    6. 回傳整段文字給 parser
+
+    若任何階段失敗回傳 None。讀到的文字裡可能有非股票項(像 channel
+    的 mention 提示),由 parser 用 regex 過濾。
+    """
+    async with command_lock:
+        try:
+            input_box = page.locator('[data-slate-editor="true"]')
+            await input_box.click()
+            await asyncio.sleep(random.uniform(0.3, 0.6))
+            # 確保 input 是空的
+            await page.keyboard.press("Control+a")
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(0.2)
+
+            # 打 /stock 指令名(尾巴 1.5s 讓 command picker 出現)
+            await human_type(page, command)
+            await asyncio.sleep(1.5)
+            # Tab → 確認 command,進入第一個 param(symbol)
+            await page.keyboard.press("Tab")
+            # 等 Discord 跟 bot 拿 autocomplete options
+            await asyncio.sleep(autocomplete_wait_sec)
+
+            # 讀 dropdown options
+            text = await page.evaluate("""
+                () => {
+                    const nodes = document.querySelectorAll('[role="option"]');
+                    return Array.from(nodes)
+                        .map(n => (n.textContent || '').trim())
+                        .filter(t => t)
+                        .join('\\n');
+                }
+            """)
+
+            # 取消輸入(Esc 兩次:第一次關 popup,第二次清 param 焦點)
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.2)
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.2)
+            # 保險再清空 input(避免殘留 /stock)
+            await page.keyboard.press("Control+a")
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(0.2)
+
+            return text or None
+        except Exception as e:    # noqa: BLE001
+            log.warning("discover_all_stocks 失敗: %s", e)
+            # 嘗試清掉 input 避免殘留
+            try:
+                await page.keyboard.press("Escape")
+                await page.keyboard.press("Control+a")
+                await page.keyboard.press("Backspace")
+            except Exception:    # noqa: BLE001
+                pass
+            return None
+
+
 async def query_stock_text(
     page: "Page", command: str = "/stock", param: str = "",
     timeout: float = 20.0, stability_sec: float = 1.5,

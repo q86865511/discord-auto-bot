@@ -579,7 +579,8 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print(f"\n{'═'*52}\n  📈 股票監視 / 建議\n{'═'*52}")
         print()
         print("  ⓘ Phase 1-2:純建議,bot 不會自動下單。")
-        print("  ⓘ 工作方式:每 poll 跑 /portfolio 抓持股+現價,加上你 [4] 設的觀察名單。")
+        print("  ⓘ 工作方式:讀 /stock 的 autocomplete 一次抓「全部股票」價格,")
+        print("     再跑 /portfolio 抓持股 + 平均成本。完全自動,不用設 symbol 清單。")
         print()
 
         snap = state.stock_last_snapshot or {}
@@ -598,10 +599,12 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print(f"   [1] 啟用 / 停用:    {'✓ 啟用' if s.enabled else '✗ 停用'}")
         print(f"   [2] poll 間隔分鐘:  {s.poll_interval_min}")
         print(f"   [3] 查持股指令:     {s.portfolio_command}")
-        print(f"   [3a] 查單股指令:    {s.stock_command}  (用法: /stock symbol:HOLO)")
-        tracked_str = ", ".join(s.tracked_symbols) if s.tracked_symbols else "(空)"
+        print(f"  [3A] 查單股指令:    {s.stock_command}  (用法: /stock symbol:HOLO)")
+        tracked_str = ", ".join(s.tracked_symbols) if s.tracked_symbols else "(空 — 用 auto-discovery)"
         if len(tracked_str) > 50: tracked_str = tracked_str[:50] + "..."
-        print(f"   [4] 觀察名單:       {tracked_str}")
+        print(f"   [4] 備援觀察清單:   {tracked_str}")
+        print("        ⓘ 通常不用填 — bot 會自動抓全部股票。")
+        print("           只在 auto-discovery 失敗時當 fallback 用。")
         print()
         print("  [分析參數]  ⓘ 不熟可不調,預設值對中等波動股已適用")
         print(f"   [5] 短均線 ma_short: {s.ma_short:>4}  ← 看「近期」趨勢")
