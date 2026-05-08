@@ -97,6 +97,22 @@ async def nekomusume_loop(
                     else "貓娘派遣已完成,請至 Discord 用 /nekomusume claim 領取。")
             await send_email(ecfg, "[Discord Bot] 貓娘派遣已完成", body)
 
+        # auto_claim 成功 → 立刻 re-query 對齊新派遣的剩餘時間
+        # (不然 state 還停在 not_dispatching,UI 顯示「待領取」直到下次 poll)
+        if auto_claimed:
+            try:
+                new_st, new_min = await _query_status()
+                async with state.lock:
+                    state.neko_status = new_st
+                    if new_st == "dispatching" and new_min is not None:
+                        state.neko_deadline_ts = time.time() + new_min * 60
+                        log.info("auto_claim 後 re-query:派遣中,剩 %d 分鐘", new_min)
+                    else:
+                        state.neko_deadline_ts = None
+                        log.warning("auto_claim 後 re-query 沒看到派遣中狀態 (%s)", new_st)
+            except Exception:    # noqa: BLE001
+                log.exception("auto_claim 後 re-query 失敗")
+
     while not state.quit:
         await wait_while_paused(state)
         if state.quit:
@@ -147,7 +163,9 @@ async def nekomusume_loop(
             else:
                 log.info("貓娘狀態: %s(閒置)", new_status)
 
-        last_status = new_status
+        # auto_claim 可能已經把狀態翻回 dispatching → 用 state.neko_status
+        # 才對(不然 last_status 會卡在 not_dispatching,下次完成不會觸發通知)
+        last_status = state.neko_status or new_status
 
         if state.neko_deadline_ts is None:
             base_min = float(ncfg.check_interval_min or DEFAULT_NEKO_INTERVAL_MIN)

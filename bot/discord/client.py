@@ -436,6 +436,12 @@ async def query_stock_text(
     """送 stock 查詢指令並回傳整頁文字。caller 自行 parse。
 
     `command` 可以是 /stock / /portfolio 等;`param` 是參數(可空)。
+
+    偵測新回應的兩條路:
+      A. _stock_reply_detected:看 stock keyword 計數有沒有增加(快、準)
+      B. fallback:整頁文字長度有顯著變化(>200 字)且穩定 stability_sec 秒
+         — 對付 ephemeral message 替換掉舊的、keyword 計數不變的情況
+    任一路成立都接受。
     """
     async with command_lock:
         try:
@@ -443,6 +449,7 @@ async def query_stock_text(
         except Exception as e:    # noqa: BLE001
             log.warning("讀取 before_text 失敗(stock): %s", e)
             return None
+        before_len = len(before_text)
 
         await _send_slash_command(page, command, param)
 
@@ -456,15 +463,26 @@ async def query_stock_text(
             except Exception as e:    # noqa: BLE001
                 log.debug("stock 輪詢失敗: %s", e)
                 continue
-            if not _stock_reply_detected(before_text, cur):
+
+            # 路 A:keyword 偵測
+            kw_detected = _stock_reply_detected(before_text, cur)
+            # 路 B:整頁文字有顯著變化(替換 / 新增)
+            len_changed = abs(len(cur) - before_len) >= 200
+
+            if not (kw_detected or len_changed):
                 continue
+
             if cur != last_text:
                 last_text = cur
                 last_change = time.time()
                 continue
             if time.time() - last_change >= stability_sec:
                 return cur
+
+        # timeout — 但若 last_text 已抓到變化,還是回傳(別當沒回應)
         if last_text is not None:
+            log.info("%s %s timeout 但有抓到 %d 字差,仍回傳",
+                     command, param, abs(len(last_text) - before_len))
             return last_text
         log.warning("%s %s 在 %.0fs 內未取得新回應", command, param, timeout)
         return None
