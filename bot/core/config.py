@@ -271,24 +271,7 @@ class StockConfig:
     stop_loss_pct:   float = 10.0    # 持股虧損達此 % → 建議賣(止損)
     signal_score_threshold: int = 80     # 評分 ≥ 此值才視為「強訊號」
     # 不再有 log_raw_text — parser 失敗時會自動寫到 logs/stock_debug.log
-
-    # ── 交易執行(預設關閉,操作真錢請審慎) ─────────────────────
-    # 米米警察是 button-based 流程:/stock symbol:X → 點「操作股票」→
-    # modal 下拉選買/賣 → 輸入股數 → 點「提交」→ 確認 embed → 點「確認」
-    # 所以不再用 param 樣板,改用 button label 設定(不同 bot 可能用不同字)
-    trading_enabled: bool = False         # 開啟後 Dashboard 才會出現買賣按鈕
-    max_trade_amount: int = 1000          # 單次交易股數上限(防呆)
-    # 步驟 1:embed 上的「操作」按鈕
-    trade_open_button:    str = "操作股票"
-    # 步驟 2:modal 下拉選單裡的選項
-    trade_buy_option:     str = "買入股票"
-    trade_sell_option:    str = "賣出股票"
-    # 步驟 3:modal 的 submit 按鈕(Discord 預設 "提交")
-    trade_submit_button:  str = "提交"
-    # 步驟 4:確認 embed 上的按鈕
-    trade_confirm_button: str = "確認"
-    # 整個流程的超時(button-based 較慢,給長一點)
-    trade_response_timeout_sec: float = 60.0
+    # 不再有 trading 自動化 — Discord modal 不夠穩定,bot 改成「只通知,不下單」
 
     def validate(self) -> list[str]:
         errs: list[str] = []
@@ -307,15 +290,6 @@ class StockConfig:
             if not (isinstance(s, str) and s and s.upper() == s
                     and all(c.isalnum() for c in s)):
                 errs.append(f"tracked_symbols 含異常 symbol: {s!r}")
-        # 交易參數
-        if self.max_trade_amount < 1:
-            errs.append("max_trade_amount 必須 ≥ 1")
-        if self.trading_enabled:
-            for fld in ("trade_open_button", "trade_buy_option",
-                        "trade_sell_option", "trade_submit_button",
-                        "trade_confirm_button"):
-                if not getattr(self, fld, "").strip():
-                    errs.append(f"trading 啟用但 {fld} 為空")
         return errs
 
 

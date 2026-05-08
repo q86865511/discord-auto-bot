@@ -53,7 +53,6 @@ def make_handler(
     on_action: Callable[[str], dict],
     on_config_save_sync: Callable[[dict], dict],
     main_loop: asyncio.AbstractEventLoop | None = None,
-    on_stock_trade: Callable[[str, str, int], dict] | None = None,
 ):
     """工廠 — 動態產出 BaseHTTPRequestHandler subclass。
 
@@ -213,47 +212,6 @@ def make_handler(
                     self._json(result)
                 except Exception as e:    # noqa: BLE001
                     log.exception("action %s 失敗", action)
-                    self._json({"ok": False, "message": f"錯誤: {e}"}, code=500)
-                return
-
-            if path == "/api/stock_trade":
-                # POST {action: buy/sell, symbol, amount}
-                length = int(self.headers.get("Content-Length", "0") or 0)
-                if length > 1024:    # 1KB 上限(防呆)
-                    self._json({"ok": False, "message": "payload 過大"}, code=413)
-                    return
-                raw = self.rfile.read(length) if length else b""
-                try:
-                    payload = json.loads(raw.decode("utf-8")) if raw else {}
-                except json.JSONDecodeError as e:
-                    self._json({"ok": False, "message": f"JSON 錯誤: {e}"}, code=400)
-                    return
-                act    = str(payload.get("action", "")).lower().strip()
-                symbol = str(payload.get("symbol", "")).upper().strip()
-                amount = payload.get("amount", 0)
-                # 基本驗證(handler 層擋明顯錯誤;真正驗證在 main loop)
-                if act not in ("buy", "sell"):
-                    self._json({"ok": False, "message": "action 必須是 buy 或 sell"}, code=400)
-                    return
-                if not symbol or not symbol.isalnum():
-                    self._json({"ok": False, "message": "symbol 格式錯"}, code=400)
-                    return
-                try:
-                    amount = int(amount)
-                except (ValueError, TypeError):
-                    self._json({"ok": False, "message": "amount 必須是整數"}, code=400)
-                    return
-                if amount <= 0:
-                    self._json({"ok": False, "message": "amount 必須 > 0"}, code=400)
-                    return
-                if on_stock_trade is None:
-                    self._json({"ok": False, "message": "trade handler 未掛載"}, code=500)
-                    return
-                try:
-                    result = on_stock_trade(act, symbol, amount)
-                    self._json(result)
-                except Exception as e:    # noqa: BLE001
-                    log.exception("stock_trade %s %s × %d 失敗", act, symbol, amount)
                     self._json({"ok": False, "message": f"錯誤: {e}"}, code=500)
                 return
 

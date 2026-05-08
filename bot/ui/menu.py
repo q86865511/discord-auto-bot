@@ -622,20 +622,11 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print(f"   [8] 停損 %:          {s.stop_loss_pct:>4}  ← 持股虧到此 % → 建議賣")
         print(f"   [9] 強訊號門檻:      {s.signal_score_threshold:>4}  ← log 只顯示分數高於此的訊號")
         print()
-        print("  [⚠️  交易執行(預設關)]")
-        trade_state = "✓ 已啟用 — Dashboard 會出現買賣按鈕" if s.trading_enabled else "✗ 停用"
-        print(f"   [J] Dashboard 交易:  {trade_state}")
-        print(f"   [K] 單次股數上限:    {s.max_trade_amount} 股")
-        print(f"   [L] Embed 操作鈕:    「{s.trade_open_button}」")
-        print(f"   [M] 買入選項文字:    「{s.trade_buy_option}」")
-        print(f"   [N] 賣出選項文字:    「{s.trade_sell_option}」")
-        print(f"   [O] Modal 提交鈕:    「{s.trade_submit_button}」")
-        print(f"   [P] 確認按鈕文字:    「{s.trade_confirm_button}」")
-        print()
         print("  [說明]")
         print("   [H] 名詞解釋(看不懂分析參數來這)")
         print("   ⓘ parser 抓不到時會自動把 raw 文字寫到 logs/stock_debug.log")
         print("   ⓘ 強訊號 email 通知:在 [3] Email → [B] 開")
+        print("   ⓘ 本 bot 只通知,不自動下單 — 看到訊號自己手動買賣")
         print()
         print("   [0] 返回主選單")
         choice = (await ainput("\n  選擇: ")).strip().upper()
@@ -694,62 +685,6 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             v = await ask_int("強訊號分數門檻 (0~100)",
                               s.signal_score_threshold, min_val=0, max_val=100)
             if v is not None: s.signal_score_threshold = v
-            await wait_enter()
-        elif choice == "J":
-            print("\n  ⚠ 啟用後 Dashboard 會出現買賣按鈕,點擊會真正送出 /stock 指令")
-            print("    對你的帳戶執行交易。確定要啟用嗎?(預設關閉是為了安全)")
-            print()
-            from bot.ui.input_validation import ask_yes_no as _ayn
-            confirm = await _ayn(
-                f"目前 {'已啟用' if s.trading_enabled else '已停用'},"
-                f"要切換到 {'停用' if s.trading_enabled else '啟用'} 嗎?"
-            )
-            if confirm:
-                s.trading_enabled = not s.trading_enabled
-                print(f"  ✓ Dashboard 交易 → {'啟用' if s.trading_enabled else '停用'}")
-            await wait_enter()
-        elif choice == "K":
-            print("\n  ⓘ 單次最大金額上限,防止手滑一次下太多。")
-            print("    Dashboard 上的買賣按鈕會強制 amount ≤ 此值。\n")
-            v = await ask_int("單次上限(股數)", s.max_trade_amount,
-                              min_val=1, max_val=100000)
-            if v is not None: s.max_trade_amount = v
-            await wait_enter()
-        elif choice == "L":
-            print("\n  ⓘ /stock 回應 embed 上的「操作」按鈕文字。")
-            print("    bot 用「操作股票」,有些 bot 可能用「Trade」之類。\n")
-            v = await ask_text("Embed 操作按鈕文字",
-                               s.trade_open_button, max_len=30,
-                               allow_chinese=True, allow_empty=False)
-            if v is not None: s.trade_open_button = v
-            await wait_enter()
-        elif choice == "M":
-            print("\n  ⓘ Modal 下拉選單中「買入」選項的文字。\n")
-            v = await ask_text("買入選項文字",
-                               s.trade_buy_option, max_len=30,
-                               allow_chinese=True, allow_empty=False)
-            if v is not None: s.trade_buy_option = v
-            await wait_enter()
-        elif choice == "N":
-            print("\n  ⓘ Modal 下拉選單中「賣出」選項的文字。\n")
-            v = await ask_text("賣出選項文字",
-                               s.trade_sell_option, max_len=30,
-                               allow_chinese=True, allow_empty=False)
-            if v is not None: s.trade_sell_option = v
-            await wait_enter()
-        elif choice == "O":
-            print("\n  ⓘ Modal 上提交按鈕的文字。Discord 預設「提交」,有些 bot 用「Submit」。\n")
-            v = await ask_text("Modal 提交按鈕文字",
-                               s.trade_submit_button, max_len=30,
-                               allow_chinese=True, allow_empty=False)
-            if v is not None: s.trade_submit_button = v
-            await wait_enter()
-        elif choice == "P":
-            print("\n  ⓘ 二階確認 embed 上的「確認」按鈕文字。\n")
-            v = await ask_text("確認按鈕文字",
-                               s.trade_confirm_button, max_len=30,
-                               allow_chinese=True, allow_empty=False)
-            if v is not None: s.trade_confirm_button = v
             await wait_enter()
         elif choice == "H":
             await _show_stock_help()

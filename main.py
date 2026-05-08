@@ -397,57 +397,6 @@ async def main() -> int:
                 log.exception("on_config_save_sync 失敗")
                 return {"ok": False, "message": f"錯誤: {e}"}
 
-        def on_stock_trade(action: str, symbol: str, amount: int) -> dict:
-            """Dashboard thread → 在 main loop 跑 execute_stock_trade。
-
-            安全檢查層 — 真正的指令送出在 Playwright 那邊(playwright.async_api
-            是 single-loop only,所以必須用 run_coroutine_threadsafe 拋進 main)。
-            """
-            try:
-                cur = config_holder[0].stock
-                if not cur.enabled:
-                    return {"ok": False, "message": "股票功能未啟用"}
-                if not cur.trading_enabled:
-                    return {"ok": False, "message": "交易功能未啟用 — C → [8] [J] 開啟"}
-                if amount > cur.max_trade_amount:
-                    return {"ok": False,
-                            "message": f"股數 {amount} 超過上限 {cur.max_trade_amount}"}
-
-                from bot.discord.client import execute_stock_trade
-
-                async def _run():
-                    return await execute_stock_trade(
-                        page, action, symbol, amount,
-                        open_button=cur.trade_open_button,
-                        buy_option=cur.trade_buy_option,
-                        sell_option=cur.trade_sell_option,
-                        submit_button=cur.trade_submit_button,
-                        confirm_button=cur.trade_confirm_button,
-                        stock_command=cur.stock_command,
-                        timeout=float(cur.trade_response_timeout_sec or 60.0),
-                    )
-                fut = asyncio.run_coroutine_threadsafe(_run(), loop)
-                ok, msg = fut.result(timeout=60)
-                # 寫獨立 trade log(audit trail)
-                try:
-                    os.makedirs(LOG_DIR, exist_ok=True)
-                    from datetime import datetime as _dt
-                    with open(os.path.join(LOG_DIR, "trading.log"),
-                              "a", encoding="utf-8") as f:
-                        f.write(f"{_dt.now():%Y-%m-%d %H:%M:%S}  "
-                                f"{action.upper()} {symbol} × {amount}  "
-                                f"→ {'OK' if ok else 'FAIL'}: {msg}\n")
-                except OSError:
-                    pass
-                state.queue_log(
-                    f"{'✅' if ok else '❌'} 📡 Dashboard 交易: "
-                    f"{action.upper()} {symbol} × {amount} — {msg[:60]}"
-                )
-                return {"ok": ok, "message": msg}
-            except Exception as e:    # noqa: BLE001
-                log.exception("on_stock_trade 失敗")
-                return {"ok": False, "message": f"錯誤: {e}"}
-
         dashboard_thread = None
         if config.dashboard.enabled:
             try:
@@ -455,7 +404,6 @@ async def main() -> int:
                 dashboard_thread = start_dashboard_thread(
                     state, config_provider, on_action, on_config_save_sync,
                     main_loop=loop,    # ← 傳入 main loop 以便 thread-safe snapshot
-                    on_stock_trade=on_stock_trade,
                 )
             except Exception:    # noqa: BLE001
                 log.exception("dashboard 啟動失敗")
