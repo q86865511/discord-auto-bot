@@ -144,8 +144,10 @@ async def _poll_once(page, state: BotState, cfg, db) -> None:
             if state.quit:
                 return
             try:
+                # Tab 後 cursor 已在 symbol 參數欄,直接打 value(打 "symbol:..."
+                # 會變成 /stock symbol: symbol:X — bot 看不懂)
                 stock_text = await query_stock_text(
-                    page, command=scfg.stock_command, param=f"symbol: {sym}",
+                    page, command=scfg.stock_command, param=sym,
                 )
                 if stock_text:
                     detail = parse_stock_detail(stock_text, expected_symbol=sym)

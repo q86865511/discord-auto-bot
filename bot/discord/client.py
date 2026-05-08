@@ -486,7 +486,9 @@ async def execute_stock_trade(
     async with command_lock:
         # ── Step 1: /stock symbol:X ─────────────────────────────────
         try:
-            await _send_slash_command(page, stock_command, f"symbol:{symbol}")
+            # Tab 後 cursor 已在 symbol 參數欄位裡,直接打 value 即可
+            # (不要打「symbol:HOLO」會變成 /stock symbol: symbol:HOLO)
+            await _send_slash_command(page, stock_command, symbol)
         except Exception as e:    # noqa: BLE001
             return False, f"step 1 送 /stock 失敗: {e}"
 
