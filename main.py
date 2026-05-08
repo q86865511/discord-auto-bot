@@ -290,20 +290,56 @@ async def main() -> int:
         context = await browser.new_context(storage_state=STORAGE_STATE_PATH)
         page = await context.new_page()
 
+        # navigate 失敗計數器(跨 reboot 持久化)— 防止 wizard 無限循環。
+        # session 過期 / 找不到輸入框 / 其他暫時性網路問題 都會觸發 reboot,
+        # 連續 3 次仍失敗就停下來,讓使用者手動排查。
+        _NAV_FAIL_KEY = "consecutive_nav_failures"
+        try:
+            nav_fails_str = await db.get_meta(_NAV_FAIL_KEY) or "0"
+            nav_fails = int(nav_fails_str) if nav_fails_str.isdigit() else 0
+        except (TypeError, ValueError):
+            nav_fails = 0
+
         try:
             await navigate_to_channel(page, config.guild_id, config.channel_id)
+            # 成功 → reset counter
+            if nav_fails > 0:
+                await db.set_meta(_NAV_FAIL_KEY, "0")
         except RuntimeError as e:
             await browser.close()
-            if "session 已過期" in str(e):
-                if os.path.exists(STORAGE_STATE_PATH):
-                    await remove_file(STORAGE_STATE_PATH)
-                await _run_login_wizard()
-                print("\n  ✓ 重新登入完成,3 秒後自動重啟 bot...")
-                await asyncio.sleep(3)
-                # 設 reboot 旗標,讓外層回傳 exit code(避免在 async with 內 sys.exit)
-                state.reboot = True
-                return REBOOT_EXIT_CODE
-            raise
+            nav_fails += 1
+            await db.set_meta(_NAV_FAIL_KEY, str(nav_fails))
+
+            # 連續失敗達上限 → 停下來請使用者手動處理,避免 wizard 無限循環
+            if nav_fails >= 3:
+                print()
+                print("=" * 70)
+                print(f"  ⚠ 連續 {nav_fails} 次 navigate 失敗 — 已停止自動重啟")
+                print("=" * 70)
+                print("  可能原因(不是 session 問題):")
+                print("    • channel_id / guild_id 設定錯誤(進主程式按 C 修正)")
+                print("    • Discord 改 UI(輸入框 selector 變了 — 找作者修)")
+                print("    • 網路長時間不穩(等等再試)")
+                print(f"\n  錯誤詳情: {e}")
+                print()
+                print("  排查完後手動跑 run.bat 重試;")
+                print("  若想重新登入,先刪 data\\storage_state.json")
+                # exit code 1,run.bat 不會自動 reboot
+                return 1
+
+            # 否則:刪 storage_state + 跑登入精靈 + reboot
+            # session 過期是最常見原因,但即使原因不同(暫時的網路、Discord
+            # 後端抖動)讓使用者重登一次也是合理的恢復路徑
+            log.warning("navigate 第 %d 次失敗(%s),刪 storage_state 跑登入精靈",
+                        nav_fails, e)
+            if os.path.exists(STORAGE_STATE_PATH):
+                await remove_file(STORAGE_STATE_PATH)
+            await _run_login_wizard()
+            print("\n  ✓ 重新登入完成,3 秒後自動重啟 bot...")
+            await asyncio.sleep(3)
+            # 設 reboot 旗標,讓外層回傳 exit code(避免在 async with 內 sys.exit)
+            state.reboot = True
+            return REBOOT_EXIT_CODE
 
         # 9) 讀初始餘額
         from bot.discord.client import get_balance, read_initial_balance_from_history
