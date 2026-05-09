@@ -89,14 +89,13 @@ def calculate_bet(
     if rolling_multiplier != 1.0:
         bet = int(bet * rolling_multiplier)
 
-    # Cap 順序:max_bet → excess(不破保底)→ 檢查 min_bet 下限
-    # 之前的 bug:cap 到 max_bet 後若仍 > excess(rolling 倍率把 bet 放大、
-    # auto 高 fraction、kelly 高 half_kelly 都會踩到),直接 return 0,
-    # 導致 loop 一直印 rolling-EV 卻不下注。改成 cap 到 excess。
     if max_bet > 0:
         bet = min(bet, max_bet)
-    bet = min(bet, excess)
-    if bet < min_bet:
+    bet = max(bet, min_bet)
+    # bet > excess(下注後會破保底)→ 不下注。設計讓 user 透過 raise 模式
+    # 自動把 threshold 移上去(maybe_notify_goal 會在達標時把 threshold
+    # 設為 goal - 10000),保留 10000 緩衝給 bot 下注。
+    if bet > excess:
         return 0
     return bet
 
@@ -264,21 +263,24 @@ async def gambling_loop(
         bet = calculate_bet(balance, gcfg, state.slot_analysis,
                             rolling_multiplier=roll_mult)
         if bet <= 0:
-            # 加 log 讓 user 能 debug 為什麼沒下注 — 之前一直 rolling-EV
-            # 卻沒下,根因不明
+            # bet=0 通常是 bet > excess(下注會破保底),設 state 讓 UI 顯示
             excess = balance - gcfg.threshold
-            log.info(
-                "calculate_bet 回 0,跳過此輪(餘額=%d, threshold=%d, "
-                "excess=%d, min_bet=%d, fraction=%.3f, rolling=%.2fx, "
-                "strategy=%s)— 通常是 excess < min_bet 或設定衝突",
-                balance, gcfg.threshold, excess, gcfg.min_bet,
-                gcfg.bet_fraction, roll_mult, gcfg.strategy,
-            )
+            reason = (f"bet 算出 > 餘額-保底({excess:,}) → 不下注。"
+                      f" balance={balance:,} threshold={gcfg.threshold:,}"
+                      f" min={gcfg.min_bet:,}"
+                      + (f" rolling={roll_mult:.2f}x" if roll_mult != 1.0 else ""))
+            log.info("calculate_bet 回 0:%s", reason)
+            async with state.lock:
+                state.gambling_skip_reason = (
+                    f"接近保底:餘額 {balance:,} - 門檻 {gcfg.threshold:,}"
+                    f" = {excess:,} < 計算下注額"
+                )
             await interruptible_sleep(state, 30)
             continue
 
         async with state.lock:
             state.current_bet = bet
+            state.gambling_skip_reason = None    # 下注前清掉跳過原因
         log.info("餘額 %d > %d,下注 %d", balance, threshold, bet)
 
         result = await play_slot(page, bet)

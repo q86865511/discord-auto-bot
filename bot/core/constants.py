@@ -38,6 +38,9 @@ HOURLY_POST_BOUNDARY_MIN_SEC =  30
 HOURLY_POST_BOUNDARY_MAX_SEC = 180
 # /daily 改成錨定每日 00:00 觸發(daily.py 內自己算,不用這幾個常數了)
 GAMBLE_RECHECK_SEC           = 300
+# raise 模式達標時:new_threshold = goal - GOAL_RAISE_THRESHOLD_BUFFER
+# 保留 10000 緩衝給 bot 下注,不會立刻撞保底
+GOAL_RAISE_THRESHOLD_BUFFER  = 10000
 
 # ── 重啟 ──────────────────────────────────────────────────────────────
 REBOOT_EXIT_CODE                          = 42

@@ -79,6 +79,10 @@ class BotState:
     # ── 目標 / 停損 ─────────────────────────────────────────────────
     goal_reached:   bool = False
     loss_triggered: bool = False
+    # 賭博 loop 跳過下注的原因(例如 bet > excess 會破保底)。
+    # gambling_loop 在 calculate_bet 回 0 時設,下注成功時清為 None。
+    # UI layout 讀此欄位顯示警示給使用者。
+    gambling_skip_reason: str | None = None
 
     # ── 貓娘 ────────────────────────────────────────────────────────
     neko_status:        str = "unknown"      # dispatching / not_dispatching / unknown

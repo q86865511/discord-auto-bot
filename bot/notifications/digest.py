@@ -152,14 +152,19 @@ async def maybe_notify_goal(
 
         # 3. 處理後續動作
         if action == "raise" and step > 0:
-            new_threshold = goal
+            # 新邏輯:達標後保底門檻 = 當下目標 - 10000(緩衝),目標 += step
+            # 概念:贏到 goal 就把 goal 之下 10000 鎖定,用上面 10000 + 之後贏的
+            # 繼續往上推。比舊邏輯(threshold = goal,沒緩衝會立刻撞底)友善。
+            from bot.core.constants import GOAL_RAISE_THRESHOLD_BUFFER
+            new_threshold = max(0, goal - GOAL_RAISE_THRESHOLD_BUFFER)
             new_goal = goal + step
             gcfg.threshold = new_threshold
             gcfg.goal = new_goal
             await on_config_save(config)
             async with state.lock:
                 state.goal_reached = False
-            log.info("raise 模式:門檻 → %d、目標 → %d", new_threshold, new_goal)
+            log.info("raise 模式:門檻 → %d(目標 - %d)、目標 → %d",
+                     new_threshold, GOAL_RAISE_THRESHOLD_BUFFER, new_goal)
         else:
             gcfg.enabled = False
             await on_config_save(config)

@@ -205,6 +205,9 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
     t2.add_row("🏁 目標餘額", f"{goal:,}" if goal > 0 else "[dim]未設定[/dim]")
     t2.add_row("📣 通知對象", notify_str)
     t2.add_row("🎮 賭博",     "[green]啟用[/green]" if gcfg.enabled else "[red]停用[/red]")
+    # 接近保底警示 — calculate_bet 回 0 時(bet > excess)set
+    if state.gambling_skip_reason:
+        t2.add_row("⚠ 跳過下注", f"[yellow]{state.gambling_skip_reason}[/yellow]")
     t2.add_row("", "")
     t2.add_row("⏰ /hourly",
                loop_status_prefix(state, "hourly") + fmt_remaining(state.hourly_next))
