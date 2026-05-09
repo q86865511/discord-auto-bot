@@ -622,6 +622,12 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print(f"   [8] 停損 %:          {s.stop_loss_pct:>4}  ← 持股虧到此 % → 建議賣")
         print(f"   [9] 強訊號門檻:      {s.signal_score_threshold:>4}  ← log 只顯示分數高於此的訊號")
         print()
+        vol_state = "✓ 啟用" if s.volatility_alert_enabled else "✗ 停用"
+        print(f"  [短期波動警示] {vol_state}  "
+              f"({s.volatility_window_min:g} min / {s.volatility_threshold_pct:g}% / "
+              f"冷卻 {s.volatility_cooldown_min:g} min)")
+        print("   [V] 編輯短期波動警示設定")
+        print()
         print("  [說明]")
         print("   [H] 名詞解釋(看不懂分析參數來這)")
         print("   ⓘ parser 抓不到時會自動把 raw 文字寫到 logs/stock_debug.log")
@@ -688,6 +694,55 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             await wait_enter()
         elif choice == "H":
             await _show_stock_help()
+        elif choice == "V":
+            await _edit_volatility(s)
+
+
+async def _edit_volatility(s) -> None:
+    """短期波動警示子選單。"""
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*52}\n  📊 短期波動警示\n{'═'*52}")
+        print()
+        print("  ⓘ 跟「強訊號」(MA / 獲利率) 不同 — 純看「短期內價格百分比變動」。")
+        print("    例如:30 分鐘內漲超 5% / 跌超 5% 就 queue_log + email 提醒一次。")
+        print("    每次 stock poll 都會檢查所有抓到的股票。")
+        print()
+        print(f"   [1] 啟用 / 停用:    "
+              f"{'✓ 啟用' if s.volatility_alert_enabled else '✗ 停用'}")
+        print(f"   [2] 比較窗口分鐘:  {s.volatility_window_min:g}  "
+              f"(看過去 N 分鐘的價格變動)")
+        print(f"   [3] 變動門檻 %:    {s.volatility_threshold_pct:g}  "
+              f"(|變動| ≥ X% 才觸發)")
+        print(f"   [4] 冷卻分鐘:      {s.volatility_cooldown_min:g}  "
+              f"(同支同方向 N 分鐘只通知一次)")
+        print()
+        print("  ⓘ Email 通知共用「[3] Email → [B] 股票強訊號」開關。")
+        print()
+        print("   [0] 返回")
+        c = (await ainput("\n  選擇: ")).strip()
+        if c == "0":
+            return
+        elif c == "1":
+            s.volatility_alert_enabled = not s.volatility_alert_enabled
+            print(f"  ✓ → {'啟用' if s.volatility_alert_enabled else '停用'}")
+            await wait_enter()
+        elif c == "2":
+            v = await ask_float("比較窗口分鐘", s.volatility_window_min,
+                                min_val=1.0, max_val=1440.0)
+            if v is not None: s.volatility_window_min = v
+            await wait_enter()
+        elif c == "3":
+            v = await ask_float("變動門檻 %(例 5 = 5%)",
+                                s.volatility_threshold_pct,
+                                min_val=0.1, max_val=100.0)
+            if v is not None: s.volatility_threshold_pct = v
+            await wait_enter()
+        elif c == "4":
+            v = await ask_float("冷卻分鐘", s.volatility_cooldown_min,
+                                min_val=0.0, max_val=1440.0)
+            if v is not None: s.volatility_cooldown_min = v
+            await wait_enter()
 
 
 async def _edit_tracked_symbols(s) -> None:

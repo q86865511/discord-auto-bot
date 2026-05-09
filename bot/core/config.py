@@ -270,6 +270,15 @@ class StockConfig:
     take_profit_pct: float = 15.0    # 持股獲利達此 % → 建議賣(獲利了結)
     stop_loss_pct:   float = 10.0    # 持股虧損達此 % → 建議賣(止損)
     signal_score_threshold: int = 80     # 評分 ≥ 此值才視為「強訊號」
+
+    # ── 短期波動警示(快速漲跌通知) ──
+    # 跟「強訊號」(MA / 獲利率) 不同 — 純看「短期內價格變動百分比」。
+    # 例如:30 分鐘內漲超 5% / 跌超 5% 就 queue_log + email 提醒一次。
+    volatility_alert_enabled: bool = False
+    volatility_window_min:    float = 30.0     # 比較最近 N 分鐘
+    volatility_threshold_pct: float = 5.0      # 變動 >= X% 才算劇烈
+    volatility_cooldown_min:  float = 60.0     # 同 sym 同方向冷卻分鐘
+
     # 不再有 log_raw_text — parser 失敗時會自動寫到 logs/stock_debug.log
     # 不再有 trading 自動化 — Discord modal 不夠穩定,bot 改成「只通知,不下單」
 
@@ -285,6 +294,12 @@ class StockConfig:
             errs.append("stop_loss_pct 必須在 0~100")
         if not 0 <= self.signal_score_threshold <= 100:
             errs.append("signal_score_threshold 必須在 0~100")
+        if self.volatility_window_min < 1:
+            errs.append("volatility_window_min 必須 ≥ 1 分鐘")
+        if not 0 < self.volatility_threshold_pct <= 100:
+            errs.append("volatility_threshold_pct 必須在 0~100")
+        if self.volatility_cooldown_min < 0:
+            errs.append("volatility_cooldown_min 不可為負")
         # 衛生:tracked_symbols 應為大寫字母+數字
         for s in self.tracked_symbols:
             if not (isinstance(s, str) and s and s.upper() == s

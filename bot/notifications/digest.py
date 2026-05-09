@@ -265,6 +265,41 @@ async def notify_bigwin(
     )
 
 
+async def notify_stock_volatility(
+    state: BotState, config: "BotConfig",   # noqa: ARG001
+    symbol: str, info: dict,
+) -> None:
+    """股票短期波動警示 → email。info 來自 detect_volatility 的回傳。
+
+    呼叫端要負責 anti-spam(用 state.stock_volatility_notified 追蹤 cooldown)。
+    重用 ecfg.notify_stock_signal 開關 — volatility 跟 buy/sell 訊號都是「股票
+    通知」家族,共用一個 email toggle 比較不亂。
+    """
+    ecfg = config.email
+    if not (ecfg.enabled and getattr(ecfg, "notify_stock_signal", False)):
+        return
+
+    direction = info.get("direction", "rise")
+    change = info.get("change_pct", 0.0)
+    cur = info.get("current", 0.0)
+    base = info.get("baseline", 0.0)
+    win = info.get("window_min", 0)
+    emoji = "📈" if direction == "rise" else "📉"
+    label = "暴漲" if direction == "rise" else "暴跌"
+    subj = f"[Discord Bot] {emoji} {symbol} {label} {change:+.2f}% ({win:g} min)"
+    body = "\n".join([
+        f"{emoji} 股票短期{label}警示",
+        "",
+        f"標的:    {symbol}",
+        f"現價:    {cur:.4f}",
+        f"基準價:  {base:.4f}({info.get('baseline_ts', '')})",
+        f"變動:    {change:+.2f}% / 過去 {win:g} 分鐘",
+        "",
+        "⚠ 純價格變動警示,不代表買賣建議 — 只是提醒你看一下。",
+    ])
+    await send_email(ecfg, subj, body)
+
+
 async def notify_stock_signal(
     state: BotState, config: "BotConfig",
     symbol: str, signal_type: str, eval_dict: dict,

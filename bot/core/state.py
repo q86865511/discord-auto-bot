@@ -103,6 +103,9 @@ class BotState:
     # 已發過 email 的強訊號:{(symbol, "buy"/"sell"): score} — 避免每 poll 重複寄
     # 訊號消失後從這裡移掉,下次再出現會重新通知
     stock_notified_signals: dict = field(default_factory=dict)
+    # 短期波動已通知:{(symbol, "rise"/"fall"): last_notified_ts(epoch 秒)}
+    # — 同 sym 同方向 cooldown_min 內只通知一次,避免每 poll 都炸
+    stock_volatility_notified: dict = field(default_factory=dict)
 
     # ── 終端 UI 檢視模式 ────────────────────────────────────────
     # "main" = 預設賭博/系統面板;"stock" = 股票檢視

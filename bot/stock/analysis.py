@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,83 @@ def _pct_change(curr: float, prev: float) -> float:
     if prev <= 0:
         return 0.0
     return (curr - prev) / prev * 100
+
+
+# ── 短期波動偵測 ──────────────────────────────────────────────────────
+def detect_volatility(
+    series: list[dict],
+    window_min: float,
+    threshold_pct: float,
+) -> dict | None:
+    """檢查 series 在過去 window_min 分鐘內的價格變動是否 ≥ threshold_pct。
+
+    series:[{ts, symbol, price}, ...] 升序(舊→新)。ts 格式 "%Y-%m-%d %H:%M:%S"。
+    回傳:
+      None — 樣本不足或變動沒超過閾值
+      {direction, change_pct, current, baseline, baseline_ts, window_min}
+        direction ∈ {"rise", "fall"}, change_pct 是有號(rise 正、fall 負)。
+
+    比較方式:取 series 最新價當「現價」,在 (現在 − window_min) 分鐘內的
+    最早一筆當 baseline。如果窗口內只有 1 筆資料就放棄(沒得比)。
+    """
+    if not series or len(series) < 2:
+        return None
+    if window_min <= 0 or threshold_pct <= 0:
+        return None
+
+    latest = series[-1]
+    cur_price = float(latest.get("price") or 0)
+    if cur_price <= 0:
+        return None
+
+    # 解析 latest 的 ts 當「現在」(用 series 自己的時間軸,不靠 wall-clock,
+    # 避免 bot 啟動時 history 沒新資料但 wall-clock 一直走造成 baseline 抓不到)
+    cur_ts_str = latest.get("ts") or ""
+    try:
+        cur_ts = datetime.strptime(cur_ts_str, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+    cutoff = cur_ts - timedelta(minutes=window_min)
+
+    # 從新到舊掃,找第一個 ts <= cutoff 的;若窗口內全部都比 cutoff 新就用最舊那筆
+    baseline_row = None
+    for row in reversed(series[:-1]):
+        try:
+            row_ts = datetime.strptime(row.get("ts") or "", "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            continue
+        if row_ts <= cutoff:
+            baseline_row = row
+            break
+    # fallback:窗口比 series 還短(剛收集),用最舊一筆當 baseline
+    if baseline_row is None:
+        baseline_row = series[0]
+        try:
+            baseline_ts = datetime.strptime(
+                baseline_row.get("ts") or "", "%Y-%m-%d %H:%M:%S",
+            )
+        except (TypeError, ValueError):
+            return None
+        # 窗口內至少要有 5 分鐘資料才有意義(避免剛開機就誤觸)
+        if (cur_ts - baseline_ts).total_seconds() < 5 * 60:
+            return None
+
+    baseline_price = float(baseline_row.get("price") or 0)
+    if baseline_price <= 0:
+        return None
+
+    change_pct = (cur_price - baseline_price) / baseline_price * 100
+    if abs(change_pct) < threshold_pct:
+        return None
+
+    return {
+        "direction":   "rise" if change_pct > 0 else "fall",
+        "change_pct":  change_pct,
+        "current":     cur_price,
+        "baseline":    baseline_price,
+        "baseline_ts": baseline_row.get("ts") or "",
+        "window_min":  window_min,
+    }
 
 
 # ── 把 history rows 轉成 per-symbol price series ─────────────────────
