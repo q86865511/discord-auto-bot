@@ -17,7 +17,14 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from bot.core.state import BotState, interruptible_sleep
+from bot.core.state import (
+    BotState,
+    interruptible_sleep,
+    is_loop_auto_paused,
+    mark_loop_failed,
+    mark_loop_ok,
+    mark_loop_running,
+)
 from bot.discord.client import query_stock_text
 from bot.notifications.digest import notify_stock_signal, notify_stock_volatility
 from bot.stock.analysis import analyze_symbol, detect_volatility, group_by_symbol
@@ -26,6 +33,11 @@ from bot.stock.parser import (
     parse_stock_detail,
     parse_stock_list,
 )
+
+# Loop name(state.loop_health 的 key)
+_LOOP_NAME = "stock"
+# auto_paused 後等多久再試
+_PAUSE_RECOVERY_SEC = 30 * 60
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -73,13 +85,43 @@ async def stock_loop(
             continue
 
         # 一進迴圈就消費 force_poll 旗標(若 sleep 期間被設,這裡 reset)
-        if state.stock_force_poll:
+        forced = state.stock_force_poll
+        if forced:
             state.stock_force_poll = False
 
+        # 連續失敗達閾值 → 進入 auto_paused 冷卻;sleep 30 分鐘再試一次
+        # (force_poll 可以 override 冷卻,讓 user 主動測試恢復)
+        if is_loop_auto_paused(state, _LOOP_NAME) and not forced:
+            log.warning("stock: 連續失敗已達閾值,冷卻 %d 秒後重試",
+                        _PAUSE_RECOVERY_SEC)
+            state.queue_log("⛔ 股票 loop 連續失敗,已自動暫停 30 分鐘")
+            # 切成 chunks 讓 force_poll 能中斷
+            slept = 0
+            while slept < _PAUSE_RECOVERY_SEC and not state.quit:
+                chunk = min(30, _PAUSE_RECOVERY_SEC - slept)
+                await interruptible_sleep(state, chunk)
+                slept += chunk
+                if state.stock_force_poll:
+                    state.stock_force_poll = False
+                    log.info("stock: force_poll 中斷 auto_paused 冷卻")
+                    break
+            if state.quit:
+                break
+
+        mark_loop_running(state, _LOOP_NAME)
+        ok = False
         try:
-            await _poll_once(page, state, cfg, db)
-        except Exception:    # noqa: BLE001
+            ok = await _poll_once(page, state, cfg, db)
+        except Exception as e:    # noqa: BLE001
             log.exception("stock loop 例外")
+            mark_loop_failed(state, _LOOP_NAME, str(e))
+        else:
+            if ok:
+                mark_loop_ok(state, _LOOP_NAME)
+            else:
+                mark_loop_failed(state, _LOOP_NAME,
+                                 "discovery + portfolio 都沒抓到資料")
+                state.queue_log("⚠ 股票 poll 完全沒抓到資料")
 
         # Sleep 切成 30 秒 chunks — 每 chunk 結束 check force_poll 旗標,
         # 讓 UI / Dashboard 觸發的「立即重 poll」最多 30 秒內生效。
@@ -94,8 +136,9 @@ async def stock_loop(
                 break
 
 
-async def _poll_once(page, state: BotState, cfg, db) -> None:
-    """單次股票 poll。
+async def _poll_once(page, state: BotState, cfg, db) -> bool:
+    """單次股票 poll。回傳 True = 成功(至少抓到 prices 或 holdings),
+    False = 兩邊都沒抓到(視為失敗,呼叫端會 mark_loop_failed)。
 
     重要:用 try/finally 確保即使中段拋例外,snapshot 也會用「目前累積到的
     最新資料」更新。修先前的 bug:賣股後若 analyze 階段失敗,snapshot 仍是
@@ -203,8 +246,9 @@ async def _poll_once(page, state: BotState, cfg, db) -> None:
             log.info("stock: 寫入 %d 支股票價格", n)
         else:
             log.warning("stock: 本次完全沒抓到價格 — discovery + portfolio 都失敗")
-            # 沒價格就不分析,但 finally 仍會更新 holdings(若 portfolio 有 parse)
-            return
+            # 沒價格也沒 portfolio = 完全失敗 → 呼叫端 mark_failed
+            # finally 仍會更新 holdings(若 portfolio 有 parse 過,return True)
+            return portfolio_parsed
 
         # ── 5. 分析每支股 ───────────────────────────────────────────
         full_history = await db.load_stock_history(limit=20000)
@@ -278,6 +322,7 @@ async def _poll_once(page, state: BotState, cfg, db) -> None:
                     "discovered": len(all_prices),
                 }
                 state.stock_last_poll_ts = time.time()
+    return True
 
 
 async def _check_volatility(state: BotState, cfg, by_sym: dict[str, list]) -> None:

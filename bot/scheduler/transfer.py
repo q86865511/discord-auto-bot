@@ -6,7 +6,14 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from bot.core.constants import DEFAULT_TRANSFER_INTERVAL_MIN
-from bot.core.state import BotState, interruptible_sleep, wait_while_paused
+from bot.core.state import (
+    BotState,
+    interruptible_sleep,
+    mark_loop_failed,
+    mark_loop_ok,
+    mark_loop_running,
+    wait_while_paused,
+)
 from bot.discord.client import do_transfer
 
 if TYPE_CHECKING:
@@ -41,17 +48,21 @@ async def transfer_loop(
             await interruptible_sleep(state, 30)
             continue
 
+        mark_loop_running(state, "transfer")
         try:
             ok = await do_transfer(page, target, amount)
             if ok:
                 async with state.lock:
                     state.events.transfers += 1
                 state.queue_log(f"💸 已轉帳 {amount:,} → {target}")
+                mark_loop_ok(state, "transfer")
             else:
                 state.queue_log(f"⚠ 轉帳指令送出但找不到確認按鈕 ({target} {amount:,})")
+                mark_loop_failed(state, "transfer", "找不到確認按鈕")
         except Exception as e:    # noqa: BLE001
             log.exception("自動轉帳發生未預期錯誤")
             state.queue_log(f"⚠ 自動轉帳發生錯誤: {e}")
+            mark_loop_failed(state, "transfer", str(e))
 
         try:
             interval = float(tcfg.interval_min)

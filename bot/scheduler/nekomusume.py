@@ -14,7 +14,14 @@ from bot.core.constants import (
     DEFAULT_NEKO_INTERVAL_MIN,
     DEFAULT_NOTIFY_USER_ID,
 )
-from bot.core.state import BotState, interruptible_sleep, wait_while_paused
+from bot.core.state import (
+    BotState,
+    interruptible_sleep,
+    mark_loop_failed,
+    mark_loop_ok,
+    mark_loop_running,
+    wait_while_paused,
+)
 from bot.discord.client import (
     auto_claim_and_redispatch_neko,
     command_lock,
@@ -40,11 +47,21 @@ async def nekomusume_loop(
     last_status: str | None = None
 
     async def _query_status() -> tuple[str, int | None]:
-        text = await read_check_response(page)
+        mark_loop_running(state, "neko")
+        try:
+            text = await read_check_response(page)
+        except Exception as e:    # noqa: BLE001
+            log.exception("/check 失敗")
+            mark_loop_failed(state, "neko", str(e))
+            async with state.lock:
+                state.neko_last_check_ts = time.time()
+            return "unknown", None
         async with state.lock:
             state.neko_last_check_ts = time.time()
         if text is None:
+            mark_loop_failed(state, "neko", "/check 沒回應")
             return "unknown", None
+        mark_loop_ok(state, "neko")
         return parse_dispatch_status(text)
 
     async def _notify_completion(*, is_real_transition: bool = True) -> None:

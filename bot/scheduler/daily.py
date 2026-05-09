@@ -8,7 +8,14 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from bot.core.state import BotState, interruptible_sleep, wait_while_paused
+from bot.core.state import (
+    BotState,
+    interruptible_sleep,
+    mark_loop_failed,
+    mark_loop_ok,
+    mark_loop_running,
+    wait_while_paused,
+)
 from bot.discord.client import send_and_capture_balance
 from bot.notifications.digest import maybe_notify_goal
 
@@ -90,9 +97,17 @@ async def daily_loop(
         if state.quit:
             break
 
-        new_bal = await send_and_capture_balance(
-            page, "/daily", timeout=20.0, stability_sec=2.0,
-        )
+        mark_loop_running(state, "daily")
+        try:
+            new_bal = await send_and_capture_balance(
+                page, "/daily", timeout=20.0, stability_sec=2.0,
+            )
+        except Exception as e:    # noqa: BLE001
+            log.exception("/daily 送出時例外")
+            mark_loop_failed(state, "daily", str(e))
+            new_bal = None
+        else:
+            mark_loop_ok(state, "daily")
         # 不論成功失敗都記錄 — 避免時間沒到回 None 時 loop 又重試把整天嘗試光
         await db.set_meta(_LAST_DAILY_META_KEY, str(time.time()))
         if new_bal is not None:

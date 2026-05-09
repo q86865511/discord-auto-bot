@@ -111,6 +111,18 @@ class BotState:
     # 用途:user 賣股後想馬上看到結果,不用等 poll_interval_min(預設 15 分鐘)
     stock_force_poll: bool = False
 
+    # ── 各 loop 的健康狀態 ────────────────────────────────────────
+    # 每個 loop name(stock/hourly/daily/transfer/neko)對應:
+    #   {"status": "idle" | "running" | "ok" | "failed" | "auto_paused",
+    #    "fail_streak": int,
+    #    "last_ok_ts": float | None,
+    #    "last_action_ts": float | None,
+    #    "last_error": str | None}
+    # 由 mark_loop_* helper 維護;UI layout 讀取顯示狀態指示。
+    # auto_paused = 連續失敗達閾值,loop 自己進冷卻(sleep 30 分鐘),不是
+    # 真的停止 — 給 Discord / 網路一段時間自我恢復,避免 spam 失敗指令。
+    loop_health: dict[str, dict] = field(default_factory=dict)
+
     # ── 終端 UI 檢視模式 ────────────────────────────────────────
     # "main" = 預設賭博/系統面板;"stock" = 股票檢視
     view_mode: str = "main"
@@ -243,3 +255,52 @@ async def wait_while_paused(state: BotState) -> None:
     """暫停時原地等待。"""
     while state.paused and not state.quit:
         await asyncio.sleep(0.5)
+
+
+# ── Loop 健康狀態 helpers ──────────────────────────────────────────
+# 不寫成 BotState method 以保持 dataclass 純粹;呼叫端用
+# `from bot.core.state import mark_loop_running` 即可。
+LOOP_AUTO_PAUSE_THRESHOLD = 5    # 連續失敗 N 次 → auto_paused
+
+
+def mark_loop_running(state: BotState, name: str) -> None:
+    """進入 query / send 指令前呼叫,UI 顯示「查詢中」。"""
+    h = state.loop_health.get(name) or {}
+    h["status"] = "running"
+    h["last_action_ts"] = time.time()
+    state.loop_health[name] = h
+
+
+def mark_loop_ok(state: BotState, name: str) -> None:
+    """指令成功完成。reset fail_streak 並把 status 改成 ok。"""
+    h = state.loop_health.get(name) or {}
+    h["status"] = "ok"
+    h["fail_streak"] = 0
+    h["last_ok_ts"] = time.time()
+    h["last_error"] = None
+    state.loop_health[name] = h
+
+
+def mark_loop_failed(
+    state: BotState, name: str, error: str = "",
+    pause_threshold: int = LOOP_AUTO_PAUSE_THRESHOLD,
+) -> None:
+    """指令失敗(exception 或明確的「沒抓到任何資料」)。
+
+    fail_streak >= pause_threshold 自動轉到 auto_paused 狀態,呼叫端 loop
+    應該 check 這個狀態並 sleep 久一點(例如 30 分鐘),避免短時間 spam
+    無回應的 Discord 指令。
+    """
+    h = state.loop_health.get(name) or {}
+    h["fail_streak"] = h.get("fail_streak", 0) + 1
+    h["last_error"] = error[:200] if error else None
+    if h["fail_streak"] >= pause_threshold:
+        h["status"] = "auto_paused"
+    else:
+        h["status"] = "failed"
+    state.loop_health[name] = h
+
+
+def is_loop_auto_paused(state: BotState, name: str) -> bool:
+    h = state.loop_health.get(name) or {}
+    return h.get("status") == "auto_paused"

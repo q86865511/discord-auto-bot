@@ -20,6 +20,20 @@ if TYPE_CHECKING:
     from bot.core.config import BotConfig
 
 
+def loop_status_prefix(state: BotState, name: str) -> str:
+    """各 loop 健康狀態 prefix。空字串 = ok / idle(不顯示)。"""
+    h = (state.loop_health or {}).get(name) or {}
+    status = h.get("status", "idle")
+    streak = h.get("fail_streak", 0)
+    if status == "running":
+        return "[yellow]🔄[/yellow] "
+    if status == "auto_paused":
+        return f"[red]⛔自動暫停 ({streak}x)[/red] "
+    if status == "failed":
+        return f"[red]⚠失敗 {streak}x[/red] "
+    return ""
+
+
 def fmt_remaining(ts: float | None) -> str:
     if ts is None:
         return "─"
@@ -192,8 +206,10 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
     t2.add_row("📣 通知對象", notify_str)
     t2.add_row("🎮 賭博",     "[green]啟用[/green]" if gcfg.enabled else "[red]停用[/red]")
     t2.add_row("", "")
-    t2.add_row("⏰ /hourly",  fmt_remaining(state.hourly_next))
-    t2.add_row("📅 /daily",   fmt_remaining(state.daily_next))
+    t2.add_row("⏰ /hourly",
+               loop_status_prefix(state, "hourly") + fmt_remaining(state.hourly_next))
+    t2.add_row("📅 /daily",
+               loop_status_prefix(state, "daily") + fmt_remaining(state.daily_next))
 
     neko_st = state.neko_status
     neko_dl = state.neko_deadline_ts
@@ -205,7 +221,7 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         neko_str = "[green]待領取/閒置[/green]"
     else:
         neko_str = "[dim]─[/dim]"
-    t2.add_row("🐱 貓娘",     neko_str)
+    t2.add_row("🐱 貓娘",     loop_status_prefix(state, "neko") + neko_str)
 
     tcfg = config.transfer
     if tcfg.enabled:
@@ -215,7 +231,7 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         transfer_str = f"[green]{tr_target} {tr_amt:,}/次 ({tr_int}m)[/green]"
     else:
         transfer_str = "[dim]停用[/dim]"
-    t2.add_row("💸 自動轉帳",  transfer_str)
+    t2.add_row("💸 自動轉帳",  loop_status_prefix(state, "transfer") + transfer_str)
 
     dcfg = config.dashboard
     if dcfg.enabled:
@@ -231,8 +247,17 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
 
     # ── 股票檢查倒數 ────────────────────────────────────────────
     scfg = config.stock
+    stock_health = (state.loop_health or {}).get("stock") or {}
+    stock_status = stock_health.get("status", "idle")
     if not scfg.enabled:
         stock_str = "[dim]停用[/dim]"
+    elif stock_status == "running":
+        # 發送請求中 — 直接 override 顯示「查詢中」,不顯示倒數
+        stock_str = "[yellow]🔄 查詢中...[/yellow]"
+    elif stock_status == "auto_paused":
+        streak = stock_health.get("fail_streak", 0)
+        stock_str = (f"[red]⛔ 自動暫停 ({streak}x 連續失敗)— "
+                     f"30 分鐘後自動重試,或進 [C][8][R] 手動重 poll[/red]")
     else:
         last_ts = state.stock_last_poll_ts
         snap = state.stock_last_snapshot or {}
@@ -268,7 +293,12 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
                 sig_part += f" [red]🔴賣{n_sell}[/red]"
             if n_buy_strong > 0:
                 sig_part += f" [green]🟢買{n_buy_strong}[/green]"
-            stock_str = (f"倒數 [cyan]{countdown}[/cyan]  "
+            # 上次失敗(尚未到 auto_paused 閾值)在前面加警示
+            fail_prefix = ""
+            if stock_status == "failed":
+                streak = stock_health.get("fail_streak", 0)
+                fail_prefix = f"[red]⚠ 上次失敗 {streak}x[/red]  "
+            stock_str = (f"{fail_prefix}倒數 [cyan]{countdown}[/cyan]  "
                          f"持股 {n_held}/{n_disc}{sig_part}")
     t2.add_row("📈 股票檢查", stock_str)
 

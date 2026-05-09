@@ -12,7 +12,14 @@ from bot.core.constants import (
     HOURLY_POST_BOUNDARY_MAX_SEC,
     HOURLY_POST_BOUNDARY_MIN_SEC,
 )
-from bot.core.state import BotState, interruptible_sleep, wait_while_paused
+from bot.core.state import (
+    BotState,
+    interruptible_sleep,
+    mark_loop_failed,
+    mark_loop_ok,
+    mark_loop_running,
+    wait_while_paused,
+)
 from bot.discord.client import send_and_capture_balance
 from bot.notifications.digest import maybe_notify_goal
 
@@ -56,9 +63,17 @@ async def hourly_loop(
         if state.quit:
             break
 
-        new_bal = await send_and_capture_balance(
-            page, "/hourly", timeout=20.0, stability_sec=2.0,
-        )
+        mark_loop_running(state, "hourly")
+        try:
+            new_bal = await send_and_capture_balance(
+                page, "/hourly", timeout=20.0, stability_sec=2.0,
+            )
+        except Exception as e:    # noqa: BLE001
+            log.exception("/hourly 送出時例外")
+            mark_loop_failed(state, "hourly", str(e))
+            new_bal = None
+        else:
+            mark_loop_ok(state, "hourly")
         if new_bal is not None:
             async with state.lock:
                 state.balance = new_bal
