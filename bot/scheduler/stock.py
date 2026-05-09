@@ -72,13 +72,26 @@ async def stock_loop(
             await interruptible_sleep(state, 60)
             continue
 
+        # 一進迴圈就消費 force_poll 旗標(若 sleep 期間被設,這裡 reset)
+        if state.stock_force_poll:
+            state.stock_force_poll = False
+
         try:
             await _poll_once(page, state, cfg, db)
         except Exception:    # noqa: BLE001
             log.exception("stock loop 例外")
 
+        # Sleep 切成 30 秒 chunks — 每 chunk 結束 check force_poll 旗標,
+        # 讓 UI / Dashboard 觸發的「立即重 poll」最多 30 秒內生效。
         sleep_sec = max(60, int(float(scfg.poll_interval_min) * 60))
-        await interruptible_sleep(state, sleep_sec)
+        slept = 0
+        while slept < sleep_sec and not state.quit:
+            chunk = min(30, sleep_sec - slept)
+            await interruptible_sleep(state, chunk)
+            slept += chunk
+            if state.stock_force_poll:
+                log.info("stock: 收到 force_poll,跳出 sleep 立即重 poll")
+                break
 
 
 async def _poll_once(page, state: BotState, cfg, db) -> None:
@@ -123,6 +136,19 @@ async def _poll_once(page, state: BotState, cfg, db) -> None:
         if pf_text:
             holdings = parse_portfolio(pf_text)
             portfolio_parsed = True    # 即使 holdings={} 也算成功(全部賣完)
+            # 對比上次 snapshot,偵測買賣 — 讓 user 立即看到 bot 有抓到變動,
+            # 不用對著「持股區還有那支」來懷疑 bot 沒更新
+            prev_snap = state.stock_last_snapshot or {}
+            prev_keys = set(prev_snap.get("holdings", {}).keys())
+            cur_keys = set(holdings.keys())
+            sold = prev_keys - cur_keys
+            bought = cur_keys - prev_keys
+            if sold:
+                state.queue_log(f"💰 偵測賣出: {', '.join(sorted(sold))}")
+                log.info("stock: 偵測賣出 %s", sorted(sold))
+            if bought:
+                state.queue_log(f"🛒 偵測買進: {', '.join(sorted(bought))}")
+                log.info("stock: 偵測買進 %s", sorted(bought))
             if not holdings:
                 _dump_parse_debug("portfolio", pf_text)
                 log.info("stock: portfolio 解析到 0 支持股(已全部賣完?)")

@@ -204,7 +204,8 @@ def make_handler(
             if path.startswith("/api/action/"):
                 action = path[len("/api/action/"):]
                 # 白名單
-                if action not in ("toggle_pause", "reset_analysis", "restart"):
+                if action not in ("toggle_pause", "reset_analysis", "restart",
+                                  "stock_refresh"):
                     self._json({"ok": False, "message": f"未知動作: {action}"}, code=400)
                     return
                 try:

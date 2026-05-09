@@ -36,7 +36,11 @@ def show_stock_analysis(state: BotState) -> None:
         console.print("    - 股票功能未啟用(C → [8] 股票監視 → [1] 啟用)")
         console.print("    - 第一次 poll 還沒跑完(loop 啟動 60 秒後第一次)")
         console.print("    - poll 失敗(看 logs/bot.log 排查)")
-        input("\n  按 Enter 返回...")
+        cmd = input("\n  按 Enter 返回 / R + Enter 立即重 poll: ").strip().lower()
+        if cmd == "r":
+            state.stock_force_poll = True
+            print("  ✓ 已請求立即重 poll(30 秒內生效)")
+            input("  按 Enter 繼續...")
         return
 
     ts       = snap.get("ts", "─")
@@ -298,4 +302,9 @@ def show_stock_analysis(state: BotState) -> None:
             )
         console.print(at)
 
-    input("\n  按 Enter 返回...")
+    # R = 立即重 poll(賣股後想馬上看到反應、或想 force refresh 都用這個)
+    cmd = input("\n  按 Enter 返回 / R + Enter 立即重 poll: ").strip().lower()
+    if cmd == "r":
+        state.stock_force_poll = True
+        print("  ✓ 已請求立即重 poll(30 秒內生效)")
+        input("  按 Enter 繼續...")

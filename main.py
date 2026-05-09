@@ -401,6 +401,10 @@ async def main() -> int:
                     state.quit = True
                     state.queue_log("📡 Dashboard:請求重啟")
                     return {"ok": True, "message": "重啟請求已送出"}
+                if action == "stock_refresh":
+                    state.stock_force_poll = True
+                    state.queue_log("📡 Dashboard:請求立即重 poll 股票")
+                    return {"ok": True, "message": "已請求立即重 poll(30 秒內生效)"}
                 return {"ok": False, "message": f"未知動作: {action}"}
             except Exception as e:    # noqa: BLE001
                 log.exception("on_action 失敗")

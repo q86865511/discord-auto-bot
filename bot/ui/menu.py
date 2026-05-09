@@ -580,6 +580,15 @@ async def _edit_trailing(g) -> None:
             await wait_enter()
 
 
+async def _trigger_stock_refresh(state: BotState) -> None:
+    """賣股後想立刻看到反應時用 — 設旗標,stock_loop 30 秒內跳出 sleep 重 poll。"""
+    state.stock_force_poll = True
+    print()
+    print("  ✓ 已請求立即重 poll(stock_loop 會在 30 秒內跳出 sleep 重跑)")
+    print("    跑完後回主畫面按 T 看最新持股 / 分析。")
+    await wait_enter()
+
+
 # ── 子選單:股票 ──────────────────────────────────────────────────────
 async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
     s = config.stock
@@ -627,6 +636,9 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
               f"({s.volatility_window_min:g} min / {s.volatility_threshold_pct:g}% / "
               f"冷卻 {s.volatility_cooldown_min:g} min)")
         print("   [V] 編輯短期波動警示設定")
+        print()
+        print("  [動作]")
+        print("   [R] 立即重 poll 一次(賣股後想馬上看到變動)")
         print()
         print("  [說明]")
         print("   [H] 名詞解釋(看不懂分析參數來這)")
@@ -696,6 +708,8 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             await _show_stock_help()
         elif choice == "V":
             await _edit_volatility(s)
+        elif choice == "R":
+            await _trigger_stock_refresh(state)
 
 
 async def _edit_volatility(s) -> None:

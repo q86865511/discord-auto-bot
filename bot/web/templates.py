@@ -1077,6 +1077,12 @@ STOCKS_BODY = r"""
     訊號為均線 / momentum / 持股獲利率啟發式分析,不構成投資建議。
   </p>
   <div id="stock-status" class="dim" style="font-size: 12px;"></div>
+  <div style="margin-top: 8px;">
+    <button class="btn" onclick="doAction('stock_refresh', this)"
+            title="賣股後想立刻看到變動?點這個 — 30 秒內 stock_loop 會跳出 sleep 重 poll">
+      🔄 立即重 poll
+    </button>
+  </div>
 </div>
 
 <div class="stock-tabs" id="stock-tabs">

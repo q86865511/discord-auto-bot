@@ -106,6 +106,10 @@ class BotState:
     # 短期波動已通知:{(symbol, "rise"/"fall"): last_notified_ts(epoch 秒)}
     # — 同 sym 同方向 cooldown_min 內只通知一次,避免每 poll 都炸
     stock_volatility_notified: dict = field(default_factory=dict)
+    # 跨 thread 觸發「立即重 poll 一次」— UI / Dashboard 設 True,stock_loop
+    # 在 sleep 期間每 30 秒 check 一次,True 就跳出 sleep 立即跑下一輪 poll。
+    # 用途:user 賣股後想馬上看到結果,不用等 poll_interval_min(預設 15 分鐘)
+    stock_force_poll: bool = False
 
     # ── 終端 UI 檢視模式 ────────────────────────────────────────
     # "main" = 預設賭博/系統面板;"stock" = 股票檢視
