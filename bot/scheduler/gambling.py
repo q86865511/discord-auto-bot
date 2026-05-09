@@ -89,10 +89,14 @@ def calculate_bet(
     if rolling_multiplier != 1.0:
         bet = int(bet * rolling_multiplier)
 
+    # Cap 順序:max_bet → excess(不破保底)→ 檢查 min_bet 下限
+    # 之前的 bug:cap 到 max_bet 後若仍 > excess(rolling 倍率把 bet 放大、
+    # auto 高 fraction、kelly 高 half_kelly 都會踩到),直接 return 0,
+    # 導致 loop 一直印 rolling-EV 卻不下注。改成 cap 到 excess。
     if max_bet > 0:
         bet = min(bet, max_bet)
-    bet = max(bet, min_bet)
-    if bet > excess:
+    bet = min(bet, excess)
+    if bet < min_bet:
         return 0
     return bet
 
@@ -260,6 +264,16 @@ async def gambling_loop(
         bet = calculate_bet(balance, gcfg, state.slot_analysis,
                             rolling_multiplier=roll_mult)
         if bet <= 0:
+            # 加 log 讓 user 能 debug 為什麼沒下注 — 之前一直 rolling-EV
+            # 卻沒下,根因不明
+            excess = balance - gcfg.threshold
+            log.info(
+                "calculate_bet 回 0,跳過此輪(餘額=%d, threshold=%d, "
+                "excess=%d, min_bet=%d, fraction=%.3f, rolling=%.2fx, "
+                "strategy=%s)— 通常是 excess < min_bet 或設定衝突",
+                balance, gcfg.threshold, excess, gcfg.min_bet,
+                gcfg.bet_fraction, roll_mult, gcfg.strategy,
+            )
             await interruptible_sleep(state, 30)
             continue
 
