@@ -440,17 +440,17 @@ def _stock_reply_detected(before: str, current: str) -> bool:
     /stock list(只有價格,沒有 user 餘額更新)。
 
     偵測邏輯:檢查 stock 相關關鍵字在「最近的回應視窗」(尾巴 4000 字)裡
-    出現次數有沒有增加。任一個變多就算有新回應。
+    出現次數**有變動**(增或減)。重要 — 不能只看「增加」!user 賣股後
+    /portfolio 比之前少一支 entry,keyword 計數會「減少」,只看增加會誤判
+    成「沒新訊息」,query 抓不到新 portfolio,UI 持續顯示已賣股票。
     """
     keywords = ("股市行情", "投資組合", "持有:", "持有：",
-                "價格 :", "價格：", "現價:", "現價：")
+                "價格 :", "價格：", "現價:", "現價：",
+                "盈虧:", "盈虧：")
     win = 4000
     bt = before[-win:]
     ct = current[-win:]
-    for kw in keywords:
-        if ct.count(kw) > bt.count(kw):
-            return True
-    return False
+    return any(ct.count(kw) != bt.count(kw) for kw in keywords)
 
 
 async def query_stock_text(
