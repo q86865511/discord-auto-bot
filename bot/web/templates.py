@@ -1201,7 +1201,9 @@ STOCKS_BODY = r"""
       </p>
       <table class="right-align" id="news-table">
         <thead><tr>
-          <th style="width:90px;">日期</th><th style="width:70px;">Symbol</th>
+          <th style="width:130px;">時間</th>
+          <th style="width:90px;">發布日</th>
+          <th style="width:70px;">Symbol</th>
           <th class="left-align">標題</th>
         </tr></thead>
         <tbody></tbody>
@@ -1487,6 +1489,10 @@ async function refresh() {
       noNews.textContent = '';
       news.slice(0, 5).forEach(it => {
         const tr = document.createElement('tr');
+        // fetched_ts:ephemeral 送出時間(精細到秒)— 取到分鐘顯示
+        const ts = (it.fetched_ts || '').slice(0, 16);
+        appendCell(tr, ts ? '(' + ts + ')' : '—', 'dim');
+        // news_date:embed 中「(YYYY-MM-DD)」只到日
         appendCell(tr, '(' + (it.date || '?') + ')', 'dim');
         appendCell(tr, it.symbol || '?');
         const titleCell = document.createElement('td');

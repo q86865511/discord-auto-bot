@@ -297,7 +297,11 @@ async def notify_stock_news(
     for sym in syms:
         lines.append(f"━━ {sym} ━━")
         for it in by_sym[sym]:
-            lines.append(f"  ({it.get('date', '?')}) {it.get('title', '')}")
+            # 時間優先用 fetched_ts(精細到分);date 當「發布日」備註
+            ts = (it.get("fetched_ts") or "")[:16]
+            date = it.get("date", "?")
+            time_part = f"({ts})" if ts else f"({date})"
+            lines.append(f"  {time_part} 發布日 {date}  {it.get('title', '')}")
         lines.append("")
     lines.extend([
         "⚠ 純訊息提示,不構成投資建議。完整新聞請進 Discord /stock symbol:X 看。",

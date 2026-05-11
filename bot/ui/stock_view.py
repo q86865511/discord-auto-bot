@@ -423,14 +423,18 @@ def show_stock_analysis(state: BotState) -> None:
                      "[dim]news_loop 未啟動[/dim][/]")
     if recent_news:
         nt = Table(show_header=True, header_style="bold cyan", box=None)
-        nt.add_column("日期", style="dim", width=12)
+        nt.add_column("時間",   style="dim",       width=18)
+        nt.add_column("發布日", style="dim",       width=12)
         nt.add_column("Symbol", style="bold cyan", width=8)
         nt.add_column("標題")
         for it in recent_news[:5]:
-            date = it.get("date") or it.get("fetched_ts", "")[:10] or "—"
+            # fetched_ts 是 ephemeral 訊息送出時間(精細到秒)
+            ts = (it.get("fetched_ts") or "")[:16]    # "YYYY-MM-DD HH:MM"
+            # news_date 是 embed 中的「(YYYY-MM-DD)」(只到日)
+            date = it.get("date") or "—"
             sym = it.get("symbol", "?")
             title = (it.get("title") or "").strip()[:90]
-            nt.add_row(f"({date})", sym, title)
+            nt.add_row(f"({ts or '—'})", f"({date})", sym, title)
         console.print(nt)
     else:
         console.print("  [dim]尚無新聞 — 只在持股 / 做空時抓,每 6 個 poll 一次。"

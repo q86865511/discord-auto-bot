@@ -147,7 +147,7 @@ async def _check_all_news(
                 if state.quit:
                     break
                 try:
-                    news_text = await _query_stock_news_no_lock(
+                    news_text, ephemeral_iso_ts = await _query_stock_news_no_lock(
                         page, sym, stock_command=cfg.stock.stock_command,
                     )
                     if not news_text:
@@ -155,6 +155,21 @@ async def _check_all_news(
                     items = parse_stock_news(news_text, expected_symbol=sym)
                     if not items:
                         continue
+                    # 把 ephemeral 訊息的 ISO ts 寫進 fetched_ts(精細到秒),
+                    # UI 排序+顯示用。轉成「YYYY-MM-DD HH:MM:SS」格式跟 DB
+                    # 既有格式一致。
+                    if ephemeral_iso_ts:
+                        try:
+                            from datetime import datetime as _dt
+                            # ISO 8601 to "YYYY-MM-DD HH:MM:SS"
+                            t = _dt.fromisoformat(
+                                ephemeral_iso_ts.replace("Z", "+00:00")
+                            ).astimezone()
+                            iso_clean = t.strftime("%Y-%m-%d %H:%M:%S")
+                            for it in items:
+                                it["fetched_ts"] = iso_clean
+                        except (ValueError, TypeError):
+                            pass
                     new_items = await db.upsert_news_items(items)
                     if new_items:
                         all_new_items.extend(new_items)

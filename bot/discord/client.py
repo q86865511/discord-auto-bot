@@ -593,37 +593,40 @@ async def _wait_for_marker(
 
 async def _query_stock_news_no_lock(
     page: "Page", symbol: str, stock_command: str = "/stock",
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """送 /stock symbol:X 後點「近期新聞」按鈕,讀新聞 ephemeral 內容。
 
-    Marker-based wait 確保 textContent 真的替換到「{SYM} - 」detail 跟
-    「{SYM} 相關新聞」news,而非上一個 sym 的舊 ephemeral。修「所有 sym
-    都拿到同樣內容」的 bug。
+    回傳 (news_text, ephemeral_iso_ts):
+      - news_text:textContent(用 innerText 抓,忽略 script)
+      - ephemeral_iso_ts:該 ephemeral 訊息的 ISO 8601 timestamp(從 DOM
+        `<time datetime>` attribute 抓最後一個 = 剛點 button 那則 ephemeral
+        的 send_ts)。給呼叫端當「精細時間」存進 DB,UI 排序+顯示用。
+        如果 DOM 沒有,回 None,呼叫端 fallback 用當下時間。
+
+    Marker-based wait 確保 textContent 真的看到「{SYM} 相關新聞」marker,
+    而非上一個 sym 的舊 ephemeral。
     """
     sym_u = (symbol or "").upper()
     if not sym_u:
-        return None
+        return None, None
 
     await _send_slash_command(page, stock_command, sym_u)
-    # 等 detail ephemeral 含「SYM - 」 header(detail page format)
     detail_marker = f"{sym_u} - "
     detail_text = await _wait_for_marker(
         page, detail_marker, timeout=15.0, stability_sec=1.0,
     )
     if detail_text is None or detail_marker not in detail_text:
         log.warning(
-            "query_stock_news(%s): detail ephemeral 沒等到「%s」marker — "
-            "可能 Discord 替換 ephemeral 慢,棄用此次",
+            "query_stock_news(%s): detail ephemeral 沒等到「%s」marker — 棄用",
             sym_u, detail_marker,
         )
-        return None
+        return None, None
 
     clicked = await _click_button_with_text(page, "近期新聞", timeout=5.0)
     if not clicked:
         log.info("query_stock_news(%s): 近期新聞 button 找不到", sym_u)
-        return None
+        return None, None
 
-    # 等 news ephemeral 含「SYM 相關新聞」header(news page format)
     news_marker = f"{sym_u} 相關新聞"
     news_text = await _wait_for_marker(
         page, news_marker, timeout=10.0, stability_sec=1.0,
@@ -633,16 +636,31 @@ async def _query_stock_news_no_lock(
             "query_stock_news(%s): news ephemeral 沒等到「%s」marker — 棄用",
             sym_u, news_marker,
         )
-        return None
-    return news_text
+        return None, None
+
+    # 抓最新 ephemeral message 的 ISO timestamp(就是剛點 button 那則)
+    ephemeral_ts = None
+    try:
+        ephemeral_ts = await page.evaluate("""() => {
+            const times = document.querySelectorAll('time[datetime]');
+            if (times.length === 0) return null;
+            return times[times.length - 1].getAttribute('datetime');
+        }""")
+    except Exception as e:    # noqa: BLE001
+        log.debug("讀取 ephemeral ts 失敗: %s", e)
+
+    return news_text, ephemeral_ts
 
 
 async def query_stock_news(
     page: "Page", symbol: str, stock_command: str = "/stock",
 ) -> str | None:
-    """送 /stock symbol:X + 點「近期新聞」抓 ephemeral。標準 wrapper(取 lock)。"""
+    """送 /stock symbol:X + 點「近期新聞」抓 ephemeral。Wrapper(取 lock,
+    只回 news_text 給 backward compat — ephemeral_ts 給 news_loop 用)。
+    """
     async with command_lock:
-        return await _query_stock_news_no_lock(page, symbol, stock_command)
+        text, _ts = await _query_stock_news_no_lock(page, symbol, stock_command)
+        return text
 
 
 async def query_portfolio_full(

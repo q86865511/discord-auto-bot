@@ -487,7 +487,7 @@ class Database:
                 by_sym[r["symbol"]].append((r["id"], float(r["price"] or 0)))
 
             outlier_ids: list[int] = []
-            for sym, items in by_sym.items():
+            for _sym, items in by_sym.items():
                 if len(items) < 3:
                     continue
                 prices = sorted(p for _, p in items if p > 0)
@@ -633,20 +633,21 @@ class Database:
         return await asyncio.to_thread(self._load_news_sync, limit, symbol)
 
     def _load_news_sync(self, limit, symbol):
-        # 跨 sym 排序:news_date DESC(ISO YYYY-MM-DD 字串排序正確)→ id DESC
-        # 確保「最新日期的新聞」優先,避免某 sym 全部 id 高就霸佔列表。
+        # 排序:fetched_ts DESC(精細到秒,user 看 ephemeral tooltip 一致)→
+        # news_date DESC(備援)→ id DESC。fetched_ts 是 ephemeral message
+        # 送出時間,user 看 hover 顯示的「上午 02:56」就是這個。
         with self._conn() as c:
             if symbol:
                 rows = c.execute(
                     "SELECT symbol, news_date, title, fetched_ts FROM stock_news "
                     "WHERE symbol=? "
-                    "ORDER BY news_date DESC, id DESC LIMIT ?",
+                    "ORDER BY fetched_ts DESC, news_date DESC, id DESC LIMIT ?",
                     (symbol, limit),
                 ).fetchall()
             else:
                 rows = c.execute(
                     "SELECT symbol, news_date, title, fetched_ts FROM stock_news "
-                    "ORDER BY news_date DESC, id DESC LIMIT ?",
+                    "ORDER BY fetched_ts DESC, news_date DESC, id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
         return [dict(r) for r in rows]
