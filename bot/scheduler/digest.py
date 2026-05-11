@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from bot.core.constants import DEFAULT_DIGEST_HOUR
-from bot.core.state import BotState, interruptible_sleep
+from bot.core.state import BotState, interruptible_sleep, wait_while_paused
 from bot.notifications.digest import build_digest_body
 from bot.notifications.email import send_email
 
@@ -25,6 +25,10 @@ async def digest_loop(
     last_sent_date: str | None = None
     while not state.quit:
         await interruptible_sleep(state, 60)
+        if state.quit:
+            break
+        # 暫停時跳過寄信 — user 按 P 表示要靜下來,別寄摘要打擾
+        await wait_while_paused(state)
         if state.quit:
             break
 

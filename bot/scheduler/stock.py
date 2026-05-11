@@ -24,6 +24,7 @@ from bot.core.state import (
     mark_loop_failed,
     mark_loop_ok,
     mark_loop_running,
+    wait_while_paused,
 )
 from bot.discord.client import (
     channel_context,
@@ -84,6 +85,14 @@ async def stock_loop(
     await interruptible_sleep(state, 60)
 
     while not state.quit:
+        # 暫停時(P 鍵 / Dashboard 觸發)原地等,不送 /stock /portfolio。
+        # 其他 6 個指令型 loop(hourly/daily/gambling/transfer/neko/news)
+        # 都有這行,stock_loop 之前漏了 — 用 P 鍵以為暫停了實際上股票
+        # 還在被持續 query。
+        await wait_while_paused(state)
+        if state.quit:
+            break
+
         cfg = config_provider()
         scfg = cfg.stock
         if not scfg.enabled:
@@ -259,7 +268,10 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                 if not sym or sym in all_prices:
                     continue
                 if state.quit:
-                    return
+                    # 關機途中提早結束:不算失敗(這次 poll 抓的資料還是有效)
+                    # 之前 bare `return` 回 None,caller `if ok:` 把它當失敗
+                    # → mark_loop_failed,污染 loop_health 跨 reboot
+                    return True
                 try:
                     # Tab 後 cursor 已在 symbol 參數欄,直接打 value(打
                     # "symbol:..." 會變成 /stock symbol: symbol:X — bot 看不懂)
@@ -347,7 +359,9 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                     key = (sym, sig)
                     current_strong[key] = sc
                     # Email anti-spam:只在「之前沒通知過 / 之前分數較低」時寄
-                    already = state.stock_notified_signals.get(key)
+                    # 讀寫都走 state.lock(state.py 開頭承諾「讀-改-寫」走 lock)
+                    async with state.lock:
+                        already = state.stock_notified_signals.get(key)
                     if already is None or sc > already + 5:
                         try:
                             await notify_stock_signal(state, cfg, sym, sig, ev)
@@ -412,7 +426,9 @@ async def _check_volatility(state: BotState, cfg, by_sym: dict[str, list]) -> No
         change = info["change_pct"]
         key = (sym, direction)
         # 同 sym 同方向 cooldown 內只通知一次
-        last_ts = state.stock_volatility_notified.get(key, 0)
+        # 讀寫都走 state.lock(state.py 開頭承諾「讀-改-寫」走 lock)
+        async with state.lock:
+            last_ts = state.stock_volatility_notified.get(key, 0)
         if now_ts - last_ts < cooldown_sec:
             continue
 

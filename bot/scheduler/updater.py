@@ -13,7 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from bot.core.state import BotState, interruptible_sleep
+from bot.core.state import BotState, interruptible_sleep, wait_while_paused
 from bot.core.updater import check_for_updates, perform_update
 
 if TYPE_CHECKING:
@@ -31,6 +31,12 @@ async def updater_loop(
     await interruptible_sleep(state, 30)
 
     while not state.quit:
+        # 暫停時不檢查更新 — 尤其 auto_update=True 時不會在 user 暫停期間
+        # 觸發 git pull + reboot,讓 user 對程式狀態保持控制
+        await wait_while_paused(state)
+        if state.quit:
+            break
+
         ucfg = config_provider().updater
         if not ucfg.auto_check:
             await interruptible_sleep(state, 60)
