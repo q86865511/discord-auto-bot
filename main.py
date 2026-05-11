@@ -266,6 +266,15 @@ async def main() -> int:
     except Exception:    # noqa: BLE001
         print("  ⚠ news date migration 失敗(可忽略,新項仍會用新格式)")
 
+    # 一次性 migration:清掉 stock_prices 中 parser 污染 row(明顯離譜值)
+    try:
+        n_outliers = await db.cleanup_stock_prices_outliers_if_needed()
+        if n_outliers:
+            print(f"  ✓ 已清除 {n_outliers} 筆 stock_prices 異常價格"
+                  f"(parser 污染 row,sym 平均 100x 以上 ratio)")
+    except Exception:    # noqa: BLE001
+        print("  ⚠ stock_prices outlier cleanup 失敗(可忽略)")
+
     # 3) 載入 config(必填欄位缺失走 wizard 補)
     config = await load_config(db)
     await first_run_wizard(config)

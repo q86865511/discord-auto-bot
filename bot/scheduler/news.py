@@ -71,6 +71,15 @@ async def news_loop(
             await interruptible_sleep(state, 60)
             continue
 
+        # 如果 stock snapshot 還沒 ready(剛啟動 stock_loop 還在跑第一次 poll),
+        # 短 sleep 30 秒後 retry — 而非整個 news_poll_interval(預設 60 分鐘)
+        # 才再試。避免 bot 啟動後 1 小時都沒新聞。
+        snap = state.stock_last_snapshot or {}
+        if not (snap.get("prices") or {}):
+            log.info("news loop: stock snapshot 還沒 ready,30 秒後 retry")
+            await interruptible_sleep(state, 30)
+            continue
+
         mark_loop_running(state, _LOOP_NAME)
         try:
             await _check_all_news(page, state, cfg, db)
@@ -91,17 +100,11 @@ async def _check_all_news(
 
     序列抓取(每支間隔 3 秒,避免 spam Discord)。新聞 DB 用 UNIQUE
     (symbol, date, title) 去重 — 只有真的「新加入」才觸發通知。
+
+    caller(news_loop)已保證 snapshot.prices 非空才會呼叫進來。
     """
     snap = state.stock_last_snapshot or {}
     all_syms = sorted((snap.get("prices") or {}).keys())
-    if not all_syms:
-        # stock_loop 還沒跑第一次 → snapshot 空,fallback 到持股 + 做空
-        targets = sorted(set((snap.get("holdings") or {}).keys())
-                         | set((snap.get("shorts") or {}).keys()))
-        if not targets:
-            log.info("news loop: snapshot 還沒 ready,跳過此次")
-            return
-        all_syms = targets
 
     log.info("news loop: 開始抓 %d 支(%s)", len(all_syms),
              ", ".join(all_syms[:10]))

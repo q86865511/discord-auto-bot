@@ -456,6 +456,63 @@ class Database:
                 (symbol, float(shares), float(avg_cost), ts),
             )
 
+    # ── 股票價格污染清理 ─────────────────────────────────────────────
+    async def cleanup_stock_prices_outliers_if_needed(self) -> int:
+        """一次性清理 stock_prices 中明顯離譜的 row(parser bug 污染遺留)。
+
+        判斷:每 sym 的 mean,個別 price 跟 mean ratio > 100x 視為異常刪掉。
+        100x 是非常寬鬆的閾值(只擋住「MAID 27289 跑到 WAVE 60」這類錯),
+        正常的漲跌停(±10~30%)絕對不會被誤刪。
+        跑過一次後 meta 記錄,不重複跑。
+        """
+        already = await self.get_meta("stock_prices_outlier_cleanup_v1")
+        if already:
+            return 0
+        n = await asyncio.to_thread(self._cleanup_prices_outliers_sync)
+        await self.set_meta("stock_prices_outlier_cleanup_v1", "1")
+        return n
+
+    def _cleanup_prices_outliers_sync(self) -> int:
+        """用 median 偵測 outliers。median 不會被 outlier 拉走,比 AVG 穩定
+        (若 5 筆 60 + 1 筆 27289,AVG=4600,outlier 反而 < 100x AVG 不被擋
+        ;median=63,outlier 27289/63=433x → 被擋)。
+        """
+        from collections import defaultdict
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id, symbol, price FROM stock_prices"
+            ).fetchall()
+            by_sym: dict[str, list[tuple[int, float]]] = defaultdict(list)
+            for r in rows:
+                by_sym[r["symbol"]].append((r["id"], float(r["price"] or 0)))
+
+            outlier_ids: list[int] = []
+            for sym, items in by_sym.items():
+                if len(items) < 3:
+                    continue
+                prices = sorted(p for _, p in items if p > 0)
+                if len(prices) < 3:
+                    continue
+                median = prices[len(prices) // 2]
+                if median <= 0:
+                    continue
+                for rid, p in items:
+                    if p <= 0:
+                        outlier_ids.append(rid)
+                        continue
+                    ratio = max(p, median) / min(p, median)
+                    if ratio > 100:
+                        outlier_ids.append(rid)
+
+            if not outlier_ids:
+                return 0
+            placeholders = ",".join("?" * len(outlier_ids))
+            cur = c.execute(
+                f"DELETE FROM stock_prices WHERE id IN ({placeholders})",
+                outlier_ids,
+            )
+            return cur.rowcount or len(outlier_ids)
+
     # ── 股票新聞 ─────────────────────────────────────────────────────
     async def migrate_news_dates_to_iso_if_needed(self) -> int:
         """一次性把舊 stock_news.news_date 從 `YYYY/M/D` 變 `YYYY-MM-DD`,

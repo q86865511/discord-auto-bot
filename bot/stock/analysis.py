@@ -106,15 +106,18 @@ def detect_volatility(
     change_pct = (cur_price - baseline_price) / baseline_price * 100
     if abs(change_pct) < threshold_pct:
         return None
-    # Sanity:股票 N 分鐘內絕對不該變動 > 1000%。這量級多半是 parser 誤
-    # 抓到另一支股的價格寫入 series(例如 MAID 27000 跟 WAVE 60 混了)。
-    # 跳過通知避免發出「暴漲 43000%」的鬧劇 email。
-    if abs(change_pct) > 1000:
+    # Sanity:cur 跟 baseline ratio > 10x 多半是 parser 把 A 股的價寫入 B
+    # series(例如 MAID 27000 跟 WAVE 60 混了),不是真實波動。判 ratio
+    # 比 change_pct% 更精準 — 跌 99% 跟漲 9900% 是同個 ratio (100x),
+    # 用 change_pct 只看單向,跌幅永遠 < 100% 擋不住。
+    ratio = (max(cur_price, baseline_price)
+             / max(min(cur_price, baseline_price), 0.0001))
+    if ratio > 10.0:
         log.warning(
-            "detect_volatility: %s 變動 %.1f%% 超過 1000%% — 棄用此次警示"
-            "(疑似 parser 異常,baseline=%.4f current=%.4f)",
-            (series[-1].get("symbol") or "?"), change_pct,
-            baseline_price, cur_price,
+            "detect_volatility: %s baseline=%.4f current=%.4f (ratio %.0fx) "
+            "— 棄用此次警示(疑似 series 污染)",
+            (series[-1].get("symbol") or "?"),
+            baseline_price, cur_price, ratio,
         )
         return None
 
