@@ -143,6 +143,7 @@ async def _check_all_news(
                 use_separate_channel = False
 
         try:
+            stats = {"ok": 0, "no_text": 0, "no_items": 0, "no_new": 0, "exc": 0}
             for sym in all_syms:
                 if state.quit:
                     break
@@ -151,17 +152,29 @@ async def _check_all_news(
                         page, sym, stock_command=cfg.stock.stock_command,
                     )
                     if not news_text:
+                        # marker 等不到 / button 點不到 — 看 X 鍵除錯紀錄細節
+                        log.warning(
+                            "news loop: %s 沒抓到 news_text "
+                            "(detail/news marker timeout 或 button 點不到)",
+                            sym,
+                        )
+                        stats["no_text"] += 1
                         continue
                     items = parse_stock_news(news_text, expected_symbol=sym)
                     if not items:
+                        # parser sanity 棄用 — 通常是 textContent header 跟
+                        # expected_symbol 不一致(ephemeral 替換沒完成)
+                        log.warning(
+                            "news loop: %s parse 後 0 items "
+                            "(sanity 棄用,可能 ephemeral 累積 + rfind 失敗)",
+                            sym,
+                        )
+                        stats["no_items"] += 1
                         continue
-                    # 把 ephemeral 訊息的 ISO ts 寫進 fetched_ts(精細到秒),
-                    # UI 排序+顯示用。轉成「YYYY-MM-DD HH:MM:SS」格式跟 DB
-                    # 既有格式一致。
+                    # 把 ephemeral 訊息的 ISO ts 寫進 fetched_ts
                     if ephemeral_iso_ts:
                         try:
                             from datetime import datetime as _dt
-                            # ISO 8601 to "YYYY-MM-DD HH:MM:SS"
                             t = _dt.fromisoformat(
                                 ephemeral_iso_ts.replace("Z", "+00:00")
                             ).astimezone()
@@ -175,10 +188,30 @@ async def _check_all_news(
                         all_new_items.extend(new_items)
                         log.info("news loop: %s 新增 %d 則(總抓 %d)",
                                  sym, len(new_items), len(items))
+                        stats["ok"] += 1
+                    else:
+                        log.info("news loop: %s 抓到 %d 則但全部已存在",
+                                 sym, len(items))
+                        stats["no_new"] += 1
                 except Exception:    # noqa: BLE001
                     log.exception("news loop: 抓 %s 失敗", sym)
+                    stats["exc"] += 1
                 from bot.core.state import interruptible_sleep as _is
                 await _is(state, 3)
+
+            # 一輪結束總結 log,user 能快速看到「10 支中幾支成功」
+            log.info(
+                "news loop: cycle 完成 — ok=%d no_text=%d no_items=%d "
+                "no_new=%d exc=%d(共 %d 支)",
+                stats["ok"], stats["no_text"], stats["no_items"],
+                stats["no_new"], stats["exc"], len(all_syms),
+            )
+            if stats["no_text"] + stats["no_items"] + stats["exc"] > 0:
+                state.queue_log(
+                    f"⚠ news cycle:{stats['ok']}/{len(all_syms)} 成功,"
+                    f"{stats['no_text']} 沒文字 / {stats['no_items']} 棄用 / "
+                    f"{stats['exc']} 例外 — X 鍵看細節"
+                )
         finally:
             # 2. 切回主頻道(確保其他 loop 之後送指令正確)
             if use_separate_channel and main_ch_id:

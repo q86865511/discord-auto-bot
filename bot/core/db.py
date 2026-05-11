@@ -636,6 +636,10 @@ class Database:
         # 排序:fetched_ts DESC(精細到秒,user 看 ephemeral tooltip 一致)→
         # news_date DESC(備援)→ id DESC。fetched_ts 是 ephemeral message
         # 送出時間,user 看 hover 顯示的「上午 02:56」就是這個。
+        #
+        # 重要:return key 用「date」而非 column name「news_date」— UI /
+        # Web / email 都 access it.get("date"),跟 parser return dict 一致。
+        # 之前 bug 是 dict(row) 用 column name 當 key,UI 拿不到 fallback "—"。
         with self._conn() as c:
             if symbol:
                 rows = c.execute(
@@ -650,7 +654,15 @@ class Database:
                     "ORDER BY fetched_ts DESC, news_date DESC, id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-        return [dict(r) for r in rows]
+        return [
+            {
+                "symbol":     r["symbol"],
+                "date":       r["news_date"],     # rename column → key
+                "title":      r["title"],
+                "fetched_ts": r["fetched_ts"],
+            }
+            for r in rows
+        ]
 
     async def load_stock_holdings(self) -> list[dict]:
         return await asyncio.to_thread(self._load_holdings_sync)

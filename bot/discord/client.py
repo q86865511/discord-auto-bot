@@ -610,6 +610,8 @@ async def _query_stock_news_no_lock(
     if not sym_u:
         return None, None
 
+    log.info("query_stock_news(%s): 步驟 1/3 送 %s symbol:%s",
+             sym_u, stock_command, sym_u)
     await _send_slash_command(page, stock_command, sym_u)
     detail_marker = f"{sym_u} - "
     detail_text = await _wait_for_marker(
@@ -617,15 +619,23 @@ async def _query_stock_news_no_lock(
     )
     if detail_text is None or detail_marker not in detail_text:
         log.warning(
-            "query_stock_news(%s): detail ephemeral 沒等到「%s」marker — 棄用",
+            "query_stock_news(%s): 步驟 1 失敗 — detail ephemeral 沒等到「%s」marker"
+            "(timeout 15s,可能 Discord 慢 / send 失敗)",
             sym_u, detail_marker,
         )
         return None, None
+    log.info("query_stock_news(%s): 步驟 1/3 ✓ detail marker 找到", sym_u)
 
+    log.info("query_stock_news(%s): 步驟 2/3 點「近期新聞」button", sym_u)
     clicked = await _click_button_with_text(page, "近期新聞", timeout=5.0)
     if not clicked:
-        log.info("query_stock_news(%s): 近期新聞 button 找不到", sym_u)
+        log.warning(
+            "query_stock_news(%s): 步驟 2 失敗 — 近期新聞 button 點不到"
+            "(button 不存在 / detail 還沒 render 完)",
+            sym_u,
+        )
         return None, None
+    log.info("query_stock_news(%s): 步驟 2/3 ✓ button 已點", sym_u)
 
     news_marker = f"{sym_u} 相關新聞"
     news_text = await _wait_for_marker(
@@ -633,10 +643,12 @@ async def _query_stock_news_no_lock(
     )
     if news_text is None or news_marker not in news_text:
         log.warning(
-            "query_stock_news(%s): news ephemeral 沒等到「%s」marker — 棄用",
+            "query_stock_news(%s): 步驟 3 失敗 — news ephemeral 沒等到「%s」marker"
+            "(timeout 10s,可能 button click 沒生效 / Discord 慢)",
             sym_u, news_marker,
         )
         return None, None
+    log.info("query_stock_news(%s): 步驟 3/3 ✓ news marker 找到", sym_u)
 
     # 抓最新 ephemeral message 的 ISO timestamp(就是剛點 button 那則)
     ephemeral_ts = None
