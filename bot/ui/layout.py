@@ -356,10 +356,17 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         if state.paused
         else "[bold]P[/bold] 暫停系統"
     )
-    # 「X 除錯」加上錯誤計數,有錯時用紅色,讓 user 一眼看到
-    err_n = len(state.error_lines) if state.error_lines else 0
-    if err_n > 0:
-        x_label = f"[bold red]X[/bold red] 除錯[red]({err_n})[/red]"
+    # 「X 除錯」按 level 分色:有 ERROR/CRITICAL 才紅(代表真的壞了 / timeout
+    # 等需要使用者關注的)。只 WARNING 用黃(loop 暫時失敗會自動 retry 那種)。
+    err_lines_list = list(state.error_lines) if state.error_lines else []
+    n_err = sum(1 for e in err_lines_list
+                if e.get("level") in ("ERROR", "CRITICAL"))
+    n_warn = sum(1 for e in err_lines_list
+                 if e.get("level") == "WARNING")
+    if n_err > 0:
+        x_label = f"[bold red]X[/bold red] 除錯[red]({n_err}E/{n_warn}W)[/red]"
+    elif n_warn > 0:
+        x_label = f"[bold yellow]X[/bold yellow] 除錯[yellow]({n_warn}W)[/yellow]"
     else:
         x_label = "[bold]X[/bold] 除錯"
     footer = Panel(

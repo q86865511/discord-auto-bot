@@ -457,6 +457,50 @@ class Database:
             )
 
     # ── 股票新聞 ─────────────────────────────────────────────────────
+    async def migrate_news_dates_to_iso_if_needed(self) -> int:
+        """一次性把舊 stock_news.news_date 從 `YYYY/M/D` 變 `YYYY-MM-DD`,
+        字串排序才正確。跑過一次後 meta 記錄,不重複跑。回傳 migrate 筆數。
+        """
+        already = await self.get_meta("news_dates_migrated_v1")
+        if already:
+            return 0
+        n = await asyncio.to_thread(self._migrate_news_dates_sync)
+        await self.set_meta("news_dates_migrated_v1", "1")
+        return n
+
+    def _migrate_news_dates_sync(self) -> int:
+        import re as _re
+        import sqlite3 as _sq
+        n = 0
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id, news_date FROM stock_news"
+            ).fetchall()
+            for r in rows:
+                raw = r["news_date"] or ""
+                if _re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+                    continue
+                parts = _re.split(r"[/\-]", raw.strip())
+                if len(parts) != 3:
+                    continue
+                try:
+                    iso = (f"{int(parts[0]):04d}-"
+                           f"{int(parts[1]):02d}-{int(parts[2]):02d}")
+                except ValueError:
+                    continue
+                try:
+                    c.execute(
+                        "UPDATE stock_news SET news_date=? WHERE id=?",
+                        (iso, r["id"]),
+                    )
+                    n += 1
+                except _sq.IntegrityError:
+                    # UNIQUE(symbol, news_date, title) — 若 normalize 後跟
+                    # 既有重複,直接刪掉這筆
+                    c.execute("DELETE FROM stock_news WHERE id=?", (r["id"],))
+                    n += 1
+        return n
+
     async def upsert_news_items(self, items: list[dict]) -> list[dict]:
         """寫入新聞。回傳「真的新加入」的 items(UNIQUE constraint 擋掉的不算)。
 
@@ -502,17 +546,20 @@ class Database:
         return await asyncio.to_thread(self._load_news_sync, limit, symbol)
 
     def _load_news_sync(self, limit, symbol):
+        # 跨 sym 排序:news_date DESC(ISO YYYY-MM-DD 字串排序正確)→ id DESC
+        # 確保「最新日期的新聞」優先,避免某 sym 全部 id 高就霸佔列表。
         with self._conn() as c:
             if symbol:
                 rows = c.execute(
                     "SELECT symbol, news_date, title, fetched_ts FROM stock_news "
-                    "WHERE symbol=? ORDER BY id DESC LIMIT ?",
+                    "WHERE symbol=? "
+                    "ORDER BY news_date DESC, id DESC LIMIT ?",
                     (symbol, limit),
                 ).fetchall()
             else:
                 rows = c.execute(
                     "SELECT symbol, news_date, title, fetched_ts FROM stock_news "
-                    "ORDER BY id DESC LIMIT ?",
+                    "ORDER BY news_date DESC, id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
         return [dict(r) for r in rows]

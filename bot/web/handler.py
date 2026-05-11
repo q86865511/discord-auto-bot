@@ -163,7 +163,12 @@ def make_handler(
 
             if path == "/api/logs":
                 lines = read_log_tail()
-                self._json({"lines": lines, "count": len(lines)})
+                # 順便回傳 state.error_lines(最近 30 筆 WARNING+)
+                errors = list(state.error_lines or [])
+                self._json({
+                    "lines": lines, "count": len(lines),
+                    "errors": errors,
+                })
                 return
             if path == "/api/state":
                 self._json(run_in_main_loop(

@@ -106,6 +106,17 @@ def detect_volatility(
     change_pct = (cur_price - baseline_price) / baseline_price * 100
     if abs(change_pct) < threshold_pct:
         return None
+    # Sanity:股票 N 分鐘內絕對不該變動 > 1000%。這量級多半是 parser 誤
+    # 抓到另一支股的價格寫入 series(例如 MAID 27000 跟 WAVE 60 混了)。
+    # 跳過通知避免發出「暴漲 43000%」的鬧劇 email。
+    if abs(change_pct) > 1000:
+        log.warning(
+            "detect_volatility: %s 變動 %.1f%% 超過 1000%% — 棄用此次警示"
+            "(疑似 parser 異常,baseline=%.4f current=%.4f)",
+            (series[-1].get("symbol") or "?"), change_pct,
+            baseline_price, cur_price,
+        )
+        return None
 
     return {
         "direction":   "rise" if change_pct > 0 else "fall",

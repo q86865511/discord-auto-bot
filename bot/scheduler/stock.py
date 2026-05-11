@@ -291,7 +291,31 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                     log.exception("stock: 查詢 %s 失敗", sym)
                 await interruptible_sleep(state, 3)
 
-        # ── 4. 寫入 DB ─────────────────────────────────────────────
+        # ── 4. Sanity check + 寫入 DB ──────────────────────────────
+        # 防 parser 異常把 A 股票的價格寫到 B 股票(例如 MAID 27000 跑到
+        # WAVE 上,觸發「暴漲 43000%」的鬧劇)。比較上次 snapshot 的價格,
+        # 同 sym 變動超過 10x 就棄用新值,保留舊值(寬鬆 ratio 允許正常
+        # 漲跌停的 ±10~30% 波動,但擋掉 100x 以上的離譜跳動)。
+        prev_prices = (state.stock_last_snapshot or {}).get("prices", {}) or {}
+        cleaned: dict[str, float] = {}
+        for sym, p in all_prices.items():
+            prev = prev_prices.get(sym)
+            if prev is not None and prev > 0 and p > 0:
+                ratio = max(p, prev) / min(p, prev)
+                if ratio > 10.0:
+                    log.warning(
+                        "stock: %s 價格從 %.4f 跳到 %.4f (%.1fx) — "
+                        "疑似 parser 異常,棄用此次值",
+                        sym, prev, p, ratio,
+                    )
+                    state.queue_log(
+                        f"⚠ {sym} 價格異常跳動 ({prev:.2f}→{p:.2f}),棄用"
+                    )
+                    cleaned[sym] = prev
+                    continue
+            cleaned[sym] = p
+        all_prices = cleaned
+
         if all_prices:
             n = await db.append_stock_prices(ts, all_prices)
             log.info("stock: 寫入 %d 支股票價格", n)

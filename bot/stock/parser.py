@@ -340,14 +340,29 @@ def parse_stock_dropdown(text: str) -> dict[str, float]:
 # title 可能含內嵌括號(例 "技術訊號 (xxx)..."),所以用 lookahead 到下一個
 # (YYYY/MM/DD) 或字串尾才停。
 STOCK_NEWS_HEADER = re.compile(r"([A-Z][A-Z0-9]{1,6})\s*相關新聞")
-# 每條新聞 = 「行首 + 可選 bullet + (日期) + title 到行尾」。
-# 「行首」防止 title 中內嵌的 `(2026-05-10)` 被誤判為下一條(例如:
-# 「分析師日報 (2026-05-10):市場洞察」這 title 中段含日期但不是新項)。
-STOCK_NEWS_LINE = re.compile(
-    r"(?:^|\n)\s*[•·\-\*]?\s*"
-    r"\(\s*([0-9]{4}[/\-][0-9]{1,2}[/\-][0-9]{1,2})\s*\)\s*"
-    r"([^\n]+)",
+# 新聞日期位置 — 用「bullet 或 string start」當 anchor 確保不把 title 中
+# 內嵌的「(2026-05-10):市場洞察」誤判為下條 entry 的開頭。
+# (Discord embed 用 • bullet 開頭,textContent 通常保留 unicode 符號。)
+NEWS_DATE_WITH_BULLET = re.compile(
+    r"(?:^|[•·\*•‣])"
+    r"\s*\(\s*([0-9]{4}[/\-][0-9]{1,2}[/\-][0-9]{1,2})\s*\)",
 )
+# Fallback:若 bullet 抓不到(Discord 改 UI 或 textContent 沒 bullet),
+# 退到「寬鬆 — 任何 (YYYY/M/D) 都當 entry」
+NEWS_DATE_RAW = re.compile(
+    r"\(\s*([0-9]{4}[/\-][0-9]{1,2}[/\-][0-9]{1,2})\s*\)",
+)
+
+
+def _normalize_news_date(raw: str) -> str:
+    """把「2026/5/10」或「2026-5-10」標準化成 ISO「2026-05-10」(便於排序)。"""
+    parts = re.split(r"[/\-]", raw.strip())
+    if len(parts) == 3:
+        try:
+            return f"{int(parts[0]):04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
+        except ValueError:
+            pass
+    return raw
 
 
 def parse_stock_news(
@@ -355,10 +370,11 @@ def parse_stock_news(
 ) -> list[dict]:
     """從新聞 ephemeral 抓新聞列表。
 
-    回傳 [{symbol, date, title}, ...](按文字中出現順序,Discord 通常已按
-    時間新→舊排好)。expected_symbol 用來校驗 + 補 symbol 欄位。
+    回傳 [{symbol, date, title}, ...](date 為 ISO YYYY-MM-DD)。日期排序
+    在 DB query 端做(用 news_date DESC)。
 
-    若找不到「{SYMBOL} 相關新聞」header,從整段文字盡量抓(rough fallback)。
+    Strategy(防 title 中內嵌日期被誤判):先用「bullet 為前綴」抓 entry
+    起點,如果抓不到(Discord 改 UI),退到寬鬆模式。
     """
     if not text:
         return []
@@ -368,26 +384,35 @@ def parse_stock_news(
     m = STOCK_NEWS_HEADER.search(text)
     if m:
         sym_from_header = m.group(1).upper()
-        text = text[m.end():]
-        # 截一段(避免到非新聞 panel),6000 字應覆蓋 5~10 條新聞
-        text = text[:6000]
+        text = text[m.end():m.end() + 6000]
 
     sym = (expected_symbol or sym_from_header or "").upper()
 
+    # 找所有「日期 anchor」位置(優先 bullet 前綴);找不到才寬鬆
+    anchors = [(m.start(), m.end(), m.group(1))
+               for m in NEWS_DATE_WITH_BULLET.finditer(text)]
+    if not anchors:
+        anchors = [(m.start(), m.end(), m.group(1))
+                   for m in NEWS_DATE_RAW.finditer(text)]
+    if not anchors:
+        return []
+
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
-    for m in STOCK_NEWS_LINE.finditer(text):
-        date = m.group(1).strip()
-        title = (m.group(2) or "").strip()
-        # 清掉前後標點(• · - 等)
-        title = title.lstrip("•·-– ").strip()
+    for i, (_start, end, date_raw) in enumerate(anchors):
+        # title = 從 date 結尾 → 下個 anchor 起點(或文字尾)
+        title_end = anchors[i + 1][0] if i + 1 < len(anchors) else len(text)
+        title = text[end:title_end].strip()
+        # 清掉前後 bullet / 標點
+        title = title.lstrip("•·*-– \t\r\n").rstrip(" \t\r\n").strip()
         if not title or len(title) < 3:
             continue
         if len(title) > 200:
             title = title[:200]
-        key = (date, title)
+        date_iso = _normalize_news_date(date_raw)
+        key = (date_iso, title)
         if key in seen:
             continue
         seen.add(key)
-        out.append({"symbol": sym, "date": date, "title": title})
+        out.append({"symbol": sym, "date": date_iso, "title": title})
     return out

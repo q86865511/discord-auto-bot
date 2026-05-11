@@ -256,6 +256,15 @@ async def main() -> int:
             f"(config={migrated_cfg}, history={migrated_history}, analysis={migrated_analysis})"
         )
 
+    # 一次性 migration:把 stock_news.news_date 從 YYYY/M/D 變 ISO YYYY-MM-DD,
+    # 跨 sym 字串排序才正確。跑過一次後 meta 記錄不重複跑。
+    try:
+        n_news_iso = await db.migrate_news_dates_to_iso_if_needed()
+        if n_news_iso:
+            print(f"  ✓ 已 normalize {n_news_iso} 則新聞日期到 ISO 格式")
+    except Exception:    # noqa: BLE001
+        print("  ⚠ news date migration 失敗(可忽略,新項仍會用新格式)")
+
     # 3) 載入 config(必填欄位缺失走 wizard 補)
     config = await load_config(db)
     await first_run_wizard(config)

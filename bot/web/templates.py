@@ -819,6 +819,25 @@ loadConfig();
 LOGS_BODY = r"""
 <div class="card">
   <div style="display: flex; justify-content: space-between; align-items: center;">
+    <h3 style="margin: 0;">🐛 除錯紀錄 <span id="err-badge" class="dim" style="font-size: 12px;"></span></h3>
+    <span class="dim" style="font-size: 12px;">
+      WARNING+ 等級的 log。終端按 X 鍵可看完整 30 筆。
+    </span>
+  </div>
+  <div id="err-empty" class="dim" style="margin-top: 8px;"></div>
+  <table class="right-align" id="err-table" style="margin-top: 8px;">
+    <thead><tr>
+      <th style="width:80px;">時間</th>
+      <th style="width:80px;">等級</th>
+      <th style="width:240px;" class="left-align">Logger</th>
+      <th class="left-align">訊息</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="card" style="margin-top: 16px;">
+  <div style="display: flex; justify-content: space-between; align-items: center;">
     <h3 style="margin: 0;">📋 Bot Log(最近 200 行,密碼/token 自動遮罩)</h3>
     <div>
       <label class="dim" style="font-size: 12px;">
@@ -828,7 +847,7 @@ LOGS_BODY = r"""
     </div>
   </div>
   <pre id="log-content" style="background: #010409; padding: 12px;
-       border-radius: 6px; margin: 12px 0 0 0; max-height: 70vh;
+       border-radius: 6px; margin: 12px 0 0 0; max-height: 60vh;
        overflow-y: auto; font-size: 12px; line-height: 1.4;
        white-space: pre-wrap; word-break: break-all;
        color: #c9d1d9;"></pre>
@@ -841,6 +860,49 @@ async function refreshLogs() {
     const d = await r.json();
     const pre = document.getElementById('log-content');
     if (d.error) { pre.textContent = '錯誤: ' + d.error; return; }
+
+    // ── 除錯紀錄 card(errors 來自 state.error_lines)─────────────
+    const errBody = document.querySelector('#err-table tbody');
+    const errBadge = document.getElementById('err-badge');
+    const errEmpty = document.getElementById('err-empty');
+    const errs = d.errors || [];
+    errBody.innerHTML = '';
+    const nErr = errs.filter(e => e.level === 'ERROR' || e.level === 'CRITICAL').length;
+    const nWarn = errs.filter(e => e.level === 'WARNING').length;
+    if (errs.length === 0) {
+      errBadge.textContent = '✓ 0 筆';
+      errBadge.style.color = '#3fb950';
+      errEmpty.textContent = '— 目前沒有任何錯誤紀錄';
+    } else {
+      // 只有 ERROR/CRITICAL 才紅色,WARNING 不紅色
+      const badgeText = nErr > 0
+        ? `${nErr} 錯誤 / ${nWarn} 警告`
+        : `${nWarn} 警告`;
+      errBadge.textContent = badgeText;
+      errBadge.style.color = nErr > 0 ? '#f85149' : '#d29922';
+      errEmpty.textContent = '';
+      errs.slice().reverse().forEach(e => {
+        const tr = document.createElement('tr');
+        const tsCell = document.createElement('td'); tsCell.style.color = '#6e7681';
+        tsCell.textContent = e.ts || '—'; tr.appendChild(tsCell);
+        const lvlCell = document.createElement('td');
+        const lvl = e.level || '?';
+        if (lvl === 'ERROR' || lvl === 'CRITICAL') lvlCell.style.color = '#f85149';
+        else if (lvl === 'WARNING') lvlCell.style.color = '#d29922';
+        lvlCell.textContent = lvl; tr.appendChild(lvlCell);
+        const logCell = document.createElement('td');
+        logCell.className = 'left-align';
+        logCell.style.color = '#8b949e';
+        logCell.textContent = (e.logger || '—').slice(0, 50);
+        tr.appendChild(logCell);
+        const msgCell = document.createElement('td');
+        msgCell.className = 'left-align';
+        msgCell.textContent = (e.msg || '').slice(0, 250);
+        tr.appendChild(msgCell);
+        errBody.appendChild(tr);
+      });
+    }
+
     pre.innerHTML = '';
     (d.lines || []).forEach(line => {
       const span = document.createElement('span');
@@ -1144,23 +1206,6 @@ STOCKS_BODY = r"""
       </table>
       <div id="no-news" class="dim" style="margin-top: 8px;"></div>
     </div>
-    <div class="card" style="grid-column: 1/-1;">
-      <h3>🐛 除錯紀錄 <span id="errors-badge" class="dim" style="font-size: 12px;"></span></h3>
-      <p class="dim" style="font-size: 12px; margin: 0 0 8px 0;">
-        WARNING+ 等級的 log(loop 失敗 / Discord timeout / parse 抓不到等)。
-        最近 15 筆,新→舊排序。在終端按 X 鍵可看完整 30 筆。
-      </p>
-      <table class="right-align" id="errors-table">
-        <thead><tr>
-          <th style="width:80px;">時間</th>
-          <th style="width:80px;">等級</th>
-          <th style="width:200px;" class="left-align">Logger</th>
-          <th class="left-align">訊息</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div id="no-errors" class="dim" style="margin-top: 8px;"></div>
-    </div>
   </div>
 </div>
 
@@ -1408,40 +1453,6 @@ async function refresh() {
           appendCell(tr, '─');
         }
         holdingsBody.appendChild(tr);
-      });
-    }
-
-    // ── 🐛 除錯紀錄 ───────────────────────────────────────────────
-    const errBody = document.querySelector('#errors-table tbody');
-    errBody.innerHTML = '';
-    const errors = d.errors || [];
-    const errBadge = document.getElementById('errors-badge');
-    const noErr = document.getElementById('no-errors');
-    if (errors.length === 0) {
-      errBadge.textContent = '✓ 0 筆';
-      errBadge.className = 'green';
-      noErr.textContent = '— 目前沒有錯誤紀錄(WARNING+)';
-    } else {
-      errBadge.textContent = `(${errors.length} 筆)`;
-      errBadge.className = errors.length > 5 ? 'red' : 'yellow';
-      noErr.textContent = '';
-      // 新→舊 顯示
-      errors.slice().reverse().forEach(e => {
-        const tr = document.createElement('tr');
-        appendCell(tr, e.ts || '—', 'dim');
-        const lvl = e.level || '?';
-        const lvlCls = (lvl === 'ERROR' || lvl === 'CRITICAL')
-            ? 'red' : (lvl === 'WARNING' ? 'yellow' : 'dim');
-        appendCell(tr, lvl, lvlCls);
-        const logCell = document.createElement('td');
-        logCell.className = 'left-align dim';
-        logCell.textContent = (e.logger || '—').slice(0, 40);
-        tr.appendChild(logCell);
-        const msgCell = document.createElement('td');
-        msgCell.className = 'left-align';
-        msgCell.textContent = (e.msg || '').slice(0, 200);
-        tr.appendChild(msgCell);
-        errBody.appendChild(tr);
       });
     }
 
