@@ -117,6 +117,9 @@ class BotState:
 
     # 最近 N 筆新聞(跨 sym 混合,UI 顯示用)— 從 DB 載入,news_loop 跑完更新
     stock_recent_news: list[dict] = field(default_factory=list)
+    # 下次 news_loop 抓取時間(epoch 秒)— UI 顯示倒數用,news_loop 在
+    # sleep 前更新
+    news_next_poll_ts: float | None = None
 
     # ── 各 loop 的健康狀態 ────────────────────────────────────────
     # 每個 loop name(stock/hourly/daily/transfer/neko)對應:

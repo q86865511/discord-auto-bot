@@ -403,7 +403,24 @@ def show_stock_analysis(state: BotState) -> None:
 
     # ── 7. 最近新聞(從 DB 抓回的最近 5 筆,跨 sym) ──────────────
     console.print()
-    console.rule("[bold]📰 近期新聞(最近 5 筆)[/]")
+    # 倒數:news_loop sleep 結束時間
+    import time as _t
+    news_next = state.news_next_poll_ts
+    if news_next is not None:
+        remain = int(news_next - _t.time())
+        if remain > 0:
+            mm, ss = divmod(remain, 60)
+            cd = f"{mm}m {ss:02d}s" if mm > 0 else f"{ss}s"
+            console.rule(
+                f"[bold]📰 近期新聞(最近 5 筆) — 下次 poll 倒數 "
+                f"[cyan]{cd}[/cyan][/]"
+            )
+        else:
+            console.rule("[bold]📰 近期新聞(最近 5 筆) — "
+                         "[yellow]即將抓取[/yellow][/]")
+    else:
+        console.rule("[bold]📰 近期新聞(最近 5 筆) — "
+                     "[dim]news_loop 未啟動[/dim][/]")
     if recent_news:
         nt = Table(show_header=True, header_style="bold cyan", box=None)
         nt.add_column("日期", style="dim", width=12)

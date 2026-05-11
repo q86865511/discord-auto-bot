@@ -1192,10 +1192,12 @@ STOCKS_BODY = r"""
       <div id="no-top" class="dim" style="margin-top: 8px;"></div>
     </div>
     <div class="card" style="grid-column: 1/-1;">
-      <h3>📰 近期新聞</h3>
+      <h3>📰 近期新聞
+        <span id="news-countdown" class="dim" style="font-size: 13px; margin-left: 8px;"></span>
+      </h3>
       <p class="dim" style="font-size: 12px; margin: 0 0 8px 0;">
-        對持股 + 做空 symbol 抓「近期新聞」(每 6 次 stock poll 更新一次)。
-        日期格式 (YYYY/M/D)。新新聞會發 email + 寫進主畫面日誌。
+        新聞 loop 對「全部抓到的股票」獨立抓取(預設 60 分鐘 / 進設定可改)。
+        日期格式 ISO YYYY-MM-DD。新新聞會發 email + 寫進主畫面日誌。
       </p>
       <table class="right-align" id="news-table">
         <thead><tr>
@@ -1457,6 +1459,24 @@ async function refresh() {
     }
 
     // ── 近期新聞 ────────────────────────────────────────────────
+    // 倒數計時
+    const newsCdEl = document.getElementById('news-countdown');
+    if (d.news_next_poll_ts) {
+      const remain = Math.max(0, Math.floor(d.news_next_poll_ts - Date.now() / 1000));
+      if (remain > 0) {
+        const mm = Math.floor(remain / 60);
+        const ss = remain % 60;
+        const cd = mm > 0 ? `${mm}m ${String(ss).padStart(2, '0')}s` : `${ss}s`;
+        newsCdEl.textContent = `(下次 poll 倒數 ${cd})`;
+        newsCdEl.className = 'dim';
+      } else {
+        newsCdEl.textContent = '(即將抓取)';
+        newsCdEl.className = 'yellow';
+      }
+    } else {
+      newsCdEl.textContent = '(news_loop 未啟動)';
+      newsCdEl.className = 'dim';
+    }
     const newsBody = document.querySelector('#news-table tbody');
     newsBody.innerHTML = '';
     const news = d.news || [];

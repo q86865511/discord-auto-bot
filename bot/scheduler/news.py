@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -49,6 +50,8 @@ async def news_loop(
     """股票新聞抓取主 loop。"""
     # 啟動延遲:等 stock_loop 至少跑一次 poll(60s + 第一次 poll 抓完)
     # 讓 snapshot.prices 有資料,我們才知道要抓哪些 sym
+    async with state.lock:
+        state.news_next_poll_ts = time.time() + 90
     await interruptible_sleep(state, 90)
 
     # 啟動先 load DB 既有新聞到 state(UI 立刻有資料)
@@ -77,6 +80,8 @@ async def news_loop(
         snap = state.stock_last_snapshot or {}
         if not (snap.get("prices") or {}):
             log.info("news loop: stock snapshot 還沒 ready,30 秒後 retry")
+            async with state.lock:
+                state.news_next_poll_ts = time.time() + 30
             await interruptible_sleep(state, 30)
             continue
 
@@ -88,8 +93,11 @@ async def news_loop(
             log.exception("news loop 例外")
             mark_loop_failed(state, _LOOP_NAME, str(e))
 
-        # Sleep until next news poll;最少 5 分鐘
+        # Sleep until next news poll;最少 5 分鐘。設 news_next_poll_ts 讓
+        # UI 能顯示倒數
         sleep_sec = max(5 * 60, int(float(scfg.news_poll_interval_min) * 60))
+        async with state.lock:
+            state.news_next_poll_ts = time.time() + sleep_sec
         await interruptible_sleep(state, sleep_sec)
 
 

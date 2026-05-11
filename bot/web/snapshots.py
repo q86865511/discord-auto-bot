@@ -248,6 +248,7 @@ def build_stocks_snapshot(state: BotState, config: BotConfig) -> dict:
         "summary":        snap.get("summary", {}),      # 新:組合盈虧
         "signals":        snap.get("signals", []),
         "news":           list(state.stock_recent_news or []),   # 新:近期新聞
+        "news_next_poll_ts": state.news_next_poll_ts,            # 新聞 loop 倒數
         "config": {
             "poll_interval_min":      scfg.poll_interval_min,
             "ma_short":               scfg.ma_short,
