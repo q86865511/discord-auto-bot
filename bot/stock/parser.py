@@ -463,20 +463,43 @@ def parse_stock_news(
     回傳 [{symbol, date, title}, ...](date 為 ISO YYYY-MM-DD)。
 
     Strategy:
-    1. 用「SYMBOL 相關新聞」header 定位起點
+    1. 用「SYMBOL 相關新聞」header 定位起點 + 驗證跟 expected_symbol 一致
     2. 用 bullet 前綴 anchor 找 entries(防 title 內嵌日期誤判)
     3. title 用 sentinel 截掉 ephemeral footer / JS 殘留
+
+    Sanity check:textContent 中的 header(例如「AZGC 相關新聞」)若跟
+    expected_symbol(例如「GCR」)不一致,代表 Discord ephemeral 替換 race
+    — 我們拿到的是上次 query 的內容。直接棄用此次,不要把 AZGC 的新聞
+    存進 GCR 的 row。
     """
     if not text:
         return []
 
     # 先定位到「{SYMBOL} 相關新聞」之後的區段
-    # 截到 1500 字(5 條新聞綽綽有餘),避免延伸到 page JS / 其他 ephemeral
     sym_from_header = None
     m = STOCK_NEWS_HEADER.search(text)
     if m:
         sym_from_header = m.group(1).upper()
         text = text[m.end():m.end() + 1500]
+
+    # Sanity:expected vs header 對不上就棄用(ephemeral race)
+    if expected_symbol and sym_from_header:
+        if expected_symbol.upper() != sym_from_header:
+            log.warning(
+                "parse_stock_news: textContent header=%s 但 expected=%s — "
+                "ephemeral 替換 race,棄用此次抓取(避免把 %s 新聞存成 %s 的)",
+                sym_from_header, expected_symbol,
+                sym_from_header, expected_symbol,
+            )
+            return []
+    elif expected_symbol and not sym_from_header:
+        # textContent 中根本沒「XX 相關新聞」header — 可能 ephemeral 還沒
+        # 顯示新聞 panel,或是 detail page 殘留。棄用避免亂存。
+        log.warning(
+            "parse_stock_news: textContent 沒找到「相關新聞」header"
+            "(expected=%s),棄用此次", expected_symbol,
+        )
+        return []
 
     sym = (expected_symbol or sym_from_header or "").upper()
 

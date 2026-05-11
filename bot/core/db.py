@@ -514,6 +514,27 @@ class Database:
             return cur.rowcount or len(outlier_ids)
 
     # ── 股票新聞 ─────────────────────────────────────────────────────
+    async def cleanup_corrupted_news_if_needed(self) -> int:
+        """一次性清空所有 stock_news,讓 news_loop fresh fetch。
+
+        舊版 parser 在 Discord ephemeral 替換 race 時,把 A 股新聞存成 B 股的
+        row(每個 sym 都拿到同樣的舊 ephemeral 內容)。新版加 marker-based
+        wait + sym sanity check,但 DB 中舊污染 row 用 UNIQUE 擋住正確新
+        項插入,所以一次性清空舊資料讓新邏輯重抓。
+        跑過一次後 meta 記錄不重複跑。
+        """
+        already = await self.get_meta("news_sym_sanity_cleanup_v1")
+        if already:
+            return 0
+        n = await asyncio.to_thread(self._cleanup_corrupted_news_sync)
+        await self.set_meta("news_sym_sanity_cleanup_v1", "1")
+        return n
+
+    def _cleanup_corrupted_news_sync(self) -> int:
+        with self._conn() as c:
+            cur = c.execute("DELETE FROM stock_news")
+            return cur.rowcount or 0
+
     async def migrate_news_dates_to_iso_if_needed(self) -> int:
         """一次性把舊 stock_news.news_date 從 `YYYY/M/D` 變 `YYYY-MM-DD`,
         字串排序才正確。跑過一次後 meta 記錄,不重複跑。回傳 migrate 筆數。

@@ -548,44 +548,86 @@ async def _wait_for_text_change(
     return last_text
 
 
+async def _wait_for_marker(
+    page: "Page", marker: str,
+    timeout: float = 15.0, stability_sec: float = 1.0,
+    use_inner_text: bool = True,
+) -> str | None:
+    """等 page text 中出現 marker 字串並穩定。不取 command_lock。
+
+    比 _wait_for_text_change 更嚴格 — 不只是 textContent 變動,而是要看到
+    expected marker(例如「GCR - 」/「GCR 相關新聞」)才接受。修「ephemeral
+    替換 race」根因:bot 連續送 /stock symbol:X 對不同 sym,Discord 替換
+    ephemeral 有延遲,_wait_for_text_change 看到變動就 return,parser 抓
+    到的可能是上一個 sym 的內容。用 marker 確保是當下查詢的 sym。
+    """
+    js_expr = ("() => document.body.innerText" if use_inner_text
+               else "() => document.body.textContent")
+    deadline = time.time() + timeout
+    last_text_with_marker = None
+    last_change = time.time()
+    while time.time() < deadline:
+        await asyncio.sleep(0.5)
+        try:
+            cur = await page.evaluate(js_expr)
+        except Exception as e:    # noqa: BLE001
+            log.debug("文字輪詢失敗: %s", e)
+            continue
+        if marker not in cur:
+            continue
+        # marker 出現 → 等 textContent 穩定 stability_sec 秒
+        if cur != last_text_with_marker:
+            last_text_with_marker = cur
+            last_change = time.time()
+            continue
+        if time.time() - last_change >= stability_sec:
+            return cur
+    return last_text_with_marker    # timeout 但有抓到 marker 也回
+
+
 async def _query_stock_news_no_lock(
     page: "Page", symbol: str, stock_command: str = "/stock",
 ) -> str | None:
     """送 /stock symbol:X 後點「近期新聞」按鈕,讀新聞 ephemeral 內容。
 
-    不取 command_lock — 呼叫端負責持有 lock(news_loop 切到新聞頻道時
-    持 lock 整段,避免其他 loop 在中段送指令到 news channel)。
-    用 innerText 避免抓到 page <script> 的 JS 內容污染 title。
+    Marker-based wait 確保 textContent 真的替換到「{SYM} - 」detail 跟
+    「{SYM} 相關新聞」news,而非上一個 sym 的舊 ephemeral。修「所有 sym
+    都拿到同樣內容」的 bug。
     """
-    try:
-        before_text = await page.evaluate("() => document.body.innerText")
-    except Exception as e:    # noqa: BLE001
-        log.warning("讀取 before_text 失敗(news %s): %s", symbol, e)
+    sym_u = (symbol or "").upper()
+    if not sym_u:
         return None
-    before_len = len(before_text)
 
-    await _send_slash_command(page, stock_command, symbol)
-    detail_text = await _wait_for_text_change(
-        page, before_text, before_len, 15.0, 1.5,
-        min_len_change=100, use_inner_text=True,
+    await _send_slash_command(page, stock_command, sym_u)
+    # 等 detail ephemeral 含「SYM - 」 header(detail page format)
+    detail_marker = f"{sym_u} - "
+    detail_text = await _wait_for_marker(
+        page, detail_marker, timeout=15.0, stability_sec=1.0,
     )
-    if detail_text is None:
-        log.info("query_stock_news(%s): 詳細頁沒回應", symbol)
+    if detail_text is None or detail_marker not in detail_text:
+        log.warning(
+            "query_stock_news(%s): detail ephemeral 沒等到「%s」marker — "
+            "可能 Discord 替換 ephemeral 慢,棄用此次",
+            sym_u, detail_marker,
+        )
         return None
 
     clicked = await _click_button_with_text(page, "近期新聞", timeout=5.0)
     if not clicked:
-        log.info("query_stock_news(%s): 近期新聞 button 找不到", symbol)
+        log.info("query_stock_news(%s): 近期新聞 button 找不到", sym_u)
         return None
 
-    await asyncio.sleep(0.5)
-    before_news_text = detail_text
-    before_news_len = len(before_news_text)
-    news_text = await _wait_for_text_change(
-        page, before_news_text, before_news_len,
-        timeout=10.0, stability_sec=1.0, min_len_change=30,
-        use_inner_text=True,
+    # 等 news ephemeral 含「SYM 相關新聞」header(news page format)
+    news_marker = f"{sym_u} 相關新聞"
+    news_text = await _wait_for_marker(
+        page, news_marker, timeout=10.0, stability_sec=1.0,
     )
+    if news_text is None or news_marker not in news_text:
+        log.warning(
+            "query_stock_news(%s): news ephemeral 沒等到「%s」marker — 棄用",
+            sym_u, news_marker,
+        )
+        return None
     return news_text
 
 

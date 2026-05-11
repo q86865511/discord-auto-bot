@@ -266,6 +266,16 @@ async def main() -> int:
     except Exception:    # noqa: BLE001
         print("  ⚠ news date migration 失敗(可忽略,新項仍會用新格式)")
 
+    # 一次性 migration:清掉所有舊 stock_news(parser race 污染),讓 news_loop
+    # 用新邏輯(marker wait + sym sanity)fresh fetch
+    try:
+        n_news_cleanup = await db.cleanup_corrupted_news_if_needed()
+        if n_news_cleanup:
+            print(f"  ✓ 已清空 {n_news_cleanup} 則舊新聞(parser race 污染,"
+                  f"news_loop 會 fresh fetch)")
+    except Exception:    # noqa: BLE001
+        print("  ⚠ news cleanup 失敗(可忽略)")
+
     # 一次性 migration:清掉 stock_prices 中 parser 污染 row(明顯離譜值)
     try:
         n_outliers = await db.cleanup_stock_prices_outliers_if_needed()
