@@ -646,9 +646,11 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
               f"冷卻 {s.volatility_cooldown_min:g} min)")
         print("   [V] 編輯短期波動警示設定")
         print()
-        print(f"  [新聞抓取] poll 間隔 {s.news_poll_interval_min:g} 分鐘"
-              f"(獨立 loop,對全部股票抓近期新聞)")
+        news_ch = s.news_channel_id or "(用主頻道)"
+        print(f"  [新聞抓取] poll 間隔 {s.news_poll_interval_min:g} 分鐘  "
+              f"頻道:{news_ch}")
         print("   [N] 修改新聞 poll 間隔")
+        print("   [Z] 設定新聞頻道 ID(空 = 用主頻道)")
         print()
         print("  [動作]")
         print("   [R] 立即重 poll 一次(賣股後想馬上看到變動)")
@@ -728,6 +730,32 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             )
             if v is not None:
                 s.news_poll_interval_min = v
+            await wait_enter()
+        elif choice == "Z":
+            print()
+            print("  📰 新聞頻道 ID")
+            print("  ─────────────")
+            print("  bot 抓新聞時切到這個頻道送 /stock symbol:X(避免污染主頻道)。")
+            print("  空字串 = 用主頻道(state.channel_id)。")
+            print()
+            print("  ⓘ 取得方法:Discord 設定 → 進階 → 開發者模式,然後右鍵頻道 → 複製 ID")
+            print("  ⓘ bot 必須有權限進入該頻道並送 slash command")
+            print()
+            v = await ask_text(
+                "新聞頻道 ID(留空 = 用主頻道)",
+                s.news_channel_id, max_len=64,
+                allow_chinese=False, allow_empty=True,
+            )
+            if v is not None:
+                v = v.strip()
+                if v and not v.isdigit():
+                    print("  ⚠ 頻道 ID 必須是純數字 — 未更新")
+                else:
+                    s.news_channel_id = v
+                    if v:
+                        print(f"  ✓ 新聞頻道 → {v}")
+                    else:
+                        print("  ✓ 改用主頻道")
             await wait_enter()
         elif choice == "R":
             await _trigger_stock_refresh(state)

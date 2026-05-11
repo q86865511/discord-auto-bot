@@ -420,30 +420,67 @@ def _normalize_news_date(raw: str) -> str:
     return raw
 
 
+# 抓 title 時遇到這些 sentinel 就截斷 — 它們是 ephemeral footer / 其他
+# ephemeral / page JS 的內容,不應該被當成 news title 的一部分
+_NEWS_TITLE_SENTINELS = (
+    "只有您才能看到",     # ephemeral footer
+    "刪除這則訊息",
+    "傳訊息到 #",
+    "(function(",         # script content
+    "function c(",
+    "function n(",
+    "var b=", "var d=", "var s=", "var n=",
+    "contentDocument",
+    "contentWindow",
+    "拉霸機結果",         # 其他 ephemeral
+    "中排水平",
+    "您的油幣餘額",       # stock detail 殘留
+    "已使用",              # 應用程式應用 footer
+)
+
+
+def _strip_title(raw: str) -> str:
+    """清 title:去 bullet、找到 sentinel 就截、限制長度。"""
+    title = raw.lstrip("•·*-– \t\r\n").rstrip(" \t\r\n").strip()
+    # 找最早出現的 sentinel,從那邊截斷
+    min_idx = len(title)
+    for s in _NEWS_TITLE_SENTINELS:
+        idx = title.find(s)
+        if 0 <= idx < min_idx:
+            min_idx = idx
+    if min_idx < len(title):
+        title = title[:min_idx].strip()
+    if len(title) > 150:
+        title = title[:150]
+    return title
+
+
 def parse_stock_news(
     text: str, expected_symbol: str | None = None,
 ) -> list[dict]:
     """從新聞 ephemeral 抓新聞列表。
 
-    回傳 [{symbol, date, title}, ...](date 為 ISO YYYY-MM-DD)。日期排序
-    在 DB query 端做(用 news_date DESC)。
+    回傳 [{symbol, date, title}, ...](date 為 ISO YYYY-MM-DD)。
 
-    Strategy(防 title 中內嵌日期被誤判):先用「bullet 為前綴」抓 entry
-    起點,如果抓不到(Discord 改 UI),退到寬鬆模式。
+    Strategy:
+    1. 用「SYMBOL 相關新聞」header 定位起點
+    2. 用 bullet 前綴 anchor 找 entries(防 title 內嵌日期誤判)
+    3. title 用 sentinel 截掉 ephemeral footer / JS 殘留
     """
     if not text:
         return []
 
-    # 先定位到「{SYMBOL} 相關新聞」之後的區段,避免抓到 page 其他內容
+    # 先定位到「{SYMBOL} 相關新聞」之後的區段
+    # 截到 1500 字(5 條新聞綽綽有餘),避免延伸到 page JS / 其他 ephemeral
     sym_from_header = None
     m = STOCK_NEWS_HEADER.search(text)
     if m:
         sym_from_header = m.group(1).upper()
-        text = text[m.end():m.end() + 6000]
+        text = text[m.end():m.end() + 1500]
 
     sym = (expected_symbol or sym_from_header or "").upper()
 
-    # 找所有「日期 anchor」位置(優先 bullet 前綴);找不到才寬鬆
+    # bullet 前綴優先;找不到才寬鬆
     anchors = [(m.start(), m.end(), m.group(1))
                for m in NEWS_DATE_WITH_BULLET.finditer(text)]
     if not anchors:
@@ -455,15 +492,10 @@ def parse_stock_news(
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for i, (_start, end, date_raw) in enumerate(anchors):
-        # title = 從 date 結尾 → 下個 anchor 起點(或文字尾)
         title_end = anchors[i + 1][0] if i + 1 < len(anchors) else len(text)
-        title = text[end:title_end].strip()
-        # 清掉前後 bullet / 標點
-        title = title.lstrip("•·*-– \t\r\n").rstrip(" \t\r\n").strip()
+        title = _strip_title(text[end:title_end])
         if not title or len(title) < 3:
             continue
-        if len(title) > 200:
-            title = title[:200]
         date_iso = _normalize_news_date(date_raw)
         key = (date_iso, title)
         if key in seen:

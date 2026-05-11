@@ -277,6 +277,11 @@ class StockConfig:
     # 點「近期新聞」button。獨立於 stock poll cadence,避免新聞抓取(序列 +
     # 每支 3 秒)拖累 stock_loop 的價格更新節奏。
     news_poll_interval_min: float = 60.0     # 新聞 poll 間隔(分鐘)
+    # 獨立新聞頻道:空字串 = 用主頻道(state.channel_id)。若 user 開另一個
+    # 頻道專收新聞 ephemeral,設這裡的 channel_id,news_loop 會在抓取時
+    # 切到該頻道送指令,跑完切回主頻道。避免新聞抓取的 ephemeral 跟 user
+    # 在主頻道的其他互動混在一起被 parser 誤抓。
+    news_channel_id: str = ""
 
     # ── 短期波動警示(快速漲跌通知) ──
     # 跟「強訊號」(MA / 獲利率) 不同 — 純看「短期內價格變動百分比」。
@@ -303,6 +308,8 @@ class StockConfig:
             errs.append("signal_score_threshold 必須在 0~100")
         if self.news_poll_interval_min < 5:
             errs.append("news_poll_interval_min 必須 ≥ 5 分鐘")
+        if self.news_channel_id and not self.news_channel_id.isdigit():
+            errs.append("news_channel_id 必須是純數字(Discord channel ID)")
         if self.volatility_window_min < 1:
             errs.append("volatility_window_min 必須 ≥ 1 分鐘")
         if not 0 < self.volatility_threshold_pct <= 100:

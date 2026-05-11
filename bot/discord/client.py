@@ -516,20 +516,22 @@ async def _wait_for_text_change(
     page: "Page", before_text: str, before_len: int,
     timeout: float = 10.0, stability_sec: float = 1.0,
     min_len_change: int = 50,
+    use_inner_text: bool = False,
 ) -> str | None:
-    """等 page textContent 出現變化並穩定。不取 command_lock(呼叫端負責)。
+    """等 page text 出現變化並穩定。不取 command_lock(呼叫端負責)。
 
-    用途:點 button 後等 ephemeral 替換新內容。比 query_stock_text 寬鬆
-    一點(min_len_change=50 而非 200),因為「做空倉位」「近期新聞」這類
-    替換的內容可能不長。
+    use_inner_text:True 改用 innerText(忽略 <script> 內容,避免抓到 JS
+    殘留污染 parsing 結果)。預設 textContent 維持既有行為。
     """
+    js_expr = ("() => document.body.innerText" if use_inner_text
+               else "() => document.body.textContent")
     deadline = time.time() + timeout
     last_text = None
     last_change = time.time()
     while time.time() < deadline:
         await asyncio.sleep(0.5)
         try:
-            cur = await page.evaluate("() => document.body.textContent")
+            cur = await page.evaluate(js_expr)
         except Exception as e:    # noqa: BLE001
             log.debug("文字輪詢失敗: %s", e)
             continue
@@ -546,43 +548,53 @@ async def _wait_for_text_change(
     return last_text
 
 
-async def query_stock_news(
+async def _query_stock_news_no_lock(
     page: "Page", symbol: str, stock_command: str = "/stock",
 ) -> str | None:
     """送 /stock symbol:X 後點「近期新聞」按鈕,讀新聞 ephemeral 內容。
-    沒抓到回 None(指令沒回應 / button 找不到 / 解析空)。
+
+    不取 command_lock — 呼叫端負責持有 lock(news_loop 切到新聞頻道時
+    持 lock 整段,避免其他 loop 在中段送指令到 news channel)。
+    用 innerText 避免抓到 page <script> 的 JS 內容污染 title。
     """
+    try:
+        before_text = await page.evaluate("() => document.body.innerText")
+    except Exception as e:    # noqa: BLE001
+        log.warning("讀取 before_text 失敗(news %s): %s", symbol, e)
+        return None
+    before_len = len(before_text)
+
+    await _send_slash_command(page, stock_command, symbol)
+    detail_text = await _wait_for_text_change(
+        page, before_text, before_len, 15.0, 1.5,
+        min_len_change=100, use_inner_text=True,
+    )
+    if detail_text is None:
+        log.info("query_stock_news(%s): 詳細頁沒回應", symbol)
+        return None
+
+    clicked = await _click_button_with_text(page, "近期新聞", timeout=5.0)
+    if not clicked:
+        log.info("query_stock_news(%s): 近期新聞 button 找不到", symbol)
+        return None
+
+    await asyncio.sleep(0.5)
+    before_news_text = detail_text
+    before_news_len = len(before_news_text)
+    news_text = await _wait_for_text_change(
+        page, before_news_text, before_news_len,
+        timeout=10.0, stability_sec=1.0, min_len_change=30,
+        use_inner_text=True,
+    )
+    return news_text
+
+
+async def query_stock_news(
+    page: "Page", symbol: str, stock_command: str = "/stock",
+) -> str | None:
+    """送 /stock symbol:X + 點「近期新聞」抓 ephemeral。標準 wrapper(取 lock)。"""
     async with command_lock:
-        try:
-            before_text = await page.evaluate("() => document.body.textContent")
-        except Exception as e:    # noqa: BLE001
-            log.warning("讀取 before_text 失敗(news %s): %s", symbol, e)
-            return None
-        before_len = len(before_text)
-
-        # 1. 送 /stock symbol:X
-        await _send_slash_command(page, stock_command, symbol)
-        detail_text = await _wait_for_text_change(
-            page, before_text, before_len, 15.0, 1.5, min_len_change=100,
-        )
-        if detail_text is None:
-            log.info("query_stock_news(%s): 詳細頁沒回應", symbol)
-            return None
-
-        # 2. 點「近期新聞」button
-        clicked = await _click_button_with_text(page, "近期新聞", timeout=5.0)
-        if not clicked:
-            log.info("query_stock_news(%s): 近期新聞 button 找不到", symbol)
-            return None
-
-        await asyncio.sleep(0.5)
-        before_news_text = detail_text
-        before_news_len = len(before_news_text)
-        news_text = await _wait_for_text_change(
-            page, before_news_text, before_news_len,
-            timeout=10.0, stability_sec=1.0, min_len_change=30,
-        )
-        return news_text
+        return await _query_stock_news_no_lock(page, symbol, stock_command)
 
 
 async def query_portfolio_full(

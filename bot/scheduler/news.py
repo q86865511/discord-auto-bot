@@ -26,7 +26,11 @@ from bot.core.state import (
     mark_loop_running,
     wait_while_paused,
 )
-from bot.discord.client import query_stock_news
+from bot.discord.client import (
+    _query_stock_news_no_lock,
+    command_lock,
+    navigate_to_channel,
+)
 from bot.notifications.digest import notify_stock_news
 from bot.stock.parser import parse_stock_news
 
@@ -106,37 +110,67 @@ async def _check_all_news(
 ) -> None:
     """對 snapshot.prices 中所有 sym 抓新聞,新項 queue_log + email。
 
-    序列抓取(每支間隔 3 秒,避免 spam Discord)。新聞 DB 用 UNIQUE
-    (symbol, date, title) 去重 — 只有真的「新加入」才觸發通知。
+    Strategy:全程持 command_lock(獨佔 page),整段 navigate 到 news channel
+    →序列抓全 sym(每支 3 秒間隔)→ navigate 回主 channel。這樣其他 loop
+    不會在中段送指令到 news channel,也不會干擾 page.textContent。
 
     caller(news_loop)已保證 snapshot.prices 非空才會呼叫進來。
     """
     snap = state.stock_last_snapshot or {}
     all_syms = sorted((snap.get("prices") or {}).keys())
 
-    log.info("news loop: 開始抓 %d 支(%s)", len(all_syms),
-             ", ".join(all_syms[:10]))
+    news_ch_id = (cfg.stock.news_channel_id or "").strip()
+    main_ch_id = state.channel_id or ""
+    use_separate_channel = bool(
+        news_ch_id and main_ch_id and news_ch_id != main_ch_id
+    )
+
+    log.info("news loop: 開始抓 %d 支(%s)%s", len(all_syms),
+             ", ".join(all_syms[:10]),
+             f" — 切到頻道 {news_ch_id}" if use_separate_channel else "")
     all_new_items: list[dict] = []
-    for sym in all_syms:
-        if state.quit:
-            return
+
+    async with command_lock:
+        # 1. 切到新聞頻道(若有設)
+        if use_separate_channel:
+            try:
+                await navigate_to_channel(page, state.guild_id, news_ch_id)
+                # 等頻道載入(避免立刻送指令時還在 transition)
+                from bot.core.state import interruptible_sleep as _is
+                await _is(state, 2)
+            except Exception:    # noqa: BLE001
+                log.exception("news loop: 切到新聞頻道失敗,改用主頻道")
+                use_separate_channel = False
+
         try:
-            news_text = await query_stock_news(
-                page, sym, stock_command=cfg.stock.stock_command,
-            )
-            if not news_text:
-                continue
-            items = parse_stock_news(news_text, expected_symbol=sym)
-            if not items:
-                continue
-            new_items = await db.upsert_news_items(items)
-            if new_items:
-                all_new_items.extend(new_items)
-                log.info("news loop: %s 新增 %d 則(總抓 %d)",
-                         sym, len(new_items), len(items))
-        except Exception:    # noqa: BLE001
-            log.exception("news loop: 抓 %s 失敗", sym)
-        await interruptible_sleep(state, 3)
+            for sym in all_syms:
+                if state.quit:
+                    break
+                try:
+                    news_text = await _query_stock_news_no_lock(
+                        page, sym, stock_command=cfg.stock.stock_command,
+                    )
+                    if not news_text:
+                        continue
+                    items = parse_stock_news(news_text, expected_symbol=sym)
+                    if not items:
+                        continue
+                    new_items = await db.upsert_news_items(items)
+                    if new_items:
+                        all_new_items.extend(new_items)
+                        log.info("news loop: %s 新增 %d 則(總抓 %d)",
+                                 sym, len(new_items), len(items))
+                except Exception:    # noqa: BLE001
+                    log.exception("news loop: 抓 %s 失敗", sym)
+                from bot.core.state import interruptible_sleep as _is
+                await _is(state, 3)
+        finally:
+            # 2. 切回主頻道(確保其他 loop 之後送指令正確)
+            if use_separate_channel and main_ch_id:
+                try:
+                    await navigate_to_channel(page, state.guild_id, main_ch_id)
+                except Exception:    # noqa: BLE001
+                    log.exception("news loop: 切回主頻道失敗")
 
     # 載最近 5 筆 cross-sym(按 news_date DESC + id DESC)給 UI
     try:
@@ -148,7 +182,7 @@ async def _check_all_news(
 
     # 新項 → queue_log + email
     if all_new_items:
-        for it in all_new_items[:10]:    # 限制 queue_log 數量
+        for it in all_new_items[:10]:
             title = it["title"][:60]
             state.queue_log(
                 f"📰 {it['symbol']} ({it['date']}) {title}"
