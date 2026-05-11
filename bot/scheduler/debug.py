@@ -64,21 +64,40 @@ def _level_to_int(name: str) -> int:
 
 _DISCORD_MSG_LIMIT = 1900       # Discord 上限 2000 留 100 緩衝
 
+# 等級對應的 emoji — 一眼分辨嚴重度
+_LEVEL_EMOJI = {
+    "WARNING":  "⚠️",
+    "ERROR":    "❌",
+    "CRITICAL": "🚨",
+}
+
 
 def _format_messages(entries: list[dict], include_logger_name: bool) -> str:
-    """把待送 entries 組成 Discord 訊息(單則,純文字)。
+    """把待送 entries 組成 Discord 訊息(單則,markdown 格式)。
 
-    格式 — 第一行標題,後面每筆一行(若加 logger 就兩段間用 `:`)。
-    每筆 msg 先截 200 字、組好之後若總長超 _DISCORD_MSG_LIMIT 就在 entry
-    邊界截斷,不切到一半的訊息。最後尾巴加「(+N 筆截斷)」註記。
+    範例輸出:
+        **Debug** · 1 筆 · 2026-05-11
+        ⚠️ `20:32:44` **scheduler.gambling** — 連敗 5 場 ≥5,暫停下注 5.0 分鐘
+
+    設計考量:
+    - 標題不放 emoji 開頭 — 避免 Discord 把「emoji 開頭單行訊息」渲染成
+      巨大 emoji 圖示破壞排版
+    - 用 markdown bold / inline code 區隔欄位,易讀
+    - 各 level 配色 emoji(⚠️ / ❌ / 🚨)讓嚴重度一眼分辨
+    - 加當天日期 — 手機推播只看到第一行時也有時間 context
+    - 每筆 msg 截 200 字,總長超 _DISCORD_MSG_LIMIT 在 entry 邊界截斷
+      (不切到一半的訊息),尾巴加「(+N 筆截斷)」註記
     """
-    header = f"🐛 Debug ({len(entries)} 筆)"
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    header = f"**Debug** · {len(entries)} 筆 · {today}"
     lines = [header]
     total_len = len(header)
     truncated = 0
     for i, e in enumerate(entries):
         ts = e.get("ts", "??:??:??")
-        lv = e.get("level", "INFO")
+        lv = (e.get("level") or "INFO").upper()
+        emoji = _LEVEL_EMOJI.get(lv, "⚠️")
         msg = (e.get("msg") or "").replace("\n", " ").replace("\r", " ")
         if len(msg) > 200:
             msg = msg[:197] + "..."
@@ -87,9 +106,9 @@ def _format_messages(entries: list[dict], include_logger_name: bool) -> str:
             # 去掉冗長前綴 "bot." 讓訊息更精簡
             if lg.startswith("bot."):
                 lg = lg[4:]
-            line = f"[{ts}] {lv} {lg}: {msg}"
+            line = f"{emoji} `{ts}` **{lg}** — {msg}"
         else:
-            line = f"[{ts}] {lv}: {msg}"
+            line = f"{emoji} `{ts}` — {msg}"
         # 預估加上此行後的長度(含 newline)
         if total_len + 1 + len(line) > _DISCORD_MSG_LIMIT:
             truncated = len(entries) - i
@@ -97,9 +116,7 @@ def _format_messages(entries: list[dict], include_logger_name: bool) -> str:
         lines.append(line)
         total_len += 1 + len(line)
     if truncated > 0:
-        tail = f"...(+{truncated} 筆截斷,下輪繼續送)"
-        # 把截斷的 entries 退回 caller — 但這個函式單純,改在 caller 端
-        # 做。這裡只 emit 警示尾巴。
+        tail = f"_…(+{truncated} 筆截斷,下輪繼續送)_"
         if total_len + 1 + len(tail) <= _DISCORD_MSG_LIMIT:
             lines.append(tail)
     return "\n".join(lines)

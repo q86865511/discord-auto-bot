@@ -115,6 +115,20 @@ async def send_slash_command(page: "Page", command: str, param: str = "") -> Non
         await _send_slash_command(page, command, param)
 
 
+def _ascii_signature(s: str) -> str:
+    """把字串 normalize 成「只剩 ASCII 非空白」的 signature 給 _send_message
+    的「input box 內容還在嗎」比對用。
+
+    為什麼:Discord 把 emoji / 部分中文標點渲染成 `<img>` 元素,
+    `textContent` 拿不到它們的 alt(CLAUDE.md 第 3.7)。所以原本的
+    `text.strip() not in current_text` 嚴格比對,在文字含 emoji 時
+    會永遠 false negative → 觸發第二次 insert → Discord 訊息變兩份。
+    用 ASCII signature 比對(emoji / 中文都拿掉,留 ASCII 字母 / 數字
+    / 標點)就穩。
+    """
+    return "".join(c for c in s if c.isascii() and not c.isspace())
+
+
 async def _send_message(page: "Page", text: str) -> None:
     """送純文字訊息。呼叫端必須先持有 command_lock。
 
@@ -131,14 +145,19 @@ async def _send_message(page: "Page", text: str) -> None:
     await asyncio.sleep(0.5)
     await page.keyboard.press("Escape")
     await asyncio.sleep(0.2)
-    # Esc 可能也清掉輸入框內容;保險起見再 insert 一次後立刻 Enter
+    # Esc 可能也清掉輸入框內容;比對 ASCII signature 看是否需要 re-insert
     try:
         current_text = await page.evaluate(
             "() => document.querySelector('[data-slate-editor=\"true\"]')?.textContent || ''"
         )
     except Exception:   # noqa: BLE001
         current_text = ""
-    if text.strip() not in current_text:
+    text_sig = _ascii_signature(text)
+    cur_sig  = _ascii_signature(current_text)
+    # 用 signature 子字串比對:emoji / 中文都會被剝掉,只看 ASCII 結構。
+    # text_sig 為空(極端情況,訊息只含 emoji / 中文)時直接相信 insert 成功,
+    # 不再 re-insert,避免在「全 emoji 訊息」上重複。
+    if text_sig and text_sig not in cur_sig:
         await page.keyboard.insert_text(text)
         await asyncio.sleep(0.3)
     await page.keyboard.press("Enter")
