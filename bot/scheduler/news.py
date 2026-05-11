@@ -128,6 +128,11 @@ async def _check_all_news(
     log.info("news loop: 開始抓 %d 支(%s)%s", len(all_syms),
              ", ".join(all_syms[:10]),
              f" — 切到頻道 {news_ch_id}" if use_separate_channel else "")
+    # 主面板 queue_log 一條,user 不在 T 鍵頁也能立刻看到 cycle 啟動
+    state.queue_log(
+        f"🌐 news cycle 開始 — 抓 {len(all_syms)} 支 "
+        f"({', '.join(all_syms[:6])}{'...' if len(all_syms) > 6 else ''})"
+    )
     all_new_items: list[dict] = []
 
     async with command_lock:

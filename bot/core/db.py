@@ -633,27 +633,44 @@ class Database:
         return await asyncio.to_thread(self._load_news_sync, limit, symbol)
 
     def _load_news_sync(self, limit, symbol):
-        # 排序:fetched_ts DESC(精細到秒,user 看 ephemeral tooltip 一致)→
-        # news_date DESC(備援)→ id DESC。fetched_ts 是 ephemeral message
-        # 送出時間,user 看 hover 顯示的「上午 02:56」就是這個。
-        #
-        # 重要:return key 用「date」而非 column name「news_date」— UI /
-        # Web / email 都 access it.get("date"),跟 parser return dict 一致。
-        # 之前 bug 是 dict(row) 用 column name 當 key,UI 拿不到 fallback "—"。
+        """Load news rows for UI / Web / email。
+
+        排序:news_date DESC(Discord 上的「發布日」最新優先)→ fetched_ts
+        DESC(抓取時間)→ id DESC。
+
+        Cross-sym(symbol=None)做 dedup:每間公司最多 1 筆,讓 UI 顯示多
+        支不同公司的最新新聞,而不是某一支洗版整個列表。Per-sym(symbol
+        指定)不 dedup。
+        """
         with self._conn() as c:
             if symbol:
                 rows = c.execute(
                     "SELECT symbol, news_date, title, fetched_ts FROM stock_news "
                     "WHERE symbol=? "
-                    "ORDER BY fetched_ts DESC, news_date DESC, id DESC LIMIT ?",
+                    "ORDER BY news_date DESC, fetched_ts DESC, id DESC LIMIT ?",
                     (symbol, limit),
                 ).fetchall()
+                picked = list(rows)
             else:
-                rows = c.execute(
+                # 抓夠多 candidates(limit × 50),Python 端 dedup by sym。
+                # 用 SQL window function 也可,但 SQLite 老版本可能沒;
+                # Python dedup 兼容性最好。
+                candidates = c.execute(
                     "SELECT symbol, news_date, title, fetched_ts FROM stock_news "
-                    "ORDER BY fetched_ts DESC, news_date DESC, id DESC LIMIT ?",
-                    (limit,),
+                    "ORDER BY news_date DESC, fetched_ts DESC, id DESC LIMIT ?",
+                    (max(limit * 50, 100),),
                 ).fetchall()
+                seen_syms: set[str] = set()
+                picked = []
+                for r in candidates:
+                    s = r["symbol"]
+                    if s in seen_syms:
+                        continue
+                    seen_syms.add(s)
+                    picked.append(r)
+                    if len(picked) >= limit:
+                        break
+
         return [
             {
                 "symbol":     r["symbol"],
@@ -661,7 +678,7 @@ class Database:
                 "title":      r["title"],
                 "fetched_ts": r["fetched_ts"],
             }
-            for r in rows
+            for r in picked
         ]
 
     async def load_stock_holdings(self) -> list[dict]:

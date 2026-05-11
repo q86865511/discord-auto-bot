@@ -614,20 +614,24 @@ async def _query_stock_news_no_lock(
              sym_u, stock_command, sym_u)
     await _send_slash_command(page, stock_command, sym_u)
     detail_marker = f"{sym_u} - "
+    # timeout 加長到 25s — Discord ephemeral 替換有時候慢,給更多餘地
     detail_text = await _wait_for_marker(
-        page, detail_marker, timeout=15.0, stability_sec=1.0,
+        page, detail_marker, timeout=25.0, stability_sec=1.0,
     )
     if detail_text is None or detail_marker not in detail_text:
         log.warning(
             "query_stock_news(%s): 步驟 1 失敗 — detail ephemeral 沒等到「%s」marker"
-            "(timeout 15s,可能 Discord 慢 / send 失敗)",
+            "(timeout 25s,可能 Discord 慢 / send 失敗)",
             sym_u, detail_marker,
         )
         return None, None
     log.info("query_stock_news(%s): 步驟 1/3 ✓ detail marker 找到", sym_u)
 
+    # detail page render 完才點 button — 加 1 秒緩衝
+    await asyncio.sleep(1.0)
     log.info("query_stock_news(%s): 步驟 2/3 點「近期新聞」button", sym_u)
-    clicked = await _click_button_with_text(page, "近期新聞", timeout=5.0)
+    # button click timeout 也加長
+    clicked = await _click_button_with_text(page, "近期新聞", timeout=8.0)
     if not clicked:
         log.warning(
             "query_stock_news(%s): 步驟 2 失敗 — 近期新聞 button 點不到"
@@ -638,13 +642,14 @@ async def _query_stock_news_no_lock(
     log.info("query_stock_news(%s): 步驟 2/3 ✓ button 已點", sym_u)
 
     news_marker = f"{sym_u} 相關新聞"
+    # news marker timeout 也加長到 15s
     news_text = await _wait_for_marker(
-        page, news_marker, timeout=10.0, stability_sec=1.0,
+        page, news_marker, timeout=15.0, stability_sec=1.0,
     )
     if news_text is None or news_marker not in news_text:
         log.warning(
             "query_stock_news(%s): 步驟 3 失敗 — news ephemeral 沒等到「%s」marker"
-            "(timeout 10s,可能 button click 沒生效 / Discord 慢)",
+            "(timeout 15s,可能 button click 沒生效 / Discord 慢)",
             sym_u, news_marker,
         )
         return None, None
