@@ -473,6 +473,15 @@ class Database:
         import sqlite3 as _sq
         n = 0
         with self._conn() as c:
+            # 1) 刪除 date 空白(舊版 parser 抓不到 date 留下的爛資料,UI
+            #    會 fallback 到 fetched_ts 顯示成 yyyy-mm-dd 假日期)
+            c.execute(
+                "DELETE FROM stock_news WHERE news_date IS NULL "
+                "OR TRIM(news_date) = ''"
+            )
+            n += c.rowcount
+
+            # 2) Normalize YYYY/M/D 變 ISO YYYY-MM-DD
             rows = c.execute(
                 "SELECT id, news_date FROM stock_news"
             ).fetchall()

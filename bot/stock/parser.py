@@ -45,6 +45,34 @@ def _parse_number(s: str) -> float | None:
         return None
 
 
+# ── Chunk-based 切分 helper ───────────────────────────────────────────
+# 根因 fix:lazy `.*?` 在 finditer 跨 entry 邊界會把 A 的數據抓到 B 的
+# group(MAID 的「現價: 27312.43」被 lazy match 配給 WAVE 的「現價」位置)。
+# 解法:先用 SYMBOL header 把 textContent 切成 chunks,每 chunk 限定在
+# 「一支股票」的範圍內 parse,絕對不會跨。
+
+# Portfolio 持股 header:`SYMBOL (Name)` — 後面接持有 / 均買價 等
+_PORTFOLIO_HOLDING_HEADER = re.compile(r"\b([A-Z][A-Z0-9]{1,6})\s*\(\s*[^)]+\)")
+# Stock list header:`SYMBOL - Name` — 後面接價格 / 趨勢
+_STOCK_LIST_HEADER = re.compile(r"\b([A-Z][A-Z0-9]{1,6})\s*-\s*\S")
+
+
+def _chunk_by_header(text: str, header_pat: re.Pattern) -> list[tuple[str, str]]:
+    """按 header pattern 切 text 成 [(sym, chunk), ...]。
+
+    每個 chunk = 「header 結尾 → 下個 header 起點」,確保 parser 在 chunk
+    內 search 不會跨 entry boundary。
+    """
+    matches = list(header_pat.finditer(text))
+    out: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        sym = m.group(1).upper()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out.append((sym, text[start:end]))
+    return out
+
+
 # ── /portfolio 解析(主要來源) ──────────────────────────────────────
 # 每筆 holding entry 大致長這樣(順序固定):
 #   HOLO (Hololive)
@@ -106,60 +134,76 @@ PORTFOLIO_SUMMARY_TOTAL_UNREALIZED = re.compile(
 
 
 def parse_portfolio(text: str) -> dict[str, dict]:
-    """從 /portfolio 抓所有持股,順便回傳現價、盈虧。
+    """從 /portfolio 抓所有持股(chunk-based,避免 lazy match 跨 entry)。
 
     回傳 {symbol: {shares, avg_cost, current_price, pnl}}。pnl 抓不到時為
     None,UI 端會 fallback 用 shares*(current-avg) 自算。
     """
     if not text:
         return {}
-    # 先用 holding block 抓 symbol/shares/avg/cur,記錄每筆 match 的結束位置
-    blocks = list(PORTFOLIO_HOLDING_BLOCK.finditer(text))
-    # 依「文字中出現順序」抓盈虧,跟 holding block 一一對應
-    pnls = [_parse_number(m.group(1).replace("+", ""))
-            for m in PORTFOLIO_PNL.finditer(text)]
-
     out: dict[str, dict] = {}
-    for i, m in enumerate(blocks):
-        sym = m.group(1).upper()
-        shares = _parse_number(m.group(2))
-        avg = _parse_number(m.group(3))
-        cur = _parse_number(m.group(4))
+    # 在 chunk 內 search 各欄位 — 不會跨 entry boundary
+    for sym, chunk in _chunk_by_header(text, _PORTFOLIO_HOLDING_HEADER):
+        # 「持有: N 股」— 這個欄位才區分「持股 entry」vs 摘要區(摘要區
+        # 沒「持有」keyword,所以摘要那段 chunk 抓不到 shares,跳過)
+        m_sh = re.search(r"持有[:\s]*([0-9]+(?:\.[0-9]+)?)\s*股", chunk)
+        if not m_sh:
+            continue
+        shares = _parse_number(m_sh.group(1))
         if shares is None or shares <= 0:
             continue
+        m_avg = re.search(r"均買價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)", chunk)
+        m_cur = re.search(r"現價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)", chunk)
+        # 盈虧抓「市值 ... 盈虧 : ±NUM」(避免被「總未實現盈虧」誤抓)
+        m_pnl = re.search(
+            r"市值[:\s]*\$?[0-9,]+(?:\.[0-9]+)?"
+            r"[\s\S]{0,10}?盈虧[:\s]*[^0-9+\-]{0,10}([+\-]?[0-9,]+(?:\.[0-9]+)?)",
+            chunk,
+        )
         out[sym] = {
             "shares":        shares,
-            "avg_cost":      avg or 0.0,
-            "current_price": cur or 0.0,
-            "pnl":           pnls[i] if i < len(pnls) else None,
+            "avg_cost":      (_parse_number(m_avg.group(1)) if m_avg else 0.0) or 0.0,
+            "current_price": (_parse_number(m_cur.group(1)) if m_cur else 0.0) or 0.0,
+            "pnl":           (_parse_number(m_pnl.group(1).replace("+", ""))
+                              if m_pnl else None),
         }
     return out
 
 
 def parse_portfolio_shorts(text: str) -> dict[str, dict]:
-    """點「做空倉位」button 後的 ephemeral — 抓做空標的清單。
+    """點「做空倉位」button 後的 ephemeral — 抓做空標的清單(chunk-based)。
 
     回傳 {symbol: {shares, avg_short_price, current_price, position_cost, pnl}}。
-    shares = 做空股數;position_cost = 押注金額(保證金概念)。
+
+    重要 — chunk-based 是修先前根因 bug:lazy `.*?` 從 SYMBOL 跨整個 entry
+    可能抓到下個 entry 的數據。例如 ephemeral textContent 含 MAID 持股
+    block + WAVE 做空 block,lazy 從 MAID 跳到 WAVE 的「做空: 1000 股」,
+    結果 shorts[MAID] = {shares: 1000, ...WAVE 的數據...}。chunk 切完之後,
+    MAID 那個 chunk 沒「做空: N 股」就跳過,WAVE chunk 才正確 parse。
     """
     if not text:
         return {}
     out: dict[str, dict] = {}
-    for m in PORTFOLIO_SHORT_BLOCK.finditer(text):
-        sym = m.group(1).upper()
-        shares = _parse_number(m.group(2))
-        avg_short = _parse_number(m.group(3))
-        cur = _parse_number(m.group(4))
-        cost = _parse_number(m.group(5))
-        pnl = _parse_number(m.group(6).replace("+", ""))
+    for sym, chunk in _chunk_by_header(text, _PORTFOLIO_HOLDING_HEADER):
+        m_sh = re.search(r"做空[:\s]*([0-9]+(?:\.[0-9]+)?)\s*股", chunk)
+        if not m_sh:
+            continue    # 沒做空 keyword(持股 chunk 或摘要 chunk),跳過
+        shares = _parse_number(m_sh.group(1))
         if shares is None or shares <= 0:
             continue
+        m_avg = re.search(r"均做空價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)", chunk)
+        m_cur = re.search(r"現價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)", chunk)
+        m_cost = re.search(r"押注金額[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)", chunk)
+        m_pnl = re.search(
+            r"盈虧[:\s]*[^0-9+\-]{0,10}([+\-]?[0-9,]+(?:\.[0-9]+)?)", chunk,
+        )
         out[sym] = {
-            "shares":           shares,
-            "avg_short_price":  avg_short or 0.0,
-            "current_price":    cur or 0.0,
-            "position_cost":    cost or 0.0,
-            "pnl":              pnl,
+            "shares":          shares,
+            "avg_short_price": (_parse_number(m_avg.group(1)) if m_avg else 0.0) or 0.0,
+            "current_price":   (_parse_number(m_cur.group(1)) if m_cur else 0.0) or 0.0,
+            "position_cost":   (_parse_number(m_cost.group(1)) if m_cost else 0.0) or 0.0,
+            "pnl":             (_parse_number(m_pnl.group(1).replace("+", ""))
+                                if m_pnl else None),
         }
     return out
 
@@ -272,26 +316,37 @@ DROPDOWN_LINE = re.compile(
 
 
 def parse_stock_list_with_trend(text: str) -> dict[str, dict]:
-    """從 `/stock` 的 embed 抓 {symbol: {price, trend_pct}}。
+    """從 `/stock` 的 embed 抓 {symbol: {price, trend_pct}}(chunk-based)。
 
-    trend_pct 抓不到時為 None。若整個帶 trend 的 regex 都 fail,fallback
-    到不含 trend 的 parse_stock_list(只回 price)。
+    重要 — chunk-based:避免 lazy match 跨 entries。先用 `SYMBOL - Name`
+    header 切 chunks,每個 chunk 內 search「價格 : N」「趨勢 : ±N%」,
+    chunk 不會跨下個 SYMBOL,所以絕對不會把 MAID 的 27289.84 配給 WAVE。
     """
     if not text:
         return {}
     out: dict[str, dict] = {}
-    for m in STOCK_LIST_ENTRY_FULL.finditer(text):
-        sym = m.group(1).upper()
-        if sym in {"USD", "USDT", "TOTAL", "STOCK"}:
+    skip_syms = {"USD", "USDT", "TOTAL", "STOCK"}
+    for sym, chunk in _chunk_by_header(text, _STOCK_LIST_HEADER):
+        if sym in skip_syms:
             continue
-        price = _parse_number(m.group(2))
-        trend = _parse_number(m.group(3))
+        # 找 chunk 內第一個「價格 : NUMBER」(stock list 格式;detail 用
+        # 「當前價格」沒冒號所以不會 match)
+        m_p = re.search(r"價格\s*[:：]\s*\$?([0-9,]+(?:\.[0-9]+)?)", chunk)
+        if not m_p:
+            continue
+        price = _parse_number(m_p.group(1))
         if price is None or price <= 0:
             continue
+        trend = None
+        m_t = re.search(
+            r"趨勢\s*[:：]\s*([+\-]?[0-9]+(?:\.[0-9]+)?)\s*%", chunk,
+        )
+        if m_t:
+            trend = _parse_number(m_t.group(1))
         out.setdefault(sym, {"price": price, "trend_pct": trend})
 
     if not out:
-        # fallback:不帶 trend 的 parser(舊格式或 embed 變動時)
+        # fallback:dropdown 格式(autocomplete)— 不含 trend
         for sym, p in parse_stock_list(text).items():
             out[sym] = {"price": p, "trend_pct": None}
     return out

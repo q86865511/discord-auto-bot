@@ -115,10 +115,8 @@ class BotState:
     # 用途:user 賣股後想馬上看到結果,不用等 poll_interval_min(預設 15 分鐘)
     stock_force_poll: bool = False
 
-    # 最近 N 筆新聞(跨 sym 混合,UI 顯示用)— 從 DB 載入,新 poll 時更新
+    # 最近 N 筆新聞(跨 sym 混合,UI 顯示用)— 從 DB 載入,news_loop 跑完更新
     stock_recent_news: list[dict] = field(default_factory=list)
-    # 累計 poll 次數計數器 — 每 N 次 poll 才抓一次新聞,避免太多 query
-    stock_news_poll_counter: int = 0
 
     # ── 各 loop 的健康狀態 ────────────────────────────────────────
     # 每個 loop name(stock/hourly/daily/transfer/neko)對應:

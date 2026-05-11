@@ -9,12 +9,16 @@ from bot.core.constants import DEFAULT_TRANSFER_INTERVAL_MIN
 from bot.core.state import (
     BotState,
     interruptible_sleep,
+    is_loop_auto_paused,
     mark_loop_failed,
     mark_loop_ok,
     mark_loop_running,
     wait_while_paused,
 )
 from bot.discord.client import do_transfer
+
+# auto_paused 後等多久再試(連續 5 次失敗會自動進入此冷卻)
+_TRANSFER_PAUSE_RECOVERY_SEC = 30 * 60
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -47,6 +51,15 @@ async def transfer_loop(
                         target, amount)
             await interruptible_sleep(state, 30)
             continue
+
+        # 連續失敗達閾值 → 進入 auto_paused 冷卻;sleep 30 分鐘再試一次
+        if is_loop_auto_paused(state, "transfer"):
+            log.warning("transfer: 連續失敗已達閾值,冷卻 %d 秒後重試",
+                        _TRANSFER_PAUSE_RECOVERY_SEC)
+            state.queue_log("⛔ 自動轉帳連續失敗,已自動暫停 30 分鐘")
+            await interruptible_sleep(state, _TRANSFER_PAUSE_RECOVERY_SEC)
+            if state.quit:
+                break
 
         mark_loop_running(state, "transfer")
         try:

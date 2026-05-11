@@ -272,6 +272,12 @@ class StockConfig:
     stop_loss_pct:   float = 10.0    # 持股虧損達此 % → 建議賣(止損)
     signal_score_threshold: int = 80     # 評分 ≥ 此值才視為「強訊號」
 
+    # ── 新聞抓取(獨立 loop) ──
+    # 對「全部抓到的股票」(snapshot.prices 中的 sym)送 /stock symbol:X +
+    # 點「近期新聞」button。獨立於 stock poll cadence,避免新聞抓取(序列 +
+    # 每支 3 秒)拖累 stock_loop 的價格更新節奏。
+    news_poll_interval_min: float = 60.0     # 新聞 poll 間隔(分鐘)
+
     # ── 短期波動警示(快速漲跌通知) ──
     # 跟「強訊號」(MA / 獲利率) 不同 — 純看「短期內價格變動百分比」。
     # 例如:30 分鐘內漲超 5% / 跌超 5% 就 queue_log + email 提醒一次。
@@ -295,6 +301,8 @@ class StockConfig:
             errs.append("stop_loss_pct 必須在 0~100")
         if not 0 <= self.signal_score_threshold <= 100:
             errs.append("signal_score_threshold 必須在 0~100")
+        if self.news_poll_interval_min < 5:
+            errs.append("news_poll_interval_min 必須 ≥ 5 分鐘")
         if self.volatility_window_min < 1:
             errs.append("volatility_window_min 必須 ≥ 1 分鐘")
         if not 0 < self.volatility_threshold_pct <= 100:

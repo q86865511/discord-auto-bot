@@ -646,6 +646,10 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
               f"冷卻 {s.volatility_cooldown_min:g} min)")
         print("   [V] 編輯短期波動警示設定")
         print()
+        print(f"  [新聞抓取] poll 間隔 {s.news_poll_interval_min:g} 分鐘"
+              f"(獨立 loop,對全部股票抓近期新聞)")
+        print("   [N] 修改新聞 poll 間隔")
+        print()
         print("  [動作]")
         print("   [R] 立即重 poll 一次(賣股後想馬上看到變動)")
         print()
@@ -717,6 +721,14 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             await _show_stock_help()
         elif choice == "V":
             await _edit_volatility(s)
+        elif choice == "N":
+            v = await ask_float(
+                "新聞 poll 間隔分鐘(獨立於 stock,建議 30~120)",
+                s.news_poll_interval_min, min_val=5.0, max_val=1440.0,
+            )
+            if v is not None:
+                s.news_poll_interval_min = v
+            await wait_enter()
         elif choice == "R":
             await _trigger_stock_refresh(state)
 
