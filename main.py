@@ -90,12 +90,23 @@ class UILogHandler(logging.Handler):
         "bot.stock",
     )
 
+    # 這些 task 內的所有 log(含它們呼叫 bot.discord.client 的
+    # send_slash_command / query_stock_news / click_button 等)算股票日誌,
+    # 推到 stock_log_lines 而非 log_lines。否則 stock/news loop 跑指令時,
+    # 「query_stock_news(MAID): 步驟 1/3」之類訊息會跑到左邊系統欄,
+    # 跟拉霸日誌混在一起。
+    _STOCK_TASK_NAMES = ("stock", "news")
+
     def emit(self, record):
         try:
             formatted = self.format(record)
-            # 按 logger 名稱分流(stock / news / stock.* → stock_log_lines)
+            # 取當前 task name(沒在 task 內回空字串)
+            task_name = _current_task_name()
+            # 按 logger 名稱 + 當前 task name 分流
             name = record.name or ""
-            if any(name.startswith(p) for p in self._STOCK_LOGGER_NAMES):
+            is_stock_logger = any(name.startswith(p) for p in self._STOCK_LOGGER_NAMES)
+            is_stock_task   = task_name in self._STOCK_TASK_NAMES
+            if is_stock_logger or is_stock_task:
                 self.state.stock_log_lines.append(formatted)
             else:
                 self.state.log_lines.append(formatted)
@@ -113,29 +124,31 @@ class UILogHandler(logging.Handler):
                 # 但若 caller 正在 debug_loop task 內(包含它呼叫的
                 # channel_context / navigate / send_message 等任何
                 # bot.discord.client log)就跳過 — 避免 feedback loop。
-                # 用 asyncio.current_task().get_name() 比 logger name
-                # 嚴謹:debug_loop 失敗時觸發的所有 sub-call log 都會
-                # 被擋掉,不只是 bot.scheduler.debug 自己 log 的部分。
-                if not _in_debug_task():
+                # 用 task name 比 logger name 嚴謹:debug_loop 失敗時觸發
+                # 的所有 sub-call log 都會被擋掉,不只是 bot.scheduler.debug
+                # 自己 log 的部分。
+                if task_name != "debug":
                     self.state.debug_pending.append(entry)
         except (TypeError, ValueError):
             self.handleError(record)
 
 
-def _in_debug_task() -> bool:
-    """是否在 debug_loop task 內呼叫(用於 UILogHandler 避免 feedback)。
+def _current_task_name() -> str:
+    """回傳當前 asyncio task 的 name(沒在 task 或沒 event loop 時回空字串)。
 
-    bool 因為 logging 是同步,從 coroutine 內呼叫時 asyncio.current_task()
-    能直接拿到當前 task。task name 在 main.py asyncio.create_task(...,
-    name="debug") 設定。其他 thread / 沒 event loop 時 raise → 回 False
-    (代表「不在 debug task,正常 push」)。
+    logging 是同步呼叫,但從 coroutine 內 log.* 時 asyncio.current_task()
+    仍能拿到當前 task — task 是執行緒區域 + ContextVar 機制管理。task name
+    在 main.py asyncio.create_task(..., name="stock") 等處設定。
+
+    其他 thread(例如 dashboard thread)沒 event loop → raise RuntimeError
+    → 回空字串(不影響後續比對)。
     """
     try:
         import asyncio
         t = asyncio.current_task()
-        return bool(t and t.get_name() == "debug")
+        return t.get_name() if t else ""
     except RuntimeError:
-        return False
+        return ""
 
 
 def setup_logging(state: BotState, log_level: str = "INFO") -> logging.Logger:
