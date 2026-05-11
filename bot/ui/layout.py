@@ -344,6 +344,22 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         st_str = "[dim]無[/dim]"
     t2.add_row("🎯 進階策略", st_str)
 
+    # ── 除錯頻道 ────────────────────────────────────────────────────
+    dcfg = config.debug
+    if not dcfg.enabled:
+        debug_str = "[dim]停用[/dim]"
+    elif not (dcfg.channel_id or "").strip():
+        debug_str = "[red]⚠ 已啟用但未設 channel_id[/red]"
+    else:
+        pending = len(state.debug_pending) if state.debug_pending else 0
+        ch_short = f"…{dcfg.channel_id[-6:]}"
+        if pending > 0:
+            debug_str = (f"[cyan]→ #{ch_short}[/cyan]  "
+                         f"[yellow]{pending} 待送[/yellow] / {dcfg.min_level}")
+        else:
+            debug_str = f"[green]→ #{ch_short}[/green]  / {dcfg.min_level}"
+    t2.add_row("🐛 除錯頻道",  loop_status_prefix(state, "debug") + debug_str)
+
     # ── 版本檢查 ────────────────────────────────────────────────────
     ucfg = config.updater
     if not ucfg.auto_check:

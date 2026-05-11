@@ -352,6 +352,60 @@ class UpdaterConfig:
 
 
 @dataclass
+class DebugConfig:
+    """🐛 除錯訊息頻道 — 把 bot 運行中的 WARNING+ 紀錄推到一個 Discord 頻道。
+
+    用途:user 不在電腦旁時也能在手機 Discord 看到 bot 有沒有出狀況
+    (transfer 一直失敗 / stock parser 跳掉 / channel session 過期之類)。
+    與終端 X 鍵除錯紀錄、bot.log 並行,不取代它們。
+
+    工作方式(獨立 loop bot/scheduler/debug.py):
+      1. UILogHandler 把 WARNING+ record 同時 push 到 state.debug_pending
+         (跟現有的 state.error_lines 並行,但 deque maxlen 較大,
+         讓 Discord 暫時不通時不會掉訊息)
+      2. debug_loop 每 poll_interval_sec 醒一次,drain 出 min_level 以上的
+         entries,組成單則訊息送到 channel_id 對應的 Discord 頻道
+      3. 送失敗(channel 不存在 / 網路問題)→ mark_loop_failed,連續 5 次
+         自動暫停 30 分鐘(跟 stock / news / transfer 一樣的 auto_pause 模式)
+
+    Feedback loop 防護:UILogHandler 不會把 logger name 以 bot.scheduler.debug
+    開頭的 record push 到 debug_pending,避免 debug_loop 自身 log.exception
+    觸發無限遞迴。
+    """
+    enabled: bool = False
+    # Discord channel ID — 純數字。enabled=True 時 wizard 強制要求設定
+    channel_id: str = ""
+    # 最低 level:只送 >= 此 level 的訊息。預設 WARNING(包含 ERROR / CRITICAL)
+    # 改 ERROR 可進一步降噪(WARNING 通常是 loop 暫時失敗會自動 retry,
+    # 不一定需要手機通知)
+    min_level: str = "WARNING"          # WARNING / ERROR / CRITICAL
+    # 多久 flush 一次(秒)。debug_pending 有東西才會送,沒東西就空跑 sleep。
+    poll_interval_sec: float = 60.0
+    # 一次最多打包幾筆(防 spam,例如 bot 重啟時一堆累積 WARNING)
+    max_per_flush: int = 5
+    # 訊息是否包含 logger.name(例 bot.scheduler.stock)
+    include_logger_name: bool = True
+
+    def validate(self) -> list[str]:
+        errs: list[str] = []
+        if self.channel_id and not self.channel_id.isdigit():
+            errs.append("debug.channel_id 必須是純數字(Discord channel ID)")
+        if self.enabled and not (self.channel_id or "").strip():
+            errs.append("debug 啟用但未設定 channel_id")
+        if self.min_level.upper() not in ("WARNING", "ERROR", "CRITICAL"):
+            errs.append(
+                f"debug.min_level 必須是 WARNING/ERROR/CRITICAL,目前 {self.min_level!r}"
+            )
+        if self.poll_interval_sec < 10:
+            errs.append("debug.poll_interval_sec 必須 ≥ 10 秒(避免 spam)")
+        if self.max_per_flush < 1:
+            errs.append("debug.max_per_flush 必須 ≥ 1")
+        if self.max_per_flush > 10:
+            errs.append("debug.max_per_flush 必須 ≤ 10(Discord 訊息長度限制)")
+        return errs
+
+
+@dataclass
 class BotConfig:
     """整份設定。除了上述 section,還有頂層欄位 guild_id / channel_id / log_level。"""
     guild_id: str = ""
@@ -364,6 +418,7 @@ class BotConfig:
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     updater: UpdaterConfig = field(default_factory=UpdaterConfig)
     stock: StockConfig = field(default_factory=StockConfig)
+    debug: DebugConfig = field(default_factory=DebugConfig)
 
     def validate(self) -> list[str]:
         errs: list[str] = []
@@ -373,8 +428,32 @@ class BotConfig:
             errs.append("channel_id 必須是純數字")
         if self.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
             errs.append(f"log_level 必須是 DEBUG/INFO/WARNING/ERROR,目前 {self.log_level!r}")
+        # debug 頻道不能跟主頻道 / news / stock / neko 重疊 — 避免 debug 訊息
+        # 跟其他指令 ephemeral 互相污染 parser。所有比較都先 strip 避免
+        # `" 123 "` 跟 `"123"` 因為前後空白繞過衝突檢查。
+        if self.debug.enabled:
+            debug_ch = (self.debug.channel_id or "").strip()
+            main_ch  = (self.channel_id or "").strip()
+            stock_ch = (self.stock.stock_channel_id or "").strip()
+            news_ch  = (self.stock.news_channel_id or "").strip()
+            neko_ch  = (self.nekomusume.channel_id or "").strip()
+            conflicts = []
+            if debug_ch and debug_ch == main_ch:
+                conflicts.append("主頻道")
+            if debug_ch and debug_ch == stock_ch:
+                conflicts.append("股票指令頻道")
+            if debug_ch and debug_ch == news_ch:
+                conflicts.append("新聞頻道")
+            if debug_ch and debug_ch == neko_ch:
+                conflicts.append("貓娘頻道")
+            if conflicts:
+                errs.append(
+                    f"debug.channel_id 不可跟 {' / '.join(conflicts)} 重疊"
+                    "(會干擾 parser 抓回應)"
+                )
         for section in (self.gambling, self.email, self.nekomusume,
-                        self.transfer, self.dashboard, self.updater, self.stock):
+                        self.transfer, self.dashboard, self.updater,
+                        self.stock, self.debug):
             errs.extend(section.validate())
         return errs
 
@@ -420,6 +499,7 @@ async def load_config(db) -> BotConfig:
     cfg.dashboard  = _build_dc(DashboardConfig,  raw.get("dashboard", {}))
     cfg.updater    = _build_dc(UpdaterConfig,    raw.get("updater", {}))
     cfg.stock      = _build_dc(StockConfig,      raw.get("stock", {}))
+    cfg.debug      = _build_dc(DebugConfig,      raw.get("debug", {}))
 
     # 從 secrets table 補回敏感欄位的明文(讓記憶體中的 cfg 物件能直接用)
     cfg.email.password = await db.get_secret("email_password")
@@ -462,6 +542,7 @@ async def save_config(db, config: BotConfig) -> list[str]:
         ("dashboard",  config.dashboard),
         ("updater",    config.updater),
         ("stock",      config.stock),
+        ("debug",      config.debug),
     ]:
         d = asdict(section_obj)
         for sn, fn in SENSITIVE_FIELDS:
@@ -499,6 +580,7 @@ def merge_partial(config: BotConfig, partial: dict) -> list[str]:
         "dashboard":  config.dashboard,
         "updater":    config.updater,
         "stock":      config.stock,
+        "debug":      config.debug,
     }
     for section_name, section_obj in section_map.items():
         section_data = partial.get(section_name)

@@ -166,6 +166,13 @@ class BotState:
     # 錯誤紀錄(WARNING+ 等級):{ts, level, logger, msg}。UILogHandler 同時
     # push 到這裡(level >= WARNING 時)。X 鍵 / Web debug card 顯示。
     error_lines: deque[dict] = field(default_factory=lambda: deque(maxlen=30))
+    # Discord debug 頻道待送 queue:{ts, level, logger, msg}(同 error_lines 結構)
+    # UILogHandler 在 push error_lines 同時也 push 到這裡(若 logger name
+    # 不是 bot.scheduler.debug 開頭,避免 feedback loop)。debug_loop 每
+    # poll_interval_sec 醒一次,drain max_per_flush 筆送到 Discord debug
+    # channel。maxlen 較大讓 Discord 暫時不通時不會掉訊息;但仍 bounded
+    # 避免長時間離線記憶體爆掉。
+    debug_pending: deque[dict] = field(default_factory=lambda: deque(maxlen=200))
 
     # ── 計數器 ──────────────────────────────────────────────────────
     events: EventCounters = field(default_factory=EventCounters)

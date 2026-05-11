@@ -39,6 +39,9 @@ async def first_run_wizard(config: BotConfig) -> bool:
     # 貓娘頻道:neko_loop 跑 /check / /nekomusume 切過去
     if config.nekomusume.enabled and not (config.nekomusume.channel_id or "").strip():
         needed.append("neko_channel_id")
+    # 除錯訊息頻道:debug_loop 把 WARNING+ 推到這個頻道
+    if config.debug.enabled and not (config.debug.channel_id or "").strip():
+        needed.append("debug_channel_id")
 
     pwd_missing = (config.dashboard.enabled
                    and not (config.dashboard.password or "").strip())
@@ -104,6 +107,16 @@ async def first_run_wizard(config: BotConfig) -> bool:
         v = await ask_user_id("    貓娘頻道 ID", config.nekomusume.channel_id)
         if v:
             config.nekomusume.channel_id = v
+
+    if "debug_channel_id" in needed:
+        print(f"\n  【🐛 除錯訊息頻道 ID】(目前: {config.debug.channel_id or '未設定'})")
+        print("    bot 把 WARNING+ 紀錄推到這個頻道(transfer 失敗 / parser 跳掉 /")
+        print("    session 過期等)。讓你不在電腦旁時手機 Discord 也能看到 bot")
+        print("    運行狀態。建議另開個 #bot-除錯 頻道 — 不要跟主頻道 / 股票 / 新聞")
+        print("    / 貓娘任何頻道重疊,避免 debug 訊息污染 parser 抓回應。")
+        v = await ask_user_id("    除錯頻道 ID", config.debug.channel_id)
+        if v:
+            config.debug.channel_id = v
 
     if pwd_missing:
         print()

@@ -54,6 +54,7 @@ from bot.core.log_filter import RedactingFormatter
 from bot.core.state import BotState
 from bot.discord.client import navigate_to_channel
 from bot.scheduler.daily import daily_loop
+from bot.scheduler.debug import debug_loop
 from bot.scheduler.digest import digest_loop
 from bot.scheduler.gambling import gambling_loop
 from bot.scheduler.hourly import hourly_loop
@@ -101,14 +102,40 @@ class UILogHandler(logging.Handler):
             # WARNING+ 也 push 到 error_lines 給除錯專區看(兩欄共用)
             if record.levelno >= logging.WARNING:
                 from datetime import datetime as _dt
-                self.state.error_lines.append({
+                entry = {
                     "ts":     _dt.now().strftime("%H:%M:%S"),
                     "level":  record.levelname,
                     "logger": record.name,
                     "msg":    record.getMessage()[:300],
-                })
+                }
+                self.state.error_lines.append(entry)
+                # 同時推到 Discord debug channel 的待送 queue。
+                # 但若 caller 正在 debug_loop task 內(包含它呼叫的
+                # channel_context / navigate / send_message 等任何
+                # bot.discord.client log)就跳過 — 避免 feedback loop。
+                # 用 asyncio.current_task().get_name() 比 logger name
+                # 嚴謹:debug_loop 失敗時觸發的所有 sub-call log 都會
+                # 被擋掉,不只是 bot.scheduler.debug 自己 log 的部分。
+                if not _in_debug_task():
+                    self.state.debug_pending.append(entry)
         except (TypeError, ValueError):
             self.handleError(record)
+
+
+def _in_debug_task() -> bool:
+    """是否在 debug_loop task 內呼叫(用於 UILogHandler 避免 feedback)。
+
+    bool 因為 logging 是同步,從 coroutine 內呼叫時 asyncio.current_task()
+    能直接拿到當前 task。task name 在 main.py asyncio.create_task(...,
+    name="debug") 設定。其他 thread / 沒 event loop 時 raise → 回 False
+    (代表「不在 debug task,正常 push」)。
+    """
+    try:
+        import asyncio
+        t = asyncio.current_task()
+        return bool(t and t.get_name() == "debug")
+    except RuntimeError:
+        return False
 
 
 def setup_logging(state: BotState, log_level: str = "INFO") -> logging.Logger:
@@ -572,6 +599,10 @@ async def main() -> int:
             asyncio.create_task(
                 news_loop(page, state, config_provider, on_config_save_async, db),
                 name="news",
+            ),
+            asyncio.create_task(
+                debug_loop(page, state, config_provider, on_config_save_async),
+                name="debug",
             ),
         ]
 

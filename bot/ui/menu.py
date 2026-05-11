@@ -948,6 +948,152 @@ async def _show_stock_help() -> None:
     await wait_enter()
 
 
+# ── 子選單:除錯訊息頻道 ──────────────────────────────────────────────
+async def _sub_menu_debug(config: BotConfig, state: BotState) -> None:
+    """🐛 除錯訊息頻道設定 — 把 WARNING+ 紀錄推到一個 Discord 頻道。"""
+    d = config.debug
+    while True:
+        os.system("cls")
+        print(f"\n{'═'*52}\n  🐛 除錯訊息頻道\n{'═'*52}")
+        print()
+        print("  ⓘ 把 bot 運行中的 WARNING+ 紀錄推到一個獨立的 Discord 頻道。")
+        print("    讓你不在電腦旁時也能在手機 Discord 看到 bot 出狀況。")
+        print("    跟 X 鍵除錯紀錄、bot.log 並行,不取代它們。")
+        print()
+        print("  ⚠ 重要:debug 頻道不可跟主頻道 / 股票 / 新聞 / 貓娘任何頻道")
+        print("    重疊,否則 debug 訊息會污染其他 loop 的 parser 抓回應。")
+        print()
+
+        ch = d.channel_id or "(未設)"
+        n_pending = len(state.debug_pending) if state.debug_pending else 0
+        print("  [目前狀態]")
+        print(f"    啟用:        {'✓' if d.enabled else '✗'}")
+        print(f"    頻道 ID:     {ch}")
+        print(f"    最低 level:  {d.min_level}")
+        print(f"    poll 間隔:   {d.poll_interval_sec:g} 秒")
+        print(f"    每次最多:    {d.max_per_flush} 筆")
+        print(f"    含 logger:   {'✓' if d.include_logger_name else '✗'}")
+        print(f"    待送 queue:  {n_pending} 筆")
+        print()
+
+        print("  [設定]")
+        print(f"   [1] 啟用 / 停用       {'✓ 啟用' if d.enabled else '✗ 停用'}")
+        print(f"   [2] 頻道 ID           {ch}")
+        print(f"   [3] 最低 level        {d.min_level}  (WARNING/ERROR/CRITICAL)")
+        print(f"   [4] poll 間隔秒       {d.poll_interval_sec:g}")
+        print(f"   [5] 每次最多送幾筆    {d.max_per_flush}")
+        print(f"   [6] 訊息含 logger 名  {'✓' if d.include_logger_name else '✗'}")
+        print()
+        print("  [動作]")
+        print("   [T] 立即測試送一筆到頻道")
+        print("   [C] 清空待送 queue")
+        print()
+        print("   [0] 返回主選單")
+        choice = (await ainput("\n  選擇: ")).strip().upper()
+        if choice == "0":
+            return
+        elif choice == "1":
+            d.enabled = not d.enabled
+            print(f"  ✓ 除錯頻道 → {'啟用' if d.enabled else '停用'}")
+            if d.enabled and not (d.channel_id or "").strip():
+                print("  ⚠ 尚未設定頻道 ID,記得從 [2] 補上(下次儲存會驗證失敗)")
+            await wait_enter()
+        elif choice == "2":
+            print()
+            print("  🐛 除錯頻道 ID")
+            print("  ─────────────")
+            print("  輸入 Discord 開發者模式下右鍵複製的頻道 ID(純數字)。")
+            print("  ⚠ 不可跟主頻道 / 股票 / 新聞 / 貓娘任何頻道重疊!")
+            print()
+            v = await ask_text(
+                "除錯頻道 ID(留空 = 不設定)", d.channel_id, max_len=64,
+                allow_chinese=False, allow_empty=True,
+            )
+            if v is not None:
+                v = v.strip()
+                if v and not v.isdigit():
+                    print("  ⚠ 頻道 ID 必須是純數字 — 未更新")
+                else:
+                    d.channel_id = v
+                    print(f"  ✓ 除錯頻道 → {v or '(未設定)'}")
+            await wait_enter()
+        elif choice == "3":
+            print()
+            print("  ⓘ WARNING  = bot 暫時失敗會自動 retry 那種(包含 ERROR/CRITICAL)")
+            print("    ERROR    = 真的壞了 / timeout(包含 CRITICAL)")
+            print("    CRITICAL = 最嚴重的事件(極少觸發,建議搭配 ERROR 設)")
+            print()
+            v = await ask_choice(
+                "最低 level", ["warning", "error", "critical"],
+                d.min_level.lower(),
+            )
+            if v:
+                d.min_level = v.upper()
+            await wait_enter()
+        elif choice == "4":
+            print()
+            print("  ⓘ 多久 flush 一次 pending queue 到 Discord(秒)。")
+            print("    太短 → 訊息太碎 + 占用 Discord rate limit")
+            print("    太長 → 通知慢")
+            print("    建議:30~120 秒")
+            print()
+            v = await ask_float(
+                "poll 間隔秒", d.poll_interval_sec, min_val=10.0, max_val=3600.0,
+            )
+            if v is not None:
+                d.poll_interval_sec = v
+            await wait_enter()
+        elif choice == "5":
+            print()
+            print("  ⓘ 一次最多打包幾筆 entries 到單則 Discord 訊息。")
+            print("    防 spam — bot 重啟時可能累積一堆 WARNING,不會一口氣全送。")
+            print("    建議:3~10")
+            print()
+            v = await ask_int(
+                "每次最多送幾筆", d.max_per_flush, min_val=1, max_val=10,
+            )
+            if v is not None:
+                d.max_per_flush = v
+            await wait_enter()
+        elif choice == "6":
+            d.include_logger_name = not d.include_logger_name
+            print(f"  ✓ 含 logger 名 → {'啟用' if d.include_logger_name else '停用'}")
+            await wait_enter()
+        elif choice == "T":
+            await _test_debug_message(state, d)
+        elif choice == "C":
+            n = len(state.debug_pending)
+            state.debug_pending.clear()
+            print(f"  ✓ 已清空 {n} 筆待送訊息")
+            await wait_enter()
+
+
+async def _test_debug_message(state: BotState, dcfg) -> None:
+    """塞一筆 test entry 到 debug_pending,讓 debug_loop 30 秒內送出。"""
+    import time
+    from datetime import datetime
+    if not dcfg.enabled or not (dcfg.channel_id or "").strip():
+        print("  ⚠ 除錯頻道未啟用或未設 channel_id,無法測試")
+        await wait_enter()
+        return
+    state.debug_pending.append({
+        "ts":     datetime.now().strftime("%H:%M:%S"),
+        "level":  "WARNING",
+        "logger": "bot.ui.menu",
+        "msg":    f"📋 測試訊息 — 由設定選單觸發 @ {time.time():.0f}",
+    })
+    print()
+    print("  ✓ 已塞 1 筆測試訊息到 pending queue")
+    print(f"    debug_loop 在 {dcfg.poll_interval_sec:g} 秒內會 flush 到 Discord")
+    print(f"    去 channel_id {dcfg.channel_id} 看訊息有沒有出現")
+    print()
+    print("  若沒出現:")
+    print("    1. 檢查 bot 是否有權限發訊息到該頻道")
+    print("    2. 看 X 鍵除錯紀錄有沒有 debug loop 失敗的 error")
+    print("    3. min_level 設太嚴(例 CRITICAL)會把 WARNING 篩掉")
+    await wait_enter()
+
+
 # ── 子選單:版本更新 ──────────────────────────────────────────────────
 async def _sub_menu_updater(config: BotConfig, state: BotState) -> None:
     u = config.updater
@@ -1088,6 +1234,16 @@ async def run_config_menu(
             upd_summary += "  🔔 有新版"
         print(f"   [9] 🔄 版本更新     ({upd_summary})")
         print("   [A] 🛠️  進階(檔案管理 / 系統更新)")
+        dcfg = config.debug
+        debug_summary = "✓ 啟用" if dcfg.enabled else "✗ 停用"
+        if dcfg.enabled:
+            ch = dcfg.channel_id or "(未設)"
+            ch_short = f"…{ch[-6:]}" if len(ch) > 8 else ch
+            debug_summary += f", #{ch_short}, {dcfg.min_level}"
+        n_pending = len(state.debug_pending) if state.debug_pending else 0
+        if n_pending > 0:
+            debug_summary += f", {n_pending} 待送"
+        print(f"   [B] 🐛 除錯頻道     ({debug_summary})")
         print()
         print(f"   📊 Slot 分析:       {sa_spins:,} 筆紀錄")
         print()
@@ -1121,6 +1277,8 @@ async def run_config_menu(
             await run_advanced_menu(state, db)
             if state.quit:
                 break
+        elif choice == "B":
+            await _sub_menu_debug(config, state)
 
     # 驗證 + 儲存
     errs = config.validate()
