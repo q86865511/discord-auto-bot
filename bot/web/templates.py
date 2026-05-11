@@ -1134,6 +1134,20 @@ STOCKS_BODY = r"""
     </table>
     <div id="no-holdings" class="dim" style="margin-top: 8px;"></div>
   </div>
+  <div class="card">
+    <h3>📉 做空明細</h3>
+    <p class="dim" style="font-size: 12px; margin: 0 0 8px 0;">
+      做空獲利方向相反:現價 &lt; 均做空價 = 賺。「盈虧 %」是 (均做空-現價)/均做空。
+    </p>
+    <table class="right-align" id="shorts-table">
+      <thead><tr>
+        <th>Symbol</th><th>做空股數</th><th>均做空價</th>
+        <th>現價</th><th>押注金額</th><th>盈虧 %</th><th>盈虧</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="no-shorts" class="dim" style="margin-top: 8px;"></div>
+  </div>
 </div>
 
 <div id="pane-buy" class="stock-pane">
@@ -1179,7 +1193,7 @@ STOCKS_BODY = r"""
     </p>
     <table class="right-align" id="all-table">
       <thead><tr>
-        <th>Symbol</th><th>現價</th><th>持股</th>
+        <th>Symbol</th><th>現價</th><th>趨勢</th><th>持股</th>
         <th>樣本數</th><th>買 score</th><th>賣 score</th>
       </tr></thead>
       <tbody></tbody>
@@ -1348,6 +1362,45 @@ async function refresh() {
       });
     }
 
+    // ── 做空明細 ────────────────────────────────────────────────
+    const shortsBody = document.querySelector('#shorts-table tbody');
+    shortsBody.innerHTML = '';
+    const shorts = d.shorts || {};
+    const shortSyms = Object.keys(shorts);
+    const noShorts = document.getElementById('no-shorts');
+    if (shortSyms.length === 0) {
+      noShorts.textContent = '— 目前沒有做空倉位';
+    } else {
+      noShorts.textContent = '';
+      shortSyms.forEach(sym => {
+        const s = shorts[sym];
+        const tr = document.createElement('tr');
+        appendCell(tr, sym);
+        appendCell(tr, fmt(s.shares));
+        appendCell(tr, fmtFloat(s.avg_short_price, 2));
+        appendCell(tr, fmtFloat(s.current_price, 2));
+        appendCell(tr, fmtFloat(s.position_cost, 2));
+        // 做空獲利方向相反:現價 < 均做空價 = 賺
+        if (s.avg_short_price > 0) {
+          const pct = (s.avg_short_price - s.current_price) / s.avg_short_price * 100;
+          const cls = pct > 0 ? 'green' : (pct < 0 ? 'red' : 'dim');
+          appendCell(tr, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', cls);
+        } else {
+          appendCell(tr, '─');
+        }
+        const pnl = s.pnl;
+        if (pnl == null) {
+          appendCell(tr, '─');
+        } else {
+          const pnlCls = pnl > 0 ? 'green' : (pnl < 0 ? 'red' : 'dim');
+          const pnlStr = (pnl >= 0 ? '+' : '') + pnl.toLocaleString(undefined,
+              { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          appendCell(tr, pnlStr, pnlCls);
+        }
+        shortsBody.appendChild(tr);
+      });
+    }
+
     // ── 買進建議 ────────────────────────────────────────────────
     const buyBody = document.querySelector('#buy-table tbody');
     buyBody.innerHTML = '';
@@ -1415,12 +1468,21 @@ async function refresh() {
     allBody.innerHTML = '';
     // sort by current price desc as default
     const sortedSyms = allSyms.slice().sort();
+    const trends = d.trends || {};
     sortedSyms.forEach(sym => {
       const cur = prices[sym] || 0;
       const sig = signals.find(s => s.symbol === sym);
       const tr = document.createElement('tr');
       appendCell(tr, sym);
       appendCell(tr, fmtFloat(cur, 2));
+      // 趨勢欄(從 /stock embed 抓的「趨勢: ±N%」)
+      const tp = trends[sym];
+      if (tp == null) {
+        appendCell(tr, '─', 'dim');
+      } else {
+        const cls = tp > 0 ? 'green' : (tp < 0 ? 'red' : 'dim');
+        appendCell(tr, (tp >= 0 ? '+' : '') + tp.toFixed(2) + '%', cls);
+      }
       const heldCell = holdings[sym]
         ? `${fmt(holdings[sym].shares)} @${fmtFloat(holdings[sym].avg_cost, 2)}`
         : '─';

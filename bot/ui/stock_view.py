@@ -43,10 +43,13 @@ def show_stock_analysis(state: BotState) -> None:
             input("  按 Enter 繼續...")
         return
 
-    ts       = snap.get("ts", "─")
-    prices   = snap.get("prices", {})
-    holdings = snap.get("holdings", {})
-    signals  = snap.get("signals", [])
+    ts        = snap.get("ts", "─")
+    prices    = snap.get("prices", {})
+    trends    = snap.get("trends", {})
+    holdings  = snap.get("holdings", {})
+    shorts    = snap.get("shorts", {})
+    signals   = snap.get("signals", [])
+    pf_summary = snap.get("summary", {})
 
     # ── 1. 帳戶概況 + 訊號摘要 ─────────────────────────────────────
     total_value = 0.0
@@ -88,6 +91,21 @@ def show_stock_analysis(state: BotState) -> None:
         "🟡 中買進(60~79)", f"[yellow]{len(mid_buys)}[/yellow]",
         "⏰ 最近 poll", f"[dim]{ts}[/dim]",
     )
+    # 新增:portfolio embed 抓到的「組合盈虧 / 做空盈虧 / 總未實現盈虧」
+    if pf_summary:
+        def _money(v):
+            if v is None:
+                return "[dim]─[/dim]"
+            cls = "green" if v > 0 else ("red" if v < 0 else "dim")
+            return f"[{cls}]{v:+,.2f}[/{cls}]"
+        summary.add_row(
+            "📊 股票盈虧", _money(pf_summary.get("stocks_pnl")),
+            "📉 做空盈虧", _money(pf_summary.get("shorts_pnl")),
+        )
+        summary.add_row(
+            "💎 總未實現", _money(pf_summary.get("total_unrealized")),
+            "🪙 做空標的", f"[bold]{len(shorts)}[/]",
+        )
     console.print(summary)
 
     # ── 2. Top 3 即時推薦 ─────────────────────────────────────────
@@ -173,6 +191,46 @@ def show_stock_analysis(state: BotState) -> None:
                 pct_str, pnl_str, sig_str, reason,
             )
         console.print(ht)
+
+    # ── 3b. 做空明細 ──────────────────────────────────────────────
+    if shorts:
+        console.print()
+        console.rule("[bold]📉 做空明細[/]")
+        st = Table(show_header=True, header_style="bold cyan")
+        st.add_column("Symbol")
+        st.add_column("做空股數",   justify="right")
+        st.add_column("均做空價",   justify="right")
+        st.add_column("現價",       justify="right")
+        st.add_column("押注金額",   justify="right")
+        st.add_column("盈虧 %",     justify="right")
+        st.add_column("盈虧",       justify="right")
+        for sym, d in sorted(shorts.items()):
+            shares = d.get("shares", 0)
+            avg_short = d.get("avg_short_price", 0)
+            cur = d.get("current_price", 0)
+            cost = d.get("position_cost", 0)
+            pnl = d.get("pnl")
+            # 做空獲利方向相反:現價低於均做空價 = 賺
+            if avg_short > 0:
+                pct = (avg_short - cur) / avg_short * 100
+                pct_color = "green" if pct > 0 else ("red" if pct < 0 else "dim")
+                pct_str = f"[{pct_color}]{pct:+.2f}%[/{pct_color}]"
+            else:
+                pct_str = "─"
+            if pnl is None:
+                pnl_str = "─"
+            else:
+                pnl_color = "green" if pnl > 0 else ("red" if pnl < 0 else "dim")
+                pnl_str = f"[{pnl_color}]{pnl:+,.2f}[/{pnl_color}]"
+            st.add_row(
+                f"[bold]{sym}[/bold]",
+                f"{int(shares):,}",
+                f"{avg_short:.2f}",
+                f"{cur:.2f}",
+                f"{cost:,.2f}",
+                pct_str, pnl_str,
+            )
+        console.print(st)
 
     # ── 4. 賣出建議(score ≥ 60 的持股) ──────────────────────────
     sell_candidates = [
@@ -263,6 +321,7 @@ def show_stock_analysis(state: BotState) -> None:
         at = Table(show_header=True, header_style="bold cyan")
         at.add_column("Symbol")
         at.add_column("現價",     justify="right")
+        at.add_column("趨勢",     justify="right")
         at.add_column("持股",     justify="right")
         at.add_column("樣本數",   justify="right")
         at.add_column("買 score", justify="right")
@@ -275,6 +334,12 @@ def show_stock_analysis(state: BotState) -> None:
                 held_str = f"[green]{int(held['shares'])}[/green]"
             else:
                 held_str = "[dim]─[/dim]"
+            tr = trends.get(sym)
+            if tr is None:
+                trend_str = "[dim]─[/dim]"
+            else:
+                tr_color = "green" if tr > 0 else ("red" if tr < 0 else "dim")
+                trend_str = f"[{tr_color}]{tr:+.2f}%[/{tr_color}]"
             n = sig["n_samples"] if sig else 0
             buy_sc = sig["buy_eval"]["score"] if sig and sig.get("buy_eval") else None
             sell_sc = sig["sell_eval"]["score"] if sig and sig.get("sell_eval") else None
@@ -295,6 +360,7 @@ def show_stock_analysis(state: BotState) -> None:
             at.add_row(
                 f"[bold]{sym}[/bold]",
                 f"{cur:.2f}",
+                trend_str,
                 held_str,
                 str(n),
                 buy_str,

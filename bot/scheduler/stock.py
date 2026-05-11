@@ -25,13 +25,15 @@ from bot.core.state import (
     mark_loop_ok,
     mark_loop_running,
 )
-from bot.discord.client import query_stock_text
+from bot.discord.client import query_portfolio_full, query_stock_text
 from bot.notifications.digest import notify_stock_signal, notify_stock_volatility
 from bot.stock.analysis import analyze_symbol, detect_volatility, group_by_symbol
 from bot.stock.parser import (
     parse_portfolio,
+    parse_portfolio_shorts,
+    parse_portfolio_summary,
     parse_stock_detail,
-    parse_stock_list,
+    parse_stock_list_with_trend,
 )
 
 # Loop name(state.loop_health 的 key)
@@ -147,21 +149,27 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
     scfg = cfg.stock
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_prices: dict[str, float] = {}
+    all_trends: dict[str, float] = {}     # symbol → 趨勢 %(從 /stock 抓)
     holdings: dict[str, dict] = {}
+    shorts: dict[str, dict] = {}          # 做空倉位
+    portfolio_summary: dict = {}          # 組合盈虧 / 總未實現盈虧
     signals: list[dict] = []
     portfolio_parsed = False    # 是否成功 parse 過 portfolio(就算空)
 
     try:
-        # ── 1. /stock(無 symbol) → bot 回 embed 列出全部股票 ───────────
+        # ── 1. /stock(無 symbol) → bot 回 embed 列出全部股票 + 趨勢 ──
         log.info("stock: 查 stock list (%s)", scfg.stock_command)
         list_text = await query_stock_text(page, command=scfg.stock_command)
         if list_text:
-            discovered = parse_stock_list(list_text)
+            discovered = parse_stock_list_with_trend(list_text)
             if discovered:
                 log.info("stock: 抓到 %d 支 — %s", len(discovered),
-                         ", ".join(f"{s}=${p:.2f}"
-                                   for s, p in list(discovered.items())[:6]))
-                all_prices.update(discovered)
+                         ", ".join(f"{s}=${info['price']:.2f}"
+                                   for s, info in list(discovered.items())[:6]))
+                for sym, info in discovered.items():
+                    all_prices[sym] = info["price"]
+                    if info.get("trend_pct") is not None:
+                        all_trends[sym] = info["trend_pct"]
             else:
                 _dump_parse_debug("stock_list", list_text)
                 log.warning(
@@ -173,11 +181,14 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
 
         await interruptible_sleep(state, 2)
 
-        # ── 2. /portfolio:抓持股(shares + avg_cost + 現價) ──────────
-        log.info("stock: 查 portfolio (%s)", scfg.portfolio_command)
-        pf_text = await query_stock_text(page, command=scfg.portfolio_command)
+        # ── 2. /portfolio:抓持股 + 做空倉位 + 摘要 ───────────────────
+        log.info("stock: 查 portfolio + 做空 (%s)", scfg.portfolio_command)
+        pf_text, shorts_text = await query_portfolio_full(
+            page, portfolio_command=scfg.portfolio_command,
+        )
         if pf_text:
             holdings = parse_portfolio(pf_text)
+            portfolio_summary = parse_portfolio_summary(pf_text)
             portfolio_parsed = True    # 即使 holdings={} 也算成功(全部賣完)
             # 對比上次 snapshot,偵測買賣 — 讓 user 立即看到 bot 有抓到變動,
             # 不用對著「持股區還有那支」來懷疑 bot 沒更新
@@ -212,6 +223,23 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                 )
         else:
             log.warning("stock: %s 無回應", scfg.portfolio_command)
+
+        # ── 2b. 做空倉位(從 /portfolio 點「做空倉位」button 之後) ───
+        if shorts_text:
+            shorts = parse_portfolio_shorts(shorts_text)
+            if shorts:
+                log.info("stock: 做空 %d 支 — %s", len(shorts),
+                         ", ".join(f"{s}×{int(d['shares'])}@{d['avg_short_price']:.2f}"
+                                   for s, d in list(shorts.items())[:6]))
+                # 做空也有現價可用
+                for sym, d in shorts.items():
+                    if d.get("current_price", 0) > 0:
+                        all_prices.setdefault(sym, d["current_price"])
+            else:
+                log.info("stock: 做空畫面解析到 0 支(可能無做空倉位)")
+        elif pf_text:
+            # 主畫面有,做空 button 沒點到 → 多半是沒做空,不算錯誤
+            log.debug("stock: 沒點到做空 button,跳過做空 parse")
 
         # ── 3. 備援:對 tracked_symbols 各送一次 /stock symbol:X ──
         # 通常用不到,只在 /stock 主清單抓不到時補
@@ -317,7 +345,10 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                 state.stock_last_snapshot = {
                     "ts":         ts,
                     "prices":     all_prices,
+                    "trends":     all_trends,           # 新:股票趨勢 %
                     "holdings":   holdings,
+                    "shorts":     shorts,               # 新:做空倉位
+                    "summary":    portfolio_summary,    # 新:組合盈虧摘要
                     "signals":    signals,
                     "discovered": len(all_prices),
                 }

@@ -242,7 +242,10 @@ def build_stocks_snapshot(state: BotState, config: BotConfig) -> dict:
         "last_poll_ts":   state.stock_last_poll_ts,
         "ts":             snap.get("ts"),
         "prices":         snap.get("prices", {}),
+        "trends":         snap.get("trends", {}),       # 新:股票趨勢 %
         "holdings":       snap.get("holdings", {}),
+        "shorts":         snap.get("shorts", {}),       # 新:做空倉位
+        "summary":        snap.get("summary", {}),      # 新:組合盈虧
         "signals":        snap.get("signals", []),
         "config": {
             "poll_interval_min":      scfg.poll_interval_min,

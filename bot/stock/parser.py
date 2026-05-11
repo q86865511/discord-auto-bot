@@ -67,10 +67,41 @@ PORTFOLIO_HOLDING_BLOCK = re.compile(
 # 會因 avg/cur 顯示時被 round 而偏差幾塊到數十塊,user 對照 Discord 會困惑)。
 # 這 regex 抓「市值 ... 盈虧 : ±NUM」,綁定在「現價 ... 」之後;不指定具體
 # symbol,在 parse_portfolio 內按出現順序對應到 holding。
+# 注意:Discord 新版會在 盈虧 後加 emoji(● 紅 / 綠),`[^0-9+\-]{0,10}`
+# 跳過 emoji + 空白找到數字。
 PORTFOLIO_PNL = re.compile(
-    r"市值[:\s]*\$?[0-9,]+(?:\.[0-9]+)?"          # 市值: X.XX
-    r"\s*盈虧[:\s]*([+\-]?[0-9,]+(?:\.[0-9]+)?)",  # 盈虧: ±Y.YY
+    r"市值[:\s]*\$?[0-9,]+(?:\.[0-9]+)?"               # 市值: X.XX
+    r"[\s\S]{0,10}?盈虧[:\s]*"                          # 盈虧:
+    r"[^0-9+\-]{0,10}([+\-]?[0-9,]+(?:\.[0-9]+)?)",     # (可選 emoji)±Y.YY
     re.DOTALL,
+)
+
+# 做空倉位 entry(點「做空倉位」button 後 ephemeral 替換的內容):
+#   WAVE (夏日狂熱)
+#       做空: 1000 股
+#       均做空價: 61.90
+#       現價: 62.78
+#       押注金額: 61896.20
+#       盈虧: -886.80
+PORTFOLIO_SHORT_BLOCK = re.compile(
+    r"([A-Z][A-Z0-9]{1,6})\s*\([^)]+\)"
+    r".*?做空[:\s]*([0-9]+(?:\.[0-9]+)?)\s*股"
+    r".*?均做空價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)"
+    r".*?現價[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)"
+    r".*?押注金額[:\s]*\$?([0-9,]+(?:\.[0-9]+)?)"
+    r".*?盈虧[:\s]*[^0-9+\-]{0,10}([+\-]?[0-9,]+(?:\.[0-9]+)?)",
+    re.DOTALL,
+)
+
+# Portfolio 主畫面下方的「組合盈虧 / 資產概況 / 總未實現盈虧」摘要區
+PORTFOLIO_SUMMARY_STOCKS = re.compile(
+    r"股票[:\s]*[^0-9+\-]{0,10}([+\-]?[0-9,]+(?:\.[0-9]+)?)",
+)
+PORTFOLIO_SUMMARY_SHORTS = re.compile(
+    r"做空[:\s]*[^0-9+\-]{0,10}([+\-]?[0-9,]+\.[0-9]+)",   # 強制小數避免抓到「做空: 1000 股」
+)
+PORTFOLIO_SUMMARY_TOTAL_UNREALIZED = re.compile(
+    r"總未實現盈虧[:\s]*[^0-9+\-]{0,10}([+\-]?[0-9,]+(?:\.[0-9]+)?)",
 )
 
 
@@ -102,6 +133,57 @@ def parse_portfolio(text: str) -> dict[str, dict]:
             "current_price": cur or 0.0,
             "pnl":           pnls[i] if i < len(pnls) else None,
         }
+    return out
+
+
+def parse_portfolio_shorts(text: str) -> dict[str, dict]:
+    """點「做空倉位」button 後的 ephemeral — 抓做空標的清單。
+
+    回傳 {symbol: {shares, avg_short_price, current_price, position_cost, pnl}}。
+    shares = 做空股數;position_cost = 押注金額(保證金概念)。
+    """
+    if not text:
+        return {}
+    out: dict[str, dict] = {}
+    for m in PORTFOLIO_SHORT_BLOCK.finditer(text):
+        sym = m.group(1).upper()
+        shares = _parse_number(m.group(2))
+        avg_short = _parse_number(m.group(3))
+        cur = _parse_number(m.group(4))
+        cost = _parse_number(m.group(5))
+        pnl = _parse_number(m.group(6).replace("+", ""))
+        if shares is None or shares <= 0:
+            continue
+        out[sym] = {
+            "shares":           shares,
+            "avg_short_price":  avg_short or 0.0,
+            "current_price":    cur or 0.0,
+            "position_cost":    cost or 0.0,
+            "pnl":              pnl,
+        }
+    return out
+
+
+def parse_portfolio_summary(text: str) -> dict:
+    """抓 portfolio 主畫面的「組合盈虧 / 總未實現盈虧」摘要區。
+
+    回傳 {stocks_pnl, shorts_pnl, total_unrealized}。各欄位抓不到為 None。
+    """
+    if not text:
+        return {}
+    out: dict = {}
+    m = PORTFOLIO_SUMMARY_STOCKS.search(text)
+    if m:
+        # 過濾掉「股票交易」「股票買賣」之類誤抓 — 只取緊接「盈虧:」標籤的
+        # 實際上 SUMMARY_STOCKS 在 portfolio 摘要區的「股票」並列「做空」格式
+        # 應該抓到 -366.00 而非他處
+        out["stocks_pnl"] = _parse_number(m.group(1).replace("+", ""))
+    m = PORTFOLIO_SUMMARY_SHORTS.search(text)
+    if m:
+        out["shorts_pnl"] = _parse_number(m.group(1).replace("+", ""))
+    m = PORTFOLIO_SUMMARY_TOTAL_UNREALIZED.search(text)
+    if m:
+        out["total_unrealized"] = _parse_number(m.group(1).replace("+", ""))
     return out
 
 
@@ -176,10 +258,43 @@ STOCK_LIST_ENTRY = re.compile(
     r"[\s\n]+價格\s*[:：]\s*\$?([0-9,]+(?:\.[0-9]+)?)",  # 價格 : NUMBER
     re.DOTALL,
 )
+# 同上 + 趨勢 — 用於需要趨勢資料的場合(不影響舊 parse_stock_list 簽章)
+STOCK_LIST_ENTRY_FULL = re.compile(
+    r"\b([A-Z][A-Z0-9]{1,6})\s*-\s*\S[^\n]{0,40}?"            # SYMBOL - 名字
+    r"[\s\n]+價格\s*[:：]\s*\$?([0-9,]+(?:\.[0-9]+)?)"        # 價格 : NUMBER
+    r"[\s\S]{0,80}?趨勢\s*[:：]\s*([+\-]?[0-9]+(?:\.[0-9]+)?)\s*%",   # 趨勢 : ±N%
+    re.DOTALL,
+)
 # 舊名 dropdown 格式(`AZGC - 亞馬遜雲創 (36.76 油幣)`)— 留作備援
 DROPDOWN_LINE = re.compile(
     r"([A-Z][A-Z0-9]{1,6})\s*-\s*[^()]+?\s*\(([0-9,]+(?:\.[0-9]+)?)\s*油幣\)",
 )
+
+
+def parse_stock_list_with_trend(text: str) -> dict[str, dict]:
+    """從 `/stock` 的 embed 抓 {symbol: {price, trend_pct}}。
+
+    trend_pct 抓不到時為 None。若整個帶 trend 的 regex 都 fail,fallback
+    到不含 trend 的 parse_stock_list(只回 price)。
+    """
+    if not text:
+        return {}
+    out: dict[str, dict] = {}
+    for m in STOCK_LIST_ENTRY_FULL.finditer(text):
+        sym = m.group(1).upper()
+        if sym in {"USD", "USDT", "TOTAL", "STOCK"}:
+            continue
+        price = _parse_number(m.group(2))
+        trend = _parse_number(m.group(3))
+        if price is None or price <= 0:
+            continue
+        out.setdefault(sym, {"price": price, "trend_pct": trend})
+
+    if not out:
+        # fallback:不帶 trend 的 parser(舊格式或 embed 變動時)
+        for sym, p in parse_stock_list(text).items():
+            out[sym] = {"price": p, "trend_pct": None}
+    return out
 
 
 def parse_stock_list(text: str) -> dict[str, float]:

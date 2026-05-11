@@ -512,6 +512,85 @@ async def query_stock_text(
         return None
 
 
+async def _wait_for_text_change(
+    page: "Page", before_text: str, before_len: int,
+    timeout: float = 10.0, stability_sec: float = 1.0,
+    min_len_change: int = 50,
+) -> str | None:
+    """等 page textContent 出現變化並穩定。不取 command_lock(呼叫端負責)。
+
+    用途:點 button 後等 ephemeral 替換新內容。比 query_stock_text 寬鬆
+    一點(min_len_change=50 而非 200),因為「做空倉位」「近期新聞」這類
+    替換的內容可能不長。
+    """
+    deadline = time.time() + timeout
+    last_text = None
+    last_change = time.time()
+    while time.time() < deadline:
+        await asyncio.sleep(0.5)
+        try:
+            cur = await page.evaluate("() => document.body.textContent")
+        except Exception as e:    # noqa: BLE001
+            log.debug("文字輪詢失敗: %s", e)
+            continue
+        kw_detected = _stock_reply_detected(before_text, cur)
+        len_changed = abs(len(cur) - before_len) >= min_len_change
+        if not (kw_detected or len_changed):
+            continue
+        if cur != last_text:
+            last_text = cur
+            last_change = time.time()
+            continue
+        if time.time() - last_change >= stability_sec:
+            return cur
+    return last_text
+
+
+async def query_portfolio_full(
+    page: "Page", portfolio_command: str = "/portfolio",
+) -> tuple[str | None, str | None]:
+    """送 /portfolio 抓主畫面,再點「做空倉位」button 抓做空畫面。
+
+    回傳 (main_text, shorts_text)。任一抓不到回 None。做空 button 不存在
+    或點不到時 shorts_text=None(沒做空就跳過,不算錯誤)。
+    """
+    async with command_lock:
+        try:
+            before_text = await page.evaluate("() => document.body.textContent")
+        except Exception as e:    # noqa: BLE001
+            log.warning("讀取 before_text 失敗(portfolio_full): %s", e)
+            return None, None
+        before_len = len(before_text)
+
+        await _send_slash_command(page, portfolio_command, "")
+
+        main_text = await _wait_for_text_change(
+            page, before_text, before_len,
+            timeout=20.0, stability_sec=1.5, min_len_change=200,
+        )
+        if main_text is None:
+            return None, None
+
+        # 點「做空倉位」button(若沒做空 button 可能不存在 → 跳過)
+        # 點之前先重抓 baseline,因為點擊後 ephemeral 替換,need diff
+        before_shorts_text = main_text
+        before_shorts_len = len(before_shorts_text)
+        clicked = await _click_button_with_text(page, "做空倉位", timeout=5.0)
+        if not clicked:
+            log.info("「做空倉位」button 找不到 — 可能無做空,只回主畫面")
+            return main_text, None
+        await asyncio.sleep(0.5)
+        try:
+            shorts_text = await page.evaluate("() => document.body.textContent")
+        except Exception:    # noqa: BLE001
+            shorts_text = main_text
+        shorts_text = await _wait_for_text_change(
+            page, before_shorts_text, before_shorts_len,
+            timeout=10.0, stability_sec=1.0, min_len_change=50,
+        ) or shorts_text
+        return main_text, shorts_text
+
+
 # ── 貓娘 ──────────────────────────────────────────────────────────────
 async def auto_claim_and_redispatch_neko(page: "Page") -> bool:
     """送 /nekomusume status → 等 ephemeral embed → 點「領取並再派遣」按鈕。
