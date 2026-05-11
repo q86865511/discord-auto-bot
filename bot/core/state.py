@@ -158,7 +158,11 @@ class BotState:
     session_start_ts: float = field(default_factory=time.time)
 
     # ── 滑動視窗(讓 UI / dashboard 看最近) ────────────────────────
+    # 系統 + 拉霸相關 log(/hourly /daily /slot /transfer /neko 等)
     log_lines: deque[str] = field(default_factory=lambda: deque(maxlen=UI_LOG_LINES_MAX))
+    # 股票相關 log(stock_loop / news_loop / volatility / 偵測買賣 等)
+    # UI 主面板分兩欄,系統一欄股票一欄,避免被 stock 訊息洗版掉拉霸結果
+    stock_log_lines: deque[str] = field(default_factory=lambda: deque(maxlen=UI_LOG_LINES_MAX))
     # 錯誤紀錄(WARNING+ 等級):{ts, level, logger, msg}。UILogHandler 同時
     # push 到這裡(level >= WARNING 時)。X 鍵 / Web debug card 顯示。
     error_lines: deque[dict] = field(default_factory=lambda: deque(maxlen=30))
@@ -196,9 +200,20 @@ class BotState:
         return k
 
     # ── 日誌追加(thread-safe;UI 顯示用) ────────────────────────────
-    def queue_log(self, msg: str) -> None:
+    def queue_log(self, msg: str, *, category: str = "system") -> None:
+        """category="system"(預設)→ 主面板左欄日誌
+        category="stock"        → 主面板右欄股票日誌
+        """
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_lines.append(f"{ts} {msg}")
+        line = f"{ts} {msg}"
+        if category == "stock":
+            self.stock_log_lines.append(line)
+        else:
+            self.log_lines.append(line)
+
+    def queue_stock_log(self, msg: str) -> None:
+        """convenience:推到股票欄(等同 queue_log(msg, category="stock"))。"""
+        self.queue_log(msg, category="stock")
 
     def reset_event_counters(self) -> None:
         """每日摘要寄出後 reset 區間計數器(history/slot_analysis 不重置)。"""

@@ -139,7 +139,7 @@ async def _check_all_news(
              ", ".join(all_syms[:10]),
              f" — 切到頻道 {news_ch_id}" if use_separate_channel else "")
     # 主面板 queue_log 一條,user 不在 T 鍵頁也能立刻看到 cycle 啟動
-    state.queue_log(
+    state.queue_stock_log(
         f"🌐 news cycle 開始 — 抓 {len(all_syms)} 支 "
         f"({', '.join(all_syms[:6])}{'...' if len(all_syms) > 6 else ''})"
     )
@@ -222,7 +222,7 @@ async def _check_all_news(
                 stats["no_new"], stats["exc"], len(all_syms),
             )
             if stats["no_text"] + stats["no_items"] + stats["exc"] > 0:
-                state.queue_log(
+                state.queue_stock_log(
                     f"⚠ news cycle:{stats['ok']}/{len(all_syms)} 成功,"
                     f"{stats['no_text']} 沒文字 / {stats['no_items']} 棄用 / "
                     f"{stats['exc']} 例外 — X 鍵看細節"
@@ -247,7 +247,7 @@ async def _check_all_news(
     if all_new_items:
         for it in all_new_items[:10]:
             title = it["title"][:60]
-            state.queue_log(
+            state.queue_stock_log(
                 f"📰 {it['symbol']} ({it['date']}) {title}"
             )
         try:

@@ -305,6 +305,26 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
                          f"持股 {n_held}/{n_disc}{sig_part}")
     t2.add_row("📈 股票檢查", stock_str)
 
+    # ── 新聞 poll 倒數 ────────────────────────────────────────────
+    news_next = state.news_next_poll_ts
+    if not scfg.enabled:
+        news_str = "[dim]停用[/dim]"
+    elif news_next is None:
+        news_str = "[yellow]news_loop 未啟動[/yellow]"
+    else:
+        remain = int(news_next - time.time())
+        if remain > 0:
+            mm, ss = divmod(remain, 60)
+            cd = f"{mm}m {ss:02d}s" if mm > 0 else f"{ss}s"
+            news_str = f"倒數 [cyan]{cd}[/cyan]"
+        else:
+            news_str = "[yellow]即將抓取[/yellow]"
+        # 顯示最近 news 數量
+        n_news = len(state.stock_recent_news or [])
+        if n_news > 0:
+            news_str += f"  [dim]最近 {n_news} 筆[/dim]"
+    t2.add_row("📰 新聞 poll", news_str)
+
     # ── 進階策略狀態 ──────────────────────────────────────────────
     strats = []
     if gcfg.hourly_filter_enabled: strats.append("hourly")
@@ -345,10 +365,24 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
     cfg_panel = Panel(t2, title="[bold]⚙️ 設定[/bold]  [dim]C:修改系統設定[/dim]",
                       border_style="green")
 
-    # 日誌
-    lines    = list(state.log_lines)[-10:]
-    log_text = "\n".join(lines) if lines else "[dim]尚無日誌[/dim]"
-    log_panel = Panel(log_text, title="[bold]📋 日誌[/bold]", border_style="dim", height=13)
+    # 日誌(分兩欄:系統+拉霸 / 股票相關)
+    sys_lines = list(state.log_lines)[-10:]
+    sys_text = "\n".join(sys_lines) if sys_lines else "[dim]尚無日誌[/dim]"
+    sys_log_panel = Panel(
+        sys_text, title="[bold]📋 系統 + 拉霸[/bold]",
+        border_style="dim", height=13,
+    )
+    stk_lines = list(state.stock_log_lines)[-10:]
+    stk_text = "\n".join(stk_lines) if stk_lines else "[dim]尚無股票日誌[/dim]"
+    stk_log_panel = Panel(
+        stk_text, title="[bold]📈 股票 / 新聞[/bold]",
+        border_style="dim", height=13,
+    )
+    log_layout = Layout(name="logs_row")
+    log_layout.split_row(
+        Layout(sys_log_panel, name="sys_log"),
+        Layout(stk_log_panel, name="stk_log"),
+    )
 
     # Footer
     pause_label = (
@@ -386,7 +420,7 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
     layout.split_column(
         Layout(header,    name="header", size=3),
         Layout(name="body"),
-        Layout(log_panel, name="logs",   size=13),
+        Layout(log_layout, name="logs",   size=13),
         Layout(footer,    name="footer", size=3),
     )
     layout["body"].split_row(

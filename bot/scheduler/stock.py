@@ -99,7 +99,7 @@ async def stock_loop(
         if is_loop_auto_paused(state, _LOOP_NAME) and not forced:
             log.warning("stock: 連續失敗已達閾值,冷卻 %d 秒後重試",
                         _PAUSE_RECOVERY_SEC)
-            state.queue_log("⛔ 股票 loop 連續失敗,已自動暫停 30 分鐘")
+            state.queue_stock_log("⛔ 股票 loop 連續失敗,已自動暫停 30 分鐘")
             # 切成 chunks 讓 force_poll 能中斷
             slept = 0
             while slept < _PAUSE_RECOVERY_SEC and not state.quit:
@@ -126,7 +126,7 @@ async def stock_loop(
             else:
                 mark_loop_failed(state, _LOOP_NAME,
                                  "discovery + portfolio 都沒抓到資料")
-                state.queue_log("⚠ 股票 poll 完全沒抓到資料")
+                state.queue_stock_log("⚠ 股票 poll 完全沒抓到資料")
 
         # Sleep 切成 30 秒 chunks — 每 chunk 結束 check force_poll 旗標,
         # 讓 UI / Dashboard 觸發的「立即重 poll」最多 30 秒內生效。
@@ -201,10 +201,10 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
             sold = prev_keys - cur_keys
             bought = cur_keys - prev_keys
             if sold:
-                state.queue_log(f"💰 偵測賣出: {', '.join(sorted(sold))}")
+                state.queue_stock_log(f"💰 偵測賣出: {', '.join(sorted(sold))}")
                 log.info("stock: 偵測賣出 %s", sorted(sold))
             if bought:
-                state.queue_log(f"🛒 偵測買進: {', '.join(sorted(bought))}")
+                state.queue_stock_log(f"🛒 偵測買進: {', '.join(sorted(bought))}")
                 log.info("stock: 偵測買進 %s", sorted(bought))
             if not holdings:
                 _dump_parse_debug("portfolio", pf_text)
@@ -288,7 +288,7 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                         "疑似 parser 異常,棄用此次值",
                         sym, prev, p, ratio,
                     )
-                    state.queue_log(
+                    state.queue_stock_log(
                         f"⚠ {sym} 價格異常跳動 ({prev:.2f}→{p:.2f}),棄用"
                     )
                     cleaned[sym] = prev
@@ -336,7 +336,7 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                     msg = (f"{emoji} {sym} {sig.upper()} (score={sc}) "
                            f"@{ev.get('current', 0):.2f} — "
                            f"{ev.get('reason', '')[:80]}")
-                    state.queue_log(msg)
+                    state.queue_stock_log(msg)
                     log.info("stock signal: %s", msg)
                     key = (sym, sig)
                     current_strong[key] = sc
@@ -414,7 +414,7 @@ async def _check_volatility(state: BotState, cfg, by_sym: dict[str, list]) -> No
         label = "暴漲" if direction == "rise" else "暴跌"
         msg = (f"{emoji} {sym} {label} {change:+.2f}% / 過去 "
                f"{win:g} min @ {info['current']:.2f}")
-        state.queue_log(msg)
+        state.queue_stock_log(msg)
         log.info("stock volatility: %s", msg)
         try:
             await notify_stock_volatility(state, cfg, sym, info)

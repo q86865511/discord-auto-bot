@@ -29,6 +29,10 @@ async def first_run_wizard(config: BotConfig) -> bool:
         needed.append("channel_id")
     if not config.gambling.notify_user_id:
         needed.append("notify_user_id")
+    # 股票新聞頻道:stock 啟用時強制設定,讓新聞 ephemeral 不混入主頻道
+    # 防止 textContent 抓到 slot / hourly 等其他指令的 ephemeral 內容
+    if config.stock.enabled and not (config.stock.news_channel_id or "").strip():
+        needed.append("news_channel_id")
 
     pwd_missing = (config.dashboard.enabled
                    and not (config.dashboard.password or "").strip())
@@ -63,6 +67,18 @@ async def first_run_wizard(config: BotConfig) -> bool:
         print("    → 對使用者右鍵 → 複製使用者 ID")
         v = await ask_user_id("    User ID", config.gambling.notify_user_id)
         if v: config.gambling.notify_user_id = v
+
+    if "news_channel_id" in needed:
+        print(f"\n  【📰 股票新聞頻道 ID】(目前: {config.stock.news_channel_id or '未設定'})")
+        print("    bot 抓新聞時切到這個頻道送 /stock symbol:X — 避免新聞")
+        print("    ephemeral 跟主頻道的 slot / hourly / portfolio 等指令混在")
+        print("    一起,造成 parser 抓錯內容。")
+        print("    → 在伺服器內另開一個專用頻道(例如 #新聞查詢),對它右鍵")
+        print("      → 複製頻道 ID")
+        print("    → bot 必須有權限進入該頻道並能送 slash command")
+        v = await ask_user_id("    新聞頻道 ID", config.stock.news_channel_id)
+        if v:
+            config.stock.news_channel_id = v
 
     if pwd_missing:
         print()

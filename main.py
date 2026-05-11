@@ -82,11 +82,23 @@ class UILogHandler(logging.Handler):
         self.state = state
         self.setFormatter(RedactingFormatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
 
+    # 這些 logger 算「股票相關」分流到 stock_log_lines
+    _STOCK_LOGGER_NAMES = (
+        "bot.scheduler.stock",
+        "bot.scheduler.news",
+        "bot.stock",
+    )
+
     def emit(self, record):
         try:
-            self.state.log_lines.append(self.format(record))
-            # log_lines 是 deque(maxlen=UI_LOG_LINES_MAX),自動 trim
-            # WARNING+ 也 push 到 error_lines 給除錯專區看
+            formatted = self.format(record)
+            # 按 logger 名稱分流(stock / news / stock.* → stock_log_lines)
+            name = record.name or ""
+            if any(name.startswith(p) for p in self._STOCK_LOGGER_NAMES):
+                self.state.stock_log_lines.append(formatted)
+            else:
+                self.state.log_lines.append(formatted)
+            # WARNING+ 也 push 到 error_lines 給除錯專區看(兩欄共用)
             if record.levelno >= logging.WARNING:
                 from datetime import datetime as _dt
                 self.state.error_lines.append({
