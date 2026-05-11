@@ -150,6 +150,7 @@ def show_stock_analysis(state: BotState) -> None:
         ht.add_column("股數",     justify="right")
         ht.add_column("均買價",   justify="right")
         ht.add_column("現價",     justify="right")
+        ht.add_column("趨勢",     justify="right")
         ht.add_column("損益 %",  justify="right")
         ht.add_column("盈虧",    justify="right")
         ht.add_column("建議",     justify="right")
@@ -184,11 +185,18 @@ def show_stock_analysis(state: BotState) -> None:
             else:
                 sig_str = "─"
                 reason = "─"
+            tr_v = trends.get(sym)
+            if tr_v is None:
+                trend_str = "[dim]─[/dim]"
+            else:
+                tcls = "green" if tr_v > 0 else ("red" if tr_v < 0 else "dim")
+                trend_str = f"[{tcls}]{tr_v:+.2f}%[/{tcls}]"
             ht.add_row(
                 f"[bold]{sym}[/bold]",
                 f"{int(shares):,}",
                 f"{avg:.2f}" if avg else "─",
                 f"{cur:.2f}",
+                trend_str,
                 pct_str, pnl_str, sig_str, reason,
             )
         console.print(ht)
@@ -202,6 +210,7 @@ def show_stock_analysis(state: BotState) -> None:
         st.add_column("做空股數",   justify="right")
         st.add_column("均做空價",   justify="right")
         st.add_column("現價",       justify="right")
+        st.add_column("趨勢",       justify="right")
         st.add_column("押注金額",   justify="right")
         st.add_column("盈虧 %",     justify="right")
         st.add_column("盈虧",       justify="right")
@@ -223,11 +232,18 @@ def show_stock_analysis(state: BotState) -> None:
             else:
                 pnl_color = "green" if pnl > 0 else ("red" if pnl < 0 else "dim")
                 pnl_str = f"[{pnl_color}]{pnl:+,.2f}[/{pnl_color}]"
+            tr_v = trends.get(sym)
+            if tr_v is None:
+                trend_str = "[dim]─[/dim]"
+            else:
+                tcls = "green" if tr_v > 0 else ("red" if tr_v < 0 else "dim")
+                trend_str = f"[{tcls}]{tr_v:+.2f}%[/{tcls}]"
             st.add_row(
                 f"[bold]{sym}[/bold]",
                 f"{int(shares):,}",
                 f"{avg_short:.2f}",
                 f"{cur:.2f}",
+                trend_str,
                 f"{cost:,.2f}",
                 pct_str, pnl_str,
             )
@@ -248,6 +264,7 @@ def show_stock_analysis(state: BotState) -> None:
         st.add_column("持有",   justify="right")
         st.add_column("均買價", justify="right")
         st.add_column("現價",   justify="right")
+        st.add_column("趨勢",   justify="right")
         st.add_column("損益 %", justify="right")
         st.add_column("Score", justify="right")
         st.add_column("說明")
@@ -262,11 +279,18 @@ def show_stock_analysis(state: BotState) -> None:
             else:
                 pp_color = "green" if pp > 0 else ("red" if pp < 0 else "dim")
                 pp_str = f"[{pp_color}]{pp:+.2f}%[/{pp_color}]"
+            tr_v = trends.get(s["symbol"])
+            if tr_v is None:
+                trend_str = "[dim]─[/dim]"
+            else:
+                tcls = "green" if tr_v > 0 else ("red" if tr_v < 0 else "dim")
+                trend_str = f"[{tcls}]{tr_v:+.2f}%[/{tcls}]"
             st.add_row(
                 f"[bold]{s['symbol']}[/bold]",
                 f"{int(h['shares']):,}",
                 f"{h.get('avg_cost', 0):.2f}",
                 f"{ev.get('current', 0):.2f}",
+                trend_str,
                 pp_str,
                 f"[{cls}]{sc}[/{cls}]",
                 ev.get("reason", "")[:60],
@@ -289,6 +313,7 @@ def show_stock_analysis(state: BotState) -> None:
         bt = Table(show_header=True, header_style="bold cyan")
         bt.add_column("Symbol")
         bt.add_column("現價",   justify="right")
+        bt.add_column("趨勢",   justify="right")
         bt.add_column("短均",   justify="right")
         bt.add_column("長均",   justify="right")
         bt.add_column("Score", justify="right")
@@ -299,9 +324,16 @@ def show_stock_analysis(state: BotState) -> None:
             cls = "green" if sc >= 80 else "yellow"
             ms = ev.get("ma_short")
             ml = ev.get("ma_long")
+            tr_v = trends.get(s["symbol"])
+            if tr_v is None:
+                trend_str = "[dim]─[/dim]"
+            else:
+                tcls = "green" if tr_v > 0 else ("red" if tr_v < 0 else "dim")
+                trend_str = f"[{tcls}]{tr_v:+.2f}%[/{tcls}]"
             bt.add_row(
                 f"[bold]{s['symbol']}[/bold]",
                 f"{ev.get('current', 0):.2f}",
+                trend_str,
                 f"{ms:.2f}" if ms else "─",
                 f"{ml:.2f}" if ml else "─",
                 f"[{cls}]{sc}[/{cls}]",
@@ -370,9 +402,9 @@ def show_stock_analysis(state: BotState) -> None:
         console.print(at)
 
     # ── 7. 最近新聞(從 DB 抓回的最近 5 筆,跨 sym) ──────────────
+    console.print()
+    console.rule("[bold]📰 近期新聞(最近 5 筆)[/]")
     if recent_news:
-        console.print()
-        console.rule("[bold]📰 近期新聞(最近 5 筆)[/]")
         nt = Table(show_header=True, header_style="bold cyan", box=None)
         nt.add_column("日期", style="dim", width=12)
         nt.add_column("Symbol", style="bold cyan", width=8)
@@ -383,6 +415,9 @@ def show_stock_analysis(state: BotState) -> None:
             title = (it.get("title") or "").strip()[:90]
             nt.add_row(f"({date})", sym, title)
         console.print(nt)
+    else:
+        console.print("  [dim]尚無新聞 — 只在持股 / 做空時抓,每 6 個 poll 一次。"
+                      "首次 poll 完成後可看到。[/dim]")
 
     # R = 立即重 poll(賣股後想馬上看到反應、或想 force refresh 都用這個)
     cmd = input("\n  按 Enter 返回 / R + Enter 立即重 poll: ").strip().lower()

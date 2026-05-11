@@ -22,6 +22,7 @@ from rich.live import Live
 
 from bot.core.state import BotState
 from bot.ui.analysis_view import show_slot_analysis
+from bot.ui.error_view import show_error_log
 from bot.ui.exports import (
     export_history_chart,
     export_history_csv,
@@ -109,6 +110,13 @@ async def ui_loop(
                         state.queue_log(f"⚠ 開啟瀏覽器失敗: {e}")
                 elif key == "k":
                     await on_qr_open()
+                elif key == "x":
+                    # 除錯專區 — 顯示最近 30 筆 WARNING+ log
+                    live.stop()
+                    try:
+                        show_error_log(state)
+                    finally:
+                        live.start()
 
             live.update(build_layout(state, config_provider()))
             await asyncio.sleep(0.5)

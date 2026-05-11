@@ -91,6 +91,17 @@ async def stock_loop(
     # 啟動延遲
     await interruptible_sleep(state, 60)
 
+    # 啟動時:先 load DB 既有新聞到 state(UI 立刻有資料)+ 設 counter 讓第一次
+    # poll 就觸發新聞抓取(不用等 90 分鐘)
+    try:
+        recent = await db.load_recent_news(limit=5)
+        async with state.lock:
+            state.stock_recent_news = recent
+        log.info("stock: 從 DB 載入 %d 則既有新聞", len(recent))
+    except Exception:    # noqa: BLE001
+        log.exception("初次 load 新聞失敗(可忽略,table 可能還沒建)")
+    state.stock_news_poll_counter = _NEWS_POLL_EVERY_N - 1
+
     while not state.quit:
         cfg = config_provider()
         scfg = cfg.stock

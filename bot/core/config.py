@@ -166,6 +166,7 @@ class EmailConfig:
     notify_neko: bool = True
     notify_digest: bool = True
     notify_stock_signal: bool = False    # 強股票訊號(buy/sell score ≥ 門檻)
+    notify_stock_news: bool = False      # 新股票新聞(每 6 個 poll 抓一次)
     digest_hour: int = DEFAULT_DIGEST_HOUR
     dead_threshold: int = DEFAULT_DEAD_THRESHOLD
 

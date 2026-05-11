@@ -85,6 +85,15 @@ class UILogHandler(logging.Handler):
         try:
             self.state.log_lines.append(self.format(record))
             # log_lines 是 deque(maxlen=UI_LOG_LINES_MAX),自動 trim
+            # WARNING+ 也 push 到 error_lines 給除錯專區看
+            if record.levelno >= logging.WARNING:
+                from datetime import datetime as _dt
+                self.state.error_lines.append({
+                    "ts":     _dt.now().strftime("%H:%M:%S"),
+                    "level":  record.levelname,
+                    "logger": record.name,
+                    "msg":    record.getMessage()[:300],
+                })
         except (TypeError, ValueError):
             self.handleError(record)
 

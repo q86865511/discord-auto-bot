@@ -274,13 +274,13 @@ async def notify_stock_news(
     state: BotState, config: "BotConfig",   # noqa: ARG001
     new_items: list[dict],
 ) -> None:
-    """新股票新聞 → email。Reuse ecfg.notify_stock_signal 開關。
+    """新股票新聞 → email。獨立 toggle ecfg.notify_stock_news。
 
     new_items 來自 db.upsert_news_items 的回傳(去重後真的新加入的)。
     每項含 symbol / date / title。
     """
     ecfg = config.email
-    if not (ecfg.enabled and getattr(ecfg, "notify_stock_signal", False)):
+    if not (ecfg.enabled and getattr(ecfg, "notify_stock_news", False)):
         return
     if not new_items:
         return

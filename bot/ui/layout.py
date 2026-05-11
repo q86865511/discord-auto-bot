@@ -356,6 +356,12 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         if state.paused
         else "[bold]P[/bold] 暫停系統"
     )
+    # 「X 除錯」加上錯誤計數,有錯時用紅色,讓 user 一眼看到
+    err_n = len(state.error_lines) if state.error_lines else 0
+    if err_n > 0:
+        x_label = f"[bold red]X[/bold red] 除錯[red]({err_n})[/red]"
+    else:
+        x_label = "[bold]X[/bold] 除錯"
     footer = Panel(
         f"[dim][bold]Q[/bold] 退出  [bold]C[/bold] 修改設定  "
         f"{pause_label}  "
@@ -364,6 +370,7 @@ def build_layout(state: BotState, config: BotConfig) -> Layout:
         f"[bold]T[/bold] 股票分析  "
         f"[bold]W[/bold] Dashboard  "
         f"[bold]K[/bold] QR  "
+        f"{x_label}  "
         f"[bold]F[/bold] 重啟[/dim]",
         style="dim", height=3,
     )

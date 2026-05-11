@@ -505,6 +505,11 @@ function appendCell(tr, text, cls) {
   td.textContent = text;
   tr.appendChild(td);
 }
+function appendTrendCell(tr, pct) {
+  if (pct == null) { appendCell(tr, '─', 'dim'); return; }
+  const cls = pct > 0 ? 'green' : (pct < 0 ? 'red' : 'dim');
+  appendCell(tr, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', cls);
+}
 async function refresh() {
   try {
     const r = await fetch('/api/analysis');
@@ -926,6 +931,11 @@ function appendCell(tr, text, cls) {
   td.textContent = text;
   tr.appendChild(td);
 }
+function appendTrendCell(tr, pct) {
+  if (pct == null) { appendCell(tr, '─', 'dim'); return; }
+  const cls = pct > 0 ? 'green' : (pct < 0 ? 'red' : 'dim');
+  appendCell(tr, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', cls);
+}
 function appendCellRich(tr, html, cls) {
   const td = document.createElement('td');
   if (cls) td.className = cls;
@@ -1134,6 +1144,23 @@ STOCKS_BODY = r"""
       </table>
       <div id="no-news" class="dim" style="margin-top: 8px;"></div>
     </div>
+    <div class="card" style="grid-column: 1/-1;">
+      <h3>🐛 除錯紀錄 <span id="errors-badge" class="dim" style="font-size: 12px;"></span></h3>
+      <p class="dim" style="font-size: 12px; margin: 0 0 8px 0;">
+        WARNING+ 等級的 log(loop 失敗 / Discord timeout / parse 抓不到等)。
+        最近 15 筆,新→舊排序。在終端按 X 鍵可看完整 30 筆。
+      </p>
+      <table class="right-align" id="errors-table">
+        <thead><tr>
+          <th style="width:80px;">時間</th>
+          <th style="width:80px;">等級</th>
+          <th style="width:200px;" class="left-align">Logger</th>
+          <th class="left-align">訊息</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="no-errors" class="dim" style="margin-top: 8px;"></div>
+    </div>
   </div>
 </div>
 
@@ -1143,7 +1170,7 @@ STOCKS_BODY = r"""
     <table class="right-align" id="holdings-table">
       <thead><tr>
         <th>Symbol</th><th>股數</th><th>均買價</th>
-        <th>現價</th><th>損益 %</th><th>盈虧</th><th>建議</th><th>說明</th>
+        <th>現價</th><th>趨勢</th><th>損益 %</th><th>盈虧</th><th>建議</th><th>說明</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1157,7 +1184,7 @@ STOCKS_BODY = r"""
     <table class="right-align" id="shorts-table">
       <thead><tr>
         <th>Symbol</th><th>做空股數</th><th>均做空價</th>
-        <th>現價</th><th>押注金額</th><th>盈虧 %</th><th>盈虧</th>
+        <th>現價</th><th>趨勢</th><th>押注金額</th><th>盈虧 %</th><th>盈虧</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1173,7 +1200,7 @@ STOCKS_BODY = r"""
     </p>
     <table class="right-align" id="buy-table">
       <thead><tr>
-        <th>Symbol</th><th>現價</th><th>短均</th><th>長均</th>
+        <th>Symbol</th><th>現價</th><th>趨勢</th><th>短均</th><th>長均</th>
         <th>Score</th><th>說明</th>
       </tr></thead>
       <tbody></tbody>
@@ -1192,7 +1219,7 @@ STOCKS_BODY = r"""
     <table class="right-align" id="sell-table">
       <thead><tr>
         <th>Symbol</th><th>持有</th><th>均買價</th><th>現價</th>
-        <th>損益 %</th><th>Score</th><th>說明</th>
+        <th>趨勢</th><th>損益 %</th><th>Score</th><th>說明</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -1228,6 +1255,11 @@ function appendCell(tr, text, cls) {
   if (cls) td.className = cls;
   td.textContent = text;
   tr.appendChild(td);
+}
+function appendTrendCell(tr, pct) {
+  if (pct == null) { appendCell(tr, '─', 'dim'); return; }
+  const cls = pct > 0 ? 'green' : (pct < 0 ? 'red' : 'dim');
+  appendCell(tr, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%', cls);
 }
 function fmtTime(epoch) {
   if (!epoch) return '─';
@@ -1336,6 +1368,7 @@ async function refresh() {
       noHold.textContent = '— 目前沒有持股(或 /portfolio 解析失敗)';
     } else {
       noHold.textContent = '';
+      const trends = d.trends || {};
       heldSyms.forEach(sym => {
         const h = holdings[sym];
         const sig = signals.find(s => s.symbol === sym);
@@ -1346,6 +1379,7 @@ async function refresh() {
         appendCell(tr, fmt(h.shares));
         appendCell(tr, fmtFloat(h.avg_cost, 2));
         appendCell(tr, fmtFloat(cur, 2));
+        appendTrendCell(tr, trends[sym]);
         if (h.avg_cost > 0) {
           const pct = (cur - h.avg_cost) / h.avg_cost * 100;
           const cls = pct > 0 ? 'green' : (pct < 0 ? 'red' : 'dim');
@@ -1374,6 +1408,40 @@ async function refresh() {
           appendCell(tr, '─');
         }
         holdingsBody.appendChild(tr);
+      });
+    }
+
+    // ── 🐛 除錯紀錄 ───────────────────────────────────────────────
+    const errBody = document.querySelector('#errors-table tbody');
+    errBody.innerHTML = '';
+    const errors = d.errors || [];
+    const errBadge = document.getElementById('errors-badge');
+    const noErr = document.getElementById('no-errors');
+    if (errors.length === 0) {
+      errBadge.textContent = '✓ 0 筆';
+      errBadge.className = 'green';
+      noErr.textContent = '— 目前沒有錯誤紀錄(WARNING+)';
+    } else {
+      errBadge.textContent = `(${errors.length} 筆)`;
+      errBadge.className = errors.length > 5 ? 'red' : 'yellow';
+      noErr.textContent = '';
+      // 新→舊 顯示
+      errors.slice().reverse().forEach(e => {
+        const tr = document.createElement('tr');
+        appendCell(tr, e.ts || '—', 'dim');
+        const lvl = e.level || '?';
+        const lvlCls = (lvl === 'ERROR' || lvl === 'CRITICAL')
+            ? 'red' : (lvl === 'WARNING' ? 'yellow' : 'dim');
+        appendCell(tr, lvl, lvlCls);
+        const logCell = document.createElement('td');
+        logCell.className = 'left-align dim';
+        logCell.textContent = (e.logger || '—').slice(0, 40);
+        tr.appendChild(logCell);
+        const msgCell = document.createElement('td');
+        msgCell.className = 'left-align';
+        msgCell.textContent = (e.msg || '').slice(0, 200);
+        tr.appendChild(msgCell);
+        errBody.appendChild(tr);
       });
     }
 
@@ -1408,6 +1476,7 @@ async function refresh() {
       noShorts.textContent = '— 目前沒有做空倉位';
     } else {
       noShorts.textContent = '';
+      const trendsForShorts = d.trends || {};
       shortSyms.forEach(sym => {
         const s = shorts[sym];
         const tr = document.createElement('tr');
@@ -1415,6 +1484,7 @@ async function refresh() {
         appendCell(tr, fmt(s.shares));
         appendCell(tr, fmtFloat(s.avg_short_price, 2));
         appendCell(tr, fmtFloat(s.current_price, 2));
+        appendTrendCell(tr, trendsForShorts[sym]);
         appendCell(tr, fmtFloat(s.position_cost, 2));
         // 做空獲利方向相反:現價 < 均做空價 = 賺
         if (s.avg_short_price > 0) {
@@ -1448,11 +1518,13 @@ async function refresh() {
       noBuy.textContent = '— 目前沒有 score ≥ 60 的買進機會(資料累積中或無利可圖)';
     } else {
       noBuy.textContent = '';
+      const trendsForBuy = d.trends || {};
       buyCandidates.forEach(s => {
         const ev = s.buy_eval;
         const tr = document.createElement('tr');
         appendCell(tr, s.symbol);
         appendCell(tr, fmtFloat(ev.current, 2));
+        appendTrendCell(tr, trendsForBuy[s.symbol]);
         appendCell(tr, fmtFloat(ev.ma_short, 2));
         appendCell(tr, fmtFloat(ev.ma_long, 2));
         const cls = ev.score >= 80 ? 'green' : 'yellow';
@@ -1478,6 +1550,7 @@ async function refresh() {
       }
     } else {
       noSell.textContent = '';
+      const trendsForSell = d.trends || {};
       sellCandidates.forEach(s => {
         const ev = s.sell_eval;
         const h  = holdings[s.symbol];
@@ -1486,6 +1559,7 @@ async function refresh() {
         appendCell(tr, fmt(h.shares));
         appendCell(tr, fmtFloat(h.avg_cost, 2));
         appendCell(tr, fmtFloat(ev.current, 2));
+        appendTrendCell(tr, trendsForSell[s.symbol]);
         if (ev.profit_pct != null) {
           const cls = ev.profit_pct > 0 ? 'green' : (ev.profit_pct < 0 ? 'red' : 'dim');
           appendCell(tr, (ev.profit_pct >= 0 ? '+' : '') + ev.profit_pct.toFixed(2) + '%', cls);

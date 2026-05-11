@@ -216,6 +216,8 @@ async def _sub_menu_email(config: BotConfig) -> None:
         print(f"   [A] 每日摘要:        {'✓' if e.notify_digest else '✗'}  時段={e.digest_hour:02d}:00")
         print(f"   [B] 股票強訊號:      {'✓' if e.notify_stock_signal else '✗'}  "
               f"(score ≥ stock 的 [9] 門檻才寄)")
+        print(f"   [C] 股票新聞:        {'✓' if e.notify_stock_news else '✗'}  "
+              f"(每 6 個 stock poll 抓一次,有新就寄)")
         print()
         print("   [0] 返回主選單")
         choice = (await ainput("\n  選擇: ")).strip().upper()
@@ -297,6 +299,13 @@ async def _sub_menu_email(config: BotConfig) -> None:
             if e.notify_stock_signal:
                 print("    觸發條件:某支股 buy/sell score ≥ 強訊號門檻(stock [9] 設)。")
                 print("    防爆量:同 symbol/類型只通知一次,訊號消失後重新出現才會再寄。")
+            await wait_enter()
+        elif choice == "C":
+            e.notify_stock_news = not e.notify_stock_news
+            print(f"  ✓ 股票新聞 email → {'啟用' if e.notify_stock_news else '停用'}")
+            if e.notify_stock_news:
+                print("    觸發條件:抓到新新聞(DB UNIQUE 去重後真的是新項)才寄。")
+                print("    頻率:每 6 個 stock poll 抓一次(poll_interval=15min 約 90 分鐘)。")
             await wait_enter()
 
 

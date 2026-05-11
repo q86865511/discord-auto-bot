@@ -155,6 +155,9 @@ class BotState:
 
     # ── 滑動視窗(讓 UI / dashboard 看最近) ────────────────────────
     log_lines: deque[str] = field(default_factory=lambda: deque(maxlen=UI_LOG_LINES_MAX))
+    # 錯誤紀錄(WARNING+ 等級):{ts, level, logger, msg}。UILogHandler 同時
+    # push 到這裡(level >= WARNING 時)。X 鍵 / Web debug card 顯示。
+    error_lines: deque[dict] = field(default_factory=lambda: deque(maxlen=30))
 
     # ── 計數器 ──────────────────────────────────────────────────────
     events: EventCounters = field(default_factory=EventCounters)
