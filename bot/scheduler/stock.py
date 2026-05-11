@@ -25,8 +25,16 @@ from bot.core.state import (
     mark_loop_ok,
     mark_loop_running,
 )
-from bot.discord.client import query_portfolio_full, query_stock_text
-from bot.notifications.digest import notify_stock_signal, notify_stock_volatility
+from bot.discord.client import (
+    query_portfolio_full,
+    query_stock_news,
+    query_stock_text,
+)
+from bot.notifications.digest import (
+    notify_stock_news,
+    notify_stock_signal,
+    notify_stock_volatility,
+)
 from bot.stock.analysis import analyze_symbol, detect_volatility, group_by_symbol
 from bot.stock.parser import (
     parse_portfolio,
@@ -34,12 +42,16 @@ from bot.stock.parser import (
     parse_portfolio_summary,
     parse_stock_detail,
     parse_stock_list_with_trend,
+    parse_stock_news,
 )
 
 # Loop name(state.loop_health 的 key)
 _LOOP_NAME = "stock"
 # auto_paused 後等多久再試
 _PAUSE_RECOVERY_SEC = 30 * 60
+# 每 N 次 stock poll 抓一次新聞(預設 6,poll_interval=15min 約 90 分鐘)
+# 新聞通常不是 minute 級變動,不用每次都抓 — 點 button 抓需要時間+遞延
+_NEWS_POLL_EVERY_N = 6
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -333,6 +345,12 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
         if scfg.volatility_alert_enabled:
             await _check_volatility(state, cfg, by_sym)
 
+        # ── 5c. 新聞抓取(每 N 次 poll 才跑,對持股 + 做空 symbol)──
+        state.stock_news_poll_counter = (state.stock_news_poll_counter or 0) + 1
+        if state.stock_news_poll_counter >= _NEWS_POLL_EVERY_N:
+            state.stock_news_poll_counter = 0
+            await _check_news(page, state, cfg, db, holdings, shorts)
+
     finally:
         # ── 6. 寫 snapshot — 不論 try 區塊是否拋例外,都用「目前累積到的
         #      最新資料」更新。修先前 bug:賣股後若 analyze 中途失敗,
@@ -354,6 +372,65 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                 }
                 state.stock_last_poll_ts = time.time()
     return True
+
+
+async def _check_news(
+    page, state: BotState, cfg, db,
+    holdings: dict, shorts: dict,
+) -> None:
+    """對持股 + 做空 symbol 抓新聞,新項 queue_log + email,更新 state.stock_recent_news。
+
+    跨 sym 序列抓取(每支間隔 3 秒避免 spam Discord)。新聞 DB 用 UNIQUE
+    (symbol, date, title) 去重,只有真的「新加入」才通知。
+    """
+    targets = set(holdings.keys()) | set(shorts.keys())
+    if not targets:
+        log.debug("stock news: 無持股/做空,跳過新聞抓取")
+        return
+
+    log.info("stock news: 開始抓 %d 支(%s)", len(targets),
+             ", ".join(sorted(targets)[:8]))
+    all_new_items: list[dict] = []
+    for sym in sorted(targets):
+        if state.quit:
+            return
+        try:
+            news_text = await query_stock_news(
+                page, sym, stock_command=cfg.stock.stock_command,
+            )
+            if not news_text:
+                continue
+            items = parse_stock_news(news_text, expected_symbol=sym)
+            if not items:
+                continue
+            new_items = await db.upsert_news_items(items)
+            if new_items:
+                all_new_items.extend(new_items)
+                log.info("stock news: %s 新增 %d 則(總抓 %d)",
+                         sym, len(new_items), len(items))
+        except Exception:    # noqa: BLE001
+            log.exception("stock news: 抓 %s 失敗", sym)
+        await interruptible_sleep(state, 3)
+
+    # 載最近 5 筆 cross-sym 給 UI 顯示
+    try:
+        recent = await db.load_recent_news(limit=5)
+        async with state.lock:
+            state.stock_recent_news = recent
+    except Exception:    # noqa: BLE001
+        log.exception("載入 recent news 失敗")
+
+    # 新項 → queue_log + email
+    if all_new_items:
+        for it in all_new_items[:10]:    # 限制 queue_log 數量,避免 panel 被洗
+            title = it["title"][:60]
+            state.queue_log(
+                f"📰 {it['symbol']} ({it['date']}) {title}"
+            )
+        try:
+            await notify_stock_news(state, cfg, all_new_items)
+        except Exception:    # noqa: BLE001
+            log.exception("notify_stock_news 失敗")
 
 
 async def _check_volatility(state: BotState, cfg, by_sym: dict[str, list]) -> None:

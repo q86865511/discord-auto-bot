@@ -85,6 +85,20 @@ CREATE TABLE IF NOT EXISTS stock_holdings (
     avg_cost   REAL NOT NULL DEFAULT 0,
     last_seen  TEXT NOT NULL
 );
+
+-- 股票相關新聞 - 由 stock_loop 點「近期新聞」button 抓回來。
+-- UNIQUE(symbol, news_date, title) — 避免重複寫入同一則新聞,讓
+-- upsert_news_items 能用 INSERT OR IGNORE 偵測「真的新加入」的項目。
+CREATE TABLE IF NOT EXISTS stock_news (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol     TEXT NOT NULL,
+    news_date  TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    fetched_ts TEXT NOT NULL,
+    UNIQUE(symbol, news_date, title)
+);
+CREATE INDEX IF NOT EXISTS idx_stock_news_symbol ON stock_news(symbol);
+CREATE INDEX IF NOT EXISTS idx_stock_news_id ON stock_news(id DESC);
 """
 
 
@@ -441,6 +455,67 @@ class Database:
                     last_seen=excluded.last_seen""",
                 (symbol, float(shares), float(avg_cost), ts),
             )
+
+    # ── 股票新聞 ─────────────────────────────────────────────────────
+    async def upsert_news_items(self, items: list[dict]) -> list[dict]:
+        """寫入新聞。回傳「真的新加入」的 items(UNIQUE constraint 擋掉的不算)。
+
+        每個 item 至少要有 symbol / date / title。fetched_ts 若無自動補當下時間。
+        """
+        if not items:
+            return []
+        async with self._lock:
+            return await asyncio.to_thread(self._upsert_news_sync, items)
+
+    def _upsert_news_sync(self, items: list[dict]) -> list[dict]:
+        import sqlite3 as _sq
+        from datetime import datetime as _dt
+        now_str = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_items: list[dict] = []
+        with self._conn() as c:
+            for it in items:
+                sym = (it.get("symbol") or "").upper()
+                date = it.get("date") or ""
+                title = it.get("title") or ""
+                fetched = it.get("fetched_ts") or now_str
+                if not sym or not title:
+                    continue
+                try:
+                    c.execute(
+                        "INSERT INTO stock_news "
+                        "(symbol, news_date, title, fetched_ts) "
+                        "VALUES (?, ?, ?, ?)",
+                        (sym, date, title, fetched),
+                    )
+                    new_items.append({
+                        "symbol": sym, "date": date,
+                        "title": title, "fetched_ts": fetched,
+                    })
+                except _sq.IntegrityError:
+                    pass    # 已存在
+        return new_items
+
+    async def load_recent_news(
+        self, limit: int = 20, symbol: str | None = None,
+    ) -> list[dict]:
+        """讀最近的新聞。symbol=None 表跨所有 sym。按 id desc(最新先)。"""
+        return await asyncio.to_thread(self._load_news_sync, limit, symbol)
+
+    def _load_news_sync(self, limit, symbol):
+        with self._conn() as c:
+            if symbol:
+                rows = c.execute(
+                    "SELECT symbol, news_date, title, fetched_ts FROM stock_news "
+                    "WHERE symbol=? ORDER BY id DESC LIMIT ?",
+                    (symbol, limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT symbol, news_date, title, fetched_ts FROM stock_news "
+                    "ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(r) for r in rows]
 
     async def load_stock_holdings(self) -> list[dict]:
         return await asyncio.to_thread(self._load_holdings_sync)

@@ -270,6 +270,41 @@ async def notify_bigwin(
     )
 
 
+async def notify_stock_news(
+    state: BotState, config: "BotConfig",   # noqa: ARG001
+    new_items: list[dict],
+) -> None:
+    """新股票新聞 → email。Reuse ecfg.notify_stock_signal 開關。
+
+    new_items 來自 db.upsert_news_items 的回傳(去重後真的新加入的)。
+    每項含 symbol / date / title。
+    """
+    ecfg = config.email
+    if not (ecfg.enabled and getattr(ecfg, "notify_stock_signal", False)):
+        return
+    if not new_items:
+        return
+
+    # 按 symbol 分組顯示
+    by_sym: dict[str, list[dict]] = {}
+    for it in new_items:
+        by_sym.setdefault(it.get("symbol", "?"), []).append(it)
+
+    syms = sorted(by_sym.keys())
+    subj_syms = ", ".join(syms[:3]) + ("..." if len(syms) > 3 else "")
+    subj = f"[Discord Bot] 📰 股票新聞 {subj_syms}({len(new_items)} 則)"
+    lines = ["📰 偵測到新股票新聞", ""]
+    for sym in syms:
+        lines.append(f"━━ {sym} ━━")
+        for it in by_sym[sym]:
+            lines.append(f"  ({it.get('date', '?')}) {it.get('title', '')}")
+        lines.append("")
+    lines.extend([
+        "⚠ 純訊息提示,不構成投資建議。完整新聞請進 Discord /stock symbol:X 看。",
+    ])
+    await send_email(ecfg, subj, "\n".join(lines))
+
+
 async def notify_stock_volatility(
     state: BotState, config: "BotConfig",   # noqa: ARG001
     symbol: str, info: dict,

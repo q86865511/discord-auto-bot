@@ -329,3 +329,65 @@ def parse_stock_list(text: str) -> dict[str, float]:
 # 向後相容別名
 def parse_stock_dropdown(text: str) -> dict[str, float]:
     return parse_stock_list(text)
+
+
+# ── 近期新聞 ──────────────────────────────────────────────────────────
+# 點 /stock symbol:X 詳情頁的「近期新聞」按鈕,bot 替換 ephemeral 顯示:
+#   MAID 相關新聞
+#   • (2026/5/11) 震驚市場!傳聞「女僕特斯」驚天利好即將引爆...
+#   • (2026/5/10) 技術訊號 (女僕特斯 (MAID) - 日線圖):出現黃金交叉
+#   • (2026/5/10) 分析師日報 (2026-05-10):市場洞察
+# title 可能含內嵌括號(例 "技術訊號 (xxx)..."),所以用 lookahead 到下一個
+# (YYYY/MM/DD) 或字串尾才停。
+STOCK_NEWS_HEADER = re.compile(r"([A-Z][A-Z0-9]{1,6})\s*相關新聞")
+# 每條新聞 = 「行首 + 可選 bullet + (日期) + title 到行尾」。
+# 「行首」防止 title 中內嵌的 `(2026-05-10)` 被誤判為下一條(例如:
+# 「分析師日報 (2026-05-10):市場洞察」這 title 中段含日期但不是新項)。
+STOCK_NEWS_LINE = re.compile(
+    r"(?:^|\n)\s*[•·\-\*]?\s*"
+    r"\(\s*([0-9]{4}[/\-][0-9]{1,2}[/\-][0-9]{1,2})\s*\)\s*"
+    r"([^\n]+)",
+)
+
+
+def parse_stock_news(
+    text: str, expected_symbol: str | None = None,
+) -> list[dict]:
+    """從新聞 ephemeral 抓新聞列表。
+
+    回傳 [{symbol, date, title}, ...](按文字中出現順序,Discord 通常已按
+    時間新→舊排好)。expected_symbol 用來校驗 + 補 symbol 欄位。
+
+    若找不到「{SYMBOL} 相關新聞」header,從整段文字盡量抓(rough fallback)。
+    """
+    if not text:
+        return []
+
+    # 先定位到「{SYMBOL} 相關新聞」之後的區段,避免抓到 page 其他內容
+    sym_from_header = None
+    m = STOCK_NEWS_HEADER.search(text)
+    if m:
+        sym_from_header = m.group(1).upper()
+        text = text[m.end():]
+        # 截一段(避免到非新聞 panel),6000 字應覆蓋 5~10 條新聞
+        text = text[:6000]
+
+    sym = (expected_symbol or sym_from_header or "").upper()
+
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for m in STOCK_NEWS_LINE.finditer(text):
+        date = m.group(1).strip()
+        title = (m.group(2) or "").strip()
+        # 清掉前後標點(• · - 等)
+        title = title.lstrip("•·-– ").strip()
+        if not title or len(title) < 3:
+            continue
+        if len(title) > 200:
+            title = title[:200]
+        key = (date, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"symbol": sym, "date": date, "title": title})
+    return out

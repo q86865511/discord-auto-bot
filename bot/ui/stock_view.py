@@ -50,6 +50,7 @@ def show_stock_analysis(state: BotState) -> None:
     shorts    = snap.get("shorts", {})
     signals   = snap.get("signals", [])
     pf_summary = snap.get("summary", {})
+    recent_news = state.stock_recent_news or []
 
     # ── 1. 帳戶概況 + 訊號摘要 ─────────────────────────────────────
     total_value = 0.0
@@ -367,6 +368,21 @@ def show_stock_analysis(state: BotState) -> None:
                 sell_str,
             )
         console.print(at)
+
+    # ── 7. 最近新聞(從 DB 抓回的最近 5 筆,跨 sym) ──────────────
+    if recent_news:
+        console.print()
+        console.rule("[bold]📰 近期新聞(最近 5 筆)[/]")
+        nt = Table(show_header=True, header_style="bold cyan", box=None)
+        nt.add_column("日期", style="dim", width=12)
+        nt.add_column("Symbol", style="bold cyan", width=8)
+        nt.add_column("標題")
+        for it in recent_news[:5]:
+            date = it.get("date") or it.get("fetched_ts", "")[:10] or "—"
+            sym = it.get("symbol", "?")
+            title = (it.get("title") or "").strip()[:90]
+            nt.add_row(f"({date})", sym, title)
+        console.print(nt)
 
     # R = 立即重 poll(賣股後想馬上看到反應、或想 force refresh 都用這個)
     cmd = input("\n  按 Enter 返回 / R + Enter 立即重 poll: ").strip().lower()

@@ -546,6 +546,45 @@ async def _wait_for_text_change(
     return last_text
 
 
+async def query_stock_news(
+    page: "Page", symbol: str, stock_command: str = "/stock",
+) -> str | None:
+    """送 /stock symbol:X 後點「近期新聞」按鈕,讀新聞 ephemeral 內容。
+    沒抓到回 None(指令沒回應 / button 找不到 / 解析空)。
+    """
+    async with command_lock:
+        try:
+            before_text = await page.evaluate("() => document.body.textContent")
+        except Exception as e:    # noqa: BLE001
+            log.warning("讀取 before_text 失敗(news %s): %s", symbol, e)
+            return None
+        before_len = len(before_text)
+
+        # 1. 送 /stock symbol:X
+        await _send_slash_command(page, stock_command, symbol)
+        detail_text = await _wait_for_text_change(
+            page, before_text, before_len, 15.0, 1.5, min_len_change=100,
+        )
+        if detail_text is None:
+            log.info("query_stock_news(%s): 詳細頁沒回應", symbol)
+            return None
+
+        # 2. 點「近期新聞」button
+        clicked = await _click_button_with_text(page, "近期新聞", timeout=5.0)
+        if not clicked:
+            log.info("query_stock_news(%s): 近期新聞 button 找不到", symbol)
+            return None
+
+        await asyncio.sleep(0.5)
+        before_news_text = detail_text
+        before_news_len = len(before_news_text)
+        news_text = await _wait_for_text_change(
+            page, before_news_text, before_news_len,
+            timeout=10.0, stability_sec=1.0, min_len_change=30,
+        )
+        return news_text
+
+
 async def query_portfolio_full(
     page: "Page", portfolio_command: str = "/portfolio",
 ) -> tuple[str | None, str | None]:

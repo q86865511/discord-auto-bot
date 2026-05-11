@@ -1119,6 +1119,21 @@ STOCKS_BODY = r"""
       </table>
       <div id="no-top" class="dim" style="margin-top: 8px;"></div>
     </div>
+    <div class="card" style="grid-column: 1/-1;">
+      <h3>📰 近期新聞</h3>
+      <p class="dim" style="font-size: 12px; margin: 0 0 8px 0;">
+        對持股 + 做空 symbol 抓「近期新聞」(每 6 次 stock poll 更新一次)。
+        日期格式 (YYYY/M/D)。新新聞會發 email + 寫進主畫面日誌。
+      </p>
+      <table class="right-align" id="news-table">
+        <thead><tr>
+          <th style="width:90px;">日期</th><th style="width:70px;">Symbol</th>
+          <th class="left-align">標題</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="no-news" class="dim" style="margin-top: 8px;"></div>
+    </div>
   </div>
 </div>
 
@@ -1359,6 +1374,27 @@ async function refresh() {
           appendCell(tr, '─');
         }
         holdingsBody.appendChild(tr);
+      });
+    }
+
+    // ── 近期新聞 ────────────────────────────────────────────────
+    const newsBody = document.querySelector('#news-table tbody');
+    newsBody.innerHTML = '';
+    const news = d.news || [];
+    const noNews = document.getElementById('no-news');
+    if (news.length === 0) {
+      noNews.textContent = '— 尚無新聞(只在持股/做空時抓,每 6 個 poll 一次)';
+    } else {
+      noNews.textContent = '';
+      news.slice(0, 5).forEach(it => {
+        const tr = document.createElement('tr');
+        appendCell(tr, '(' + (it.date || '?') + ')', 'dim');
+        appendCell(tr, it.symbol || '?');
+        const titleCell = document.createElement('td');
+        titleCell.className = 'left-align';
+        titleCell.textContent = it.title || '';
+        tr.appendChild(titleCell);
+        newsBody.appendChild(tr);
       });
     }
 
