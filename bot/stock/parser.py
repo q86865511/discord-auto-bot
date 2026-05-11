@@ -475,26 +475,45 @@ def parse_stock_news(
     if not text:
         return []
 
-    # 先定位到「{SYMBOL} 相關新聞」之後的區段
+    # Discord ephemeral 不替換而是累積 — textContent 含「AZGC 相關新聞」(舊)
+    # + 「GCR 相關新聞」(新),要靠 expected_symbol rfind 精準定位到對的
+    # entry。然後截到「下一個 {OTHER} 相關新聞」之前,避免跨 ephemeral 抓
+    # 到別支的新聞。
     sym_from_header = None
-    m = STOCK_NEWS_HEADER.search(text)
-    if m:
-        sym_from_header = m.group(1).upper()
-        text = text[m.end():m.end() + 1500]
+    if expected_symbol:
+        target = f"{expected_symbol.upper()} 相關新聞"
+        idx = text.rfind(target)
+        if idx >= 0:
+            after = text[idx + len(target):]
+            # 截到下一個「XX 相關新聞」前(別把後面其他 sym 的內容也吃了)
+            next_hdr = STOCK_NEWS_HEADER.search(after)
+            if next_hdr:
+                after = after[:next_hdr.start()]
+            text = after[:1500]
+            sym_from_header = expected_symbol.upper()
+    if sym_from_header is None:
+        # Fallback:沒 expected_symbol 或 expected 沒在 textContent 中找到 →
+        # 用「最後一個」header(最新的 ephemeral)
+        all_headers = list(STOCK_NEWS_HEADER.finditer(text))
+        if all_headers:
+            m = all_headers[-1]
+            sym_from_header = m.group(1).upper()
+            after = text[m.end():]
+            next_hdr = STOCK_NEWS_HEADER.search(after)
+            if next_hdr:
+                after = after[:next_hdr.start()]
+            text = after[:1500]
 
-    # Sanity:expected vs header 對不上就棄用(ephemeral race)
+    # Sanity:expected_symbol 跟 sym_from_header 不一致 → 棄用
     if expected_symbol and sym_from_header:
         if expected_symbol.upper() != sym_from_header:
             log.warning(
-                "parse_stock_news: textContent header=%s 但 expected=%s — "
-                "ephemeral 替換 race,棄用此次抓取(避免把 %s 新聞存成 %s 的)",
-                sym_from_header, expected_symbol,
+                "parse_stock_news: 末端 header=%s 但 expected=%s,棄用此次"
+                "(可能 Discord 還沒替換到新 ephemeral)",
                 sym_from_header, expected_symbol,
             )
             return []
     elif expected_symbol and not sym_from_header:
-        # textContent 中根本沒「XX 相關新聞」header — 可能 ephemeral 還沒
-        # 顯示新聞 panel,或是 detail page 殘留。棄用避免亂存。
         log.warning(
             "parse_stock_news: textContent 沒找到「相關新聞」header"
             "(expected=%s),棄用此次", expected_symbol,

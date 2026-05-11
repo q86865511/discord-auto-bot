@@ -552,20 +552,20 @@ async def _wait_for_marker(
     page: "Page", marker: str,
     timeout: float = 15.0, stability_sec: float = 1.0,
     use_inner_text: bool = True,
+    tail_window: int = 8000,
 ) -> str | None:
-    """等 page text 中出現 marker 字串並穩定。不取 command_lock。
+    """等 page text 末段(最後 tail_window 字)出現 marker 字串並穩定。
 
-    比 _wait_for_text_change 更嚴格 — 不只是 textContent 變動,而是要看到
-    expected marker(例如「GCR - 」/「GCR 相關新聞」)才接受。修「ephemeral
-    替換 race」根因:bot 連續送 /stock symbol:X 對不同 sym,Discord 替換
-    ephemeral 有延遲,_wait_for_text_change 看到變動就 return,parser 抓
-    到的可能是上一個 sym 的內容。用 marker 確保是當下查詢的 sym。
+    重要:Discord ephemeral 不替換而是累積在 page 上(舊的不消失,新的接
+    在後面)。只看末段 textContent 才能偵測「真的新 ephemeral 出現」,
+    避免 marker 在歷史 ephemeral 中已存在就誤判 ready。
     """
     js_expr = ("() => document.body.innerText" if use_inner_text
                else "() => document.body.textContent")
     deadline = time.time() + timeout
-    last_text_with_marker = None
+    last_text = None
     last_change = time.time()
+    initial_marker_count = None
     while time.time() < deadline:
         await asyncio.sleep(0.5)
         try:
@@ -573,16 +573,22 @@ async def _wait_for_marker(
         except Exception as e:    # noqa: BLE001
             log.debug("文字輪詢失敗: %s", e)
             continue
-        if marker not in cur:
+        # 記 initial marker count(送指令前可能已有歷史 ephemeral 含 marker)
+        cnt = cur.count(marker)
+        if initial_marker_count is None:
+            initial_marker_count = cnt
             continue
-        # marker 出現 → 等 textContent 穩定 stability_sec 秒
-        if cur != last_text_with_marker:
-            last_text_with_marker = cur
+        # 真正「新出現」= count 比初始多 OR marker 在末段
+        tail = cur[-tail_window:] if len(cur) > tail_window else cur
+        if cnt <= initial_marker_count and marker not in tail:
+            continue
+        if cur != last_text:
+            last_text = cur
             last_change = time.time()
             continue
         if time.time() - last_change >= stability_sec:
             return cur
-    return last_text_with_marker    # timeout 但有抓到 marker 也回
+    return last_text    # timeout 但有抓到也回
 
 
 async def _query_stock_news_no_lock(
