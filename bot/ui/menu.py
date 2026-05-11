@@ -318,6 +318,7 @@ async def _sub_menu_neko(config: BotConfig) -> None:
         print(f"   [1] 監控啟用:        {'✓' if n.enabled else '✗'}")
         print(f"   [2] 檢查間距:        {n.check_interval_min} 分鐘")
         print(f"   [3] 自動領取再派遣:  {'✓' if n.auto_claim else '✗'}")
+        print(f"   [4] 貓娘頻道 ID:     {n.channel_id or '(用主頻道)'}")
         print()
         print("   [0] 返回主選單")
         choice = (await ainput("\n  選擇: ")).strip()
@@ -335,6 +336,25 @@ async def _sub_menu_neko(config: BotConfig) -> None:
             n.auto_claim = not n.auto_claim
             if n.auto_claim:
                 print("  ⚠ 自動領取會送 /nekomusume status 並點「領取並再派遣」按鈕")
+            await wait_enter()
+        elif choice == "4":
+            print()
+            print("  🐱 貓娘頻道 ID")
+            print("  ─────────────")
+            print("  bot 跑 /check 跟 /nekomusume 切到這個頻道(避免跟主頻道")
+            print("  的 slot / hourly 等指令混)。空字串 = 用主頻道。")
+            print()
+            v = await ask_text(
+                "貓娘頻道 ID(留空 = 用主頻道)", n.channel_id,
+                max_len=64, allow_chinese=False, allow_empty=True,
+            )
+            if v is not None:
+                v = v.strip()
+                if v and not v.isdigit():
+                    print("  ⚠ 頻道 ID 必須是純數字 — 未更新")
+                else:
+                    n.channel_id = v
+                    print(f"  ✓ 貓娘頻道 → {v or '(用主頻道)'}")
             await wait_enter()
 
 
@@ -646,11 +666,14 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
               f"冷卻 {s.volatility_cooldown_min:g} min)")
         print("   [V] 編輯短期波動警示設定")
         print()
+        stock_ch = s.stock_channel_id or "(用主頻道)"
         news_ch = s.news_channel_id or "(用主頻道)"
-        print(f"  [新聞抓取] poll 間隔 {s.news_poll_interval_min:g} 分鐘  "
-              f"頻道:{news_ch}")
+        print(f"  [新聞抓取] poll 間隔 {s.news_poll_interval_min:g} 分鐘")
+        print(f"   股票指令頻道:{stock_ch}")
+        print(f"   新聞頻道:    {news_ch}")
         print("   [N] 修改新聞 poll 間隔")
         print("   [Z] 設定新聞頻道 ID(空 = 用主頻道)")
+        print("   [G] 設定股票指令頻道 ID(空 = 用主頻道)")
         print()
         print("  [動作]")
         print("   [R] 立即重 poll 一次(賣股後想馬上看到變動)")
@@ -736,11 +759,8 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             print()
             print("  📰 新聞頻道 ID")
             print("  ─────────────")
-            print("  bot 抓新聞時切到這個頻道送 /stock symbol:X(避免污染主頻道)。")
+            print("  bot 抓新聞時切到這個頻道點「近期新聞」button(避免污染主頻道)。")
             print("  空字串 = 用主頻道(state.channel_id)。")
-            print()
-            print("  ⓘ 取得方法:Discord 設定 → 進階 → 開發者模式,然後右鍵頻道 → 複製 ID")
-            print("  ⓘ bot 必須有權限進入該頻道並送 slash command")
             print()
             v = await ask_text(
                 "新聞頻道 ID(留空 = 用主頻道)",
@@ -753,10 +773,30 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
                     print("  ⚠ 頻道 ID 必須是純數字 — 未更新")
                 else:
                     s.news_channel_id = v
-                    if v:
-                        print(f"  ✓ 新聞頻道 → {v}")
-                    else:
-                        print("  ✓ 改用主頻道")
+                    print(f"  ✓ 新聞頻道 → {v or '(用主頻道)'}")
+            await wait_enter()
+        elif choice == "G":
+            print()
+            print("  📈 股票指令頻道 ID")
+            print("  ─────────────────")
+            print("  bot 跑 stock_loop /stock /portfolio 切到這頻道(避免跟主")
+            print("  頻道的 slot / hourly 等 ephemeral 混在一起被 parser 誤抓)。")
+            print("  跟「新聞頻道」分開:這裡跑指令 query 持股 / 做空 / 全部股票")
+            print("  價格;新聞頻道跑「近期新聞」button。")
+            print("  空字串 = 用主頻道。")
+            print()
+            v = await ask_text(
+                "股票指令頻道 ID(留空 = 用主頻道)",
+                s.stock_channel_id, max_len=64,
+                allow_chinese=False, allow_empty=True,
+            )
+            if v is not None:
+                v = v.strip()
+                if v and not v.isdigit():
+                    print("  ⚠ 頻道 ID 必須是純數字 — 未更新")
+                else:
+                    s.stock_channel_id = v
+                    print(f"  ✓ 股票指令頻道 → {v or '(用主頻道)'}")
             await wait_enter()
         elif choice == "R":
             await _trigger_stock_refresh(state)

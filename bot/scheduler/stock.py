@@ -26,6 +26,7 @@ from bot.core.state import (
     mark_loop_running,
 )
 from bot.discord.client import (
+    channel_context,
     query_portfolio_full,
     query_stock_text,
 )
@@ -160,9 +161,13 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
     portfolio_parsed = False    # 是否成功 parse 過 portfolio(就算空)
 
     try:
+      # 切到 stock_channel_id(若設了),整段持 command_lock — 其他 loop 等
+      async with channel_context(page, state, scfg.stock_channel_id):
         # ── 1. /stock(無 symbol) → bot 回 embed 列出全部股票 + 趨勢 ──
         log.info("stock: 查 stock list (%s)", scfg.stock_command)
-        list_text = await query_stock_text(page, command=scfg.stock_command)
+        list_text = await query_stock_text(
+            page, command=scfg.stock_command, acquire_lock=False,
+        )
         if list_text:
             discovered = parse_stock_list_with_trend(list_text)
             if discovered:
@@ -187,7 +192,7 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
         # ── 2. /portfolio:抓持股 + 做空倉位 + 摘要 ───────────────────
         log.info("stock: 查 portfolio + 做空 (%s)", scfg.portfolio_command)
         pf_text, shorts_text = await query_portfolio_full(
-            page, portfolio_command=scfg.portfolio_command,
+            page, portfolio_command=scfg.portfolio_command, acquire_lock=False,
         )
         if pf_text:
             holdings = parse_portfolio(pf_text)
@@ -260,6 +265,7 @@ async def _poll_once(page, state: BotState, cfg, db) -> bool:
                     # "symbol:..." 會變成 /stock symbol: symbol:X — bot 看不懂)
                     stock_text = await query_stock_text(
                         page, command=scfg.stock_command, param=sym,
+                        acquire_lock=False,
                     )
                     if stock_text:
                         detail = parse_stock_detail(

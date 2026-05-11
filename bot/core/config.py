@@ -194,11 +194,15 @@ class NekomusumeConfig:
     enabled: bool = True
     check_interval_min: float = float(DEFAULT_NEKO_INTERVAL_MIN)
     auto_claim: bool = False
+    # 獨立頻道:bot 跑 /check / /nekomusume 等指令時切到這頻道。空 = 用主頻道
+    channel_id: str = ""
 
     def validate(self) -> list[str]:
         errs: list[str] = []
         if self.check_interval_min < 1:
             errs.append("檢查間距必須 ≥ 1 分鐘")
+        if self.channel_id and not self.channel_id.isdigit():
+            errs.append("nekomusume.channel_id 必須是純數字")
         return errs
 
 
@@ -282,6 +286,10 @@ class StockConfig:
     # 切到該頻道送指令,跑完切回主頻道。避免新聞抓取的 ephemeral 跟 user
     # 在主頻道的其他互動混在一起被 parser 誤抓。
     news_channel_id: str = ""
+    # 獨立股票指令頻道:stock_loop 跑 /stock / /portfolio 切到這頻道。
+    # 跟新聞頻道分開:新聞點「近期新聞」button,股票拉 list / portfolio。
+    # 空 = 用主頻道。
+    stock_channel_id: str = ""
 
     # ── 短期波動警示(快速漲跌通知) ──
     # 跟「強訊號」(MA / 獲利率) 不同 — 純看「短期內價格變動百分比」。
@@ -310,6 +318,8 @@ class StockConfig:
             errs.append("news_poll_interval_min 必須 ≥ 5 分鐘")
         if self.news_channel_id and not self.news_channel_id.isdigit():
             errs.append("news_channel_id 必須是純數字(Discord channel ID)")
+        if self.stock_channel_id and not self.stock_channel_id.isdigit():
+            errs.append("stock_channel_id 必須是純數字(Discord channel ID)")
         if self.volatility_window_min < 1:
             errs.append("volatility_window_min 必須 ≥ 1 分鐘")
         if not 0 < self.volatility_threshold_pct <= 100:

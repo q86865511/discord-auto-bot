@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import random
@@ -43,6 +44,40 @@ log = logging.getLogger(__name__)
 # 全域 lock — 所有送指令的動作共用,避免 hourly/daily/gambling 等 loop
 # 在 Discord 端互相覆蓋訊息或誤讀回應
 command_lock = asyncio.Lock()
+
+
+@contextlib.asynccontextmanager
+async def channel_context(page: "Page", state: "BotState", target_ch_id: str):
+    """切到指定頻道整段持 command_lock。yield 內 caller 可直接呼叫
+    no-lock 路徑(或 wrapper 傳 acquire_lock=False)避免重入死鎖。
+
+    用途:stock_loop / news_loop / nekomusume_loop 各自有獨立頻道時,
+    cycle 開頭切過去 + 跑完切回主頻道。
+    """
+    async with command_lock:
+        main_ch = state.channel_id or ""
+        target = (target_ch_id or "").strip()
+        switched = bool(target and main_ch and target != main_ch)
+        if switched:
+            try:
+                await navigate_to_channel(page, state.guild_id, target)
+                await asyncio.sleep(1)
+            except Exception:    # noqa: BLE001
+                log.exception("channel_context: 切到 %s 失敗,fallback 主頻道", target)
+                switched = False
+        try:
+            yield
+        finally:
+            if switched and main_ch:
+                try:
+                    await navigate_to_channel(page, state.guild_id, main_ch)
+                except Exception:    # noqa: BLE001
+                    log.exception("channel_context: 切回主頻道失敗")
+
+
+def _lock_ctx(acquire: bool):
+    """if acquire else nullcontext — 給 wrapper 用 acquire_lock 參數。"""
+    return command_lock if acquire else contextlib.nullcontext()
 
 
 # ── 基礎打字 / 送指令 ────────────────────────────────────────────────
@@ -110,8 +145,8 @@ async def _send_message(page: "Page", text: str) -> None:
     await asyncio.sleep(0.5)
 
 
-async def send_message(page: "Page", text: str) -> None:
-    async with command_lock:
+async def send_message(page: "Page", text: str, *, acquire_lock: bool = True) -> None:
+    async with _lock_ctx(acquire_lock):
         await _send_message(page, text)
 
 
@@ -456,10 +491,12 @@ def _stock_reply_detected(before: str, current: str) -> bool:
 async def query_stock_text(
     page: "Page", command: str = "/stock", param: str = "",
     timeout: float = 20.0, stability_sec: float = 1.5,
+    *, acquire_lock: bool = True,
 ) -> str | None:
     """送 stock 查詢指令並回傳整頁文字。caller 自行 parse。
 
     `command` 可以是 /stock / /portfolio 等;`param` 是參數(可空)。
+    `acquire_lock=False` 給 channel_context 內呼叫(caller 已持 lock)用。
 
     偵測新回應的兩條路:
       A. _stock_reply_detected:看 stock keyword 計數有沒有增加(快、準)
@@ -467,7 +504,7 @@ async def query_stock_text(
          — 對付 ephemeral message 替換掉舊的、keyword 計數不變的情況
     任一路成立都接受。
     """
-    async with command_lock:
+    async with _lock_ctx(acquire_lock):
         try:
             before_text = await page.evaluate("() => document.body.textContent")
         except Exception as e:    # noqa: BLE001
@@ -682,13 +719,14 @@ async def query_stock_news(
 
 async def query_portfolio_full(
     page: "Page", portfolio_command: str = "/portfolio",
+    *, acquire_lock: bool = True,
 ) -> tuple[str | None, str | None]:
     """送 /portfolio 抓主畫面,再點「做空倉位」button 抓做空畫面。
 
     回傳 (main_text, shorts_text)。任一抓不到回 None。做空 button 不存在
     或點不到時 shorts_text=None(沒做空就跳過,不算錯誤)。
     """
-    async with command_lock:
+    async with _lock_ctx(acquire_lock):
         try:
             before_text = await page.evaluate("() => document.body.textContent")
         except Exception as e:    # noqa: BLE001
@@ -759,9 +797,11 @@ def parse_dispatch_status(text: str) -> tuple[str, int | None]:
     return "unknown", None
 
 
-async def read_check_response(page: "Page", timeout: float = 20.0) -> str | None:
+async def read_check_response(
+    page: "Page", timeout: float = 20.0, *, acquire_lock: bool = True,
+) -> str | None:
     """送 /check 並等待新派遣資訊出現。回傳整頁文字。"""
-    async with command_lock:
+    async with _lock_ctx(acquire_lock):
         try:
             before_text = await page.evaluate("() => document.body.textContent")
         except Exception as e:   # noqa: BLE001

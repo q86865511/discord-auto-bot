@@ -33,6 +33,12 @@ async def first_run_wizard(config: BotConfig) -> bool:
     # 防止 textContent 抓到 slot / hourly 等其他指令的 ephemeral 內容
     if config.stock.enabled and not (config.stock.news_channel_id or "").strip():
         needed.append("news_channel_id")
+    # 股票指令頻道:stock_loop 跑 /stock /portfolio 切過去
+    if config.stock.enabled and not (config.stock.stock_channel_id or "").strip():
+        needed.append("stock_channel_id")
+    # 貓娘頻道:neko_loop 跑 /check / /nekomusume 切過去
+    if config.nekomusume.enabled and not (config.nekomusume.channel_id or "").strip():
+        needed.append("neko_channel_id")
 
     pwd_missing = (config.dashboard.enabled
                    and not (config.dashboard.password or "").strip())
@@ -79,6 +85,25 @@ async def first_run_wizard(config: BotConfig) -> bool:
         v = await ask_user_id("    新聞頻道 ID", config.stock.news_channel_id)
         if v:
             config.stock.news_channel_id = v
+
+    if "stock_channel_id" in needed:
+        print(f"\n  【📈 股票指令頻道 ID】(目前: {config.stock.stock_channel_id or '未設定'})")
+        print("    bot 跑 stock_loop /stock 跟 /portfolio 切到這頻道 — 避免")
+        print("    跟主頻道的 slot / hourly 等指令 ephemeral 混在一起。")
+        print("    跟「新聞頻道」分開:這裡跑指令 query 持股 / 做空 / 全部")
+        print("    股票價格;新聞頻道跑「近期新聞」button。建議另開個 #股票")
+        print("    或共用一個「#bot-指令」頻道(跟新聞分開即可)。")
+        v = await ask_user_id("    股票指令頻道 ID", config.stock.stock_channel_id)
+        if v:
+            config.stock.stock_channel_id = v
+
+    if "neko_channel_id" in needed:
+        print(f"\n  【🐱 貓娘頻道 ID】(目前: {config.nekomusume.channel_id or '未設定'})")
+        print("    bot 跑 /check 跟 /nekomusume 切到這頻道 — 避免貓娘指令")
+        print("    跟主頻道的 slot 等混。建議另開個 #貓娘 頻道。")
+        v = await ask_user_id("    貓娘頻道 ID", config.nekomusume.channel_id)
+        if v:
+            config.nekomusume.channel_id = v
 
     if pwd_missing:
         print()

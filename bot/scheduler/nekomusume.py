@@ -24,7 +24,7 @@ from bot.core.state import (
 )
 from bot.discord.client import (
     auto_claim_and_redispatch_neko,
-    command_lock,
+    channel_context,
     parse_dispatch_status,
     read_check_response,
     send_message,
@@ -48,8 +48,11 @@ async def nekomusume_loop(
 
     async def _query_status() -> tuple[str, int | None]:
         mark_loop_running(state, "neko")
+        ncfg_cur = config_provider().nekomusume
         try:
-            text = await read_check_response(page)
+            # 切到貓娘專屬頻道(若設),不然用主頻道
+            async with channel_context(page, state, ncfg_cur.channel_id):
+                text = await read_check_response(page, acquire_lock=False)
         except Exception as e:    # noqa: BLE001
             log.exception("/check 失敗")
             mark_loop_failed(state, "neko", str(e))
@@ -79,7 +82,8 @@ async def nekomusume_loop(
         auto_claimed = False
         if ncfg.auto_claim:
             try:
-                async with command_lock:
+                # 切到貓娘專屬頻道(若有),整段持 command_lock
+                async with channel_context(page, state, ncfg.channel_id):
                     auto_claimed = await auto_claim_and_redispatch_neko(page)
                 if auto_claimed:
                     log.info("貓娘已自動領取並再派遣")
@@ -104,7 +108,9 @@ async def nekomusume_loop(
                 msg = f"<@{user_id}> 貓娘派遣已完成 — 已自動領取並再派遣 🎉"
             else:
                 msg = f"<@{user_id}> 貓娘派遣已完成!記得 `/nekomusume claim` 領取戰利品"
-            await send_message(page, msg)
+            # mention 訊息也在貓娘頻道送,讓使用者在該頻道看到提醒
+            async with channel_context(page, state, ncfg.channel_id):
+                await send_message(page, msg, acquire_lock=False)
             log.info("已送出貓娘完成通知")
         except Exception as e:    # noqa: BLE001
             log.warning("貓娘完成通知失敗: %s", e)
