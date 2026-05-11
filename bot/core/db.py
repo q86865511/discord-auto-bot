@@ -588,6 +588,16 @@ class Database:
                     n += 1
         return n
 
+    async def clear_all_news(self) -> int:
+        """清空 stock_news table(user 觸發,回傳刪除筆數)。"""
+        async with self._lock:
+            return await asyncio.to_thread(self._clear_all_news_sync)
+
+    def _clear_all_news_sync(self) -> int:
+        with self._conn() as c:
+            cur = c.execute("DELETE FROM stock_news")
+            return cur.rowcount or 0
+
     async def upsert_news_items(self, items: list[dict]) -> list[dict]:
         """寫入新聞。回傳「真的新加入」的 items(UNIQUE constraint 擋掉的不算)。
 

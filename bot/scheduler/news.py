@@ -98,11 +98,21 @@ async def news_loop(
             mark_loop_failed(state, _LOOP_NAME, str(e))
 
         # Sleep until next news poll;最少 5 分鐘。設 news_next_poll_ts 讓
-        # UI 能顯示倒數
+        # UI 能顯示倒數。分塊 sleep 讓 force_poll 30 秒內生效(user 在設定
+        # [D] 清空 DB 後想立刻看新聞,不用等 60 分鐘)
         sleep_sec = max(5 * 60, int(float(scfg.news_poll_interval_min) * 60))
         async with state.lock:
             state.news_next_poll_ts = time.time() + sleep_sec
-        await interruptible_sleep(state, sleep_sec)
+        slept = 0
+        while slept < sleep_sec and not state.quit:
+            chunk = min(30, sleep_sec - slept)
+            await interruptible_sleep(state, chunk)
+            slept += chunk
+            if state.news_force_poll:
+                async with state.lock:
+                    state.news_force_poll = False
+                log.info("news loop: 收到 force_poll,跳出 sleep 立即重跑")
+                break
 
 
 async def _check_all_news(

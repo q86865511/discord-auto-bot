@@ -599,7 +599,7 @@ async def _trigger_stock_refresh(state: BotState) -> None:
 
 
 # ── 子選單:股票 ──────────────────────────────────────────────────────
-async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
+async def _sub_menu_stock(config: BotConfig, state: BotState, db: "Database") -> None:
     s = config.stock
     while True:
         os.system("cls")
@@ -654,6 +654,7 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
         print()
         print("  [動作]")
         print("   [R] 立即重 poll 一次(賣股後想馬上看到變動)")
+        print("   [D] 清空新聞資料庫(下次 news_loop 會重抓所有公司新聞)")
         print()
         print("  [說明]")
         print("   [H] 名詞解釋(看不懂分析參數來這)")
@@ -759,6 +760,30 @@ async def _sub_menu_stock(config: BotConfig, state: BotState) -> None:
             await wait_enter()
         elif choice == "R":
             await _trigger_stock_refresh(state)
+        elif choice == "D":
+            print()
+            print("  ⚠ 清空 stock_news 資料庫")
+            print("  ─────────────────────")
+            print("  將刪除所有已抓到的新聞資料(無法復原)。")
+            print("  下次 news_loop 會 fresh fetch 全部公司新聞。")
+            print()
+            print("  通常用於:")
+            print("    • DB 中累積了 parser bug 早期的污染 row")
+            print("    • 想重抓最新新聞看內容是否正確")
+            print()
+            confirm = await ask_yes_no("確定清空?")
+            if confirm:
+                n = await db.clear_all_news()
+                # 同步清掉 state cache 讓 UI 立刻看到清空
+                async with state.lock:
+                    state.stock_recent_news = []
+                    # 觸發 news_loop force_poll,30 秒內重抓
+                    state.news_force_poll = True
+                print(f"  ✓ 已刪除 {n} 則新聞記錄")
+                print("  ✓ 已請求 news_loop 立即重抓(30 秒內 cycle 開始)")
+            else:
+                print("  取消")
+            await wait_enter()
 
 
 async def _edit_volatility(s) -> None:
@@ -1071,7 +1096,7 @@ async def run_config_menu(
         elif choice == "7":
             await _sub_menu_strategies(config, state)
         elif choice == "8":
-            await _sub_menu_stock(config, state)
+            await _sub_menu_stock(config, state, db)
         elif choice == "9":
             await _sub_menu_updater(config, state)
             if state.quit:

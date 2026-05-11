@@ -120,6 +120,9 @@ class BotState:
     # 下次 news_loop 抓取時間(epoch 秒)— UI 顯示倒數用,news_loop 在
     # sleep 前更新
     news_next_poll_ts: float | None = None
+    # 跨 thread 觸發「立即跑 news cycle 一次」— 跟 stock_force_poll 同模式。
+    # 用途:user 在設定 [D] 清空 DB 後想立刻看新抓的新聞,不用等 60 分鐘。
+    news_force_poll: bool = False
 
     # ── 各 loop 的健康狀態 ────────────────────────────────────────
     # 每個 loop name(stock/hourly/daily/transfer/neko)對應:
