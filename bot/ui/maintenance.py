@@ -156,12 +156,19 @@ async def run_advanced_menu(state: BotState, db: Database) -> None:
         exports_size, exports_count = _dir_size_str(EXPORT_DIR)
         sa_spins = (state.slot_analysis or {}).get("total_spins", 0)
         history_count = len(state.history or [])
+        # 股票新聞筆數(DB query;失敗不影響選單)
+        try:
+            _news_rows = await db.load_recent_news(limit=100000)
+            news_count = len(_news_rows)
+        except Exception:    # noqa: BLE001
+            news_count = 0
 
         print("  [檔案管理]")
         print(f"   [1] 刪除 slot_debug.log              ({debug_size})")
         print(f"   [2] 刪除 exports/ 內所有檔案         ({exports_count} 檔, {exports_size})")
         print(f"   [3] 清空下注歷史(DB)                ({history_count} 筆)")
         print(f"   [4] 重置 slot 分析(DB)              ({sa_spins} 筆)")
+        print(f"   [9] 清空股票新聞(DB)                ({news_count} 筆)")
         print("   [5] 一鍵清除以上全部")
         print()
         print("  [日誌]")
@@ -204,16 +211,19 @@ async def run_advanced_menu(state: BotState, db: Database) -> None:
                 print("  ✓ 已重置")
                 await wait_enter()
         elif choice == "5":
-            if await ask_yes_no("⚠ 確認刪除以上所有檔案+重置分析?"):
+            if await ask_yes_no("⚠ 確認刪除以上所有檔案+重置分析+清空新聞?"):
                 from bot.core.async_io import remove_file
                 await remove_file(SLOT_DEBUG_LOG_PATH)
                 d_count, _ = _delete_dir_contents_sync(EXPORT_DIR)
                 await db.clear_history()
                 await db.reset_slot_analysis()
+                n_news = await db.clear_all_news()
                 async with state.lock:
                     state.history = []
                     state.slot_analysis = make_slot_analysis()
-                print(f"  ✓ 已清除全部(exports {d_count} 檔)")
+                    state.stock_recent_news = []
+                    state.news_force_poll = True
+                print(f"  ✓ 已清除全部(exports {d_count} 檔,新聞 {n_news} 筆)")
                 await wait_enter()
         elif choice == "6":
             if await ask_yes_no("將執行 git pull origin main 並可能重啟。確定?"):
@@ -235,3 +245,24 @@ async def run_advanced_menu(state: BotState, db: Database) -> None:
             if await ask_yes_no("確認清空 bot.log 與所有輪替檔?"):
                 _clear_logs()
                 await wait_enter()
+        elif choice == "9":
+            print()
+            print("  ⚠ 清空 stock_news 資料庫")
+            print("  ─────────────────────")
+            print("  將刪除所有已抓到的新聞資料(無法復原)。")
+            print("  下次 news_loop 會 fresh fetch 全部公司新聞。")
+            print()
+            print("  通常用於:")
+            print("    • DB 中累積了 parser bug 早期的污染 row")
+            print("    • 想重抓最新新聞看內容是否正確")
+            print()
+            if await ask_yes_no("確定清空?"):
+                n = await db.clear_all_news()
+                async with state.lock:
+                    state.stock_recent_news = []
+                    state.news_force_poll = True
+                print(f"  ✓ 已刪除 {n} 則新聞記錄")
+                print("  ✓ 已請求 news_loop 立即重抓(30 秒內 cycle 開始)")
+            else:
+                print("  取消")
+            await wait_enter()
