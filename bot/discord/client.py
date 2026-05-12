@@ -736,14 +736,51 @@ async def query_stock_news(
         return text
 
 
+def _slice_after_anchor(
+    text: str, anchor: str, *, anchor_tail_len: int = 500,
+) -> str | None:
+    """從 text 中切出 anchor 最後一次出現之後的部分。
+
+    用於 Discord ephemeral 累積場景(CLAUDE.md 第 3.4 節):ephemeral 不
+    替換而是累積在 page textContent 上。傳一個「送指令前」的 anchor text,
+    切到 anchor 之後 = 「這次指令新增的 ephemeral」,避免 parser 抓到歷史
+    ephemeral 的舊資料(例如做空倉位顯示已平倉的 symbol、portfolio 顯示
+    已賣出的持股)。
+
+    用 anchor 末段 anchor_tail_len 字當定位點:
+    - 整個 anchor 太長 rfind 慢
+    - 末段 500 字通常含「上一個 ephemeral 的 footer」+「結尾內容」,
+      足以唯一定位「main_full 結束處」,不會跟新 ephemeral 內某段相混
+
+    回傳:
+    - anchor 為空 → 整個 text(沒法切就不切)
+    - anchor 不在 text 中 → None(caller fallback 用)
+    - 找到 anchor → text 中 anchor 末段之後的部分(可能是空字串,代表
+      指令送了但沒新 ephemeral)
+    """
+    if not anchor:
+        return text
+    anchor_tail = anchor[-anchor_tail_len:] if len(anchor) > anchor_tail_len else anchor
+    idx = text.rfind(anchor_tail)
+    if idx < 0:
+        return None
+    return text[idx + len(anchor_tail):]
+
+
 async def query_portfolio_full(
     page: "Page", portfolio_command: str = "/portfolio",
     *, acquire_lock: bool = True,
 ) -> tuple[str | None, str | None]:
-    """送 /portfolio 抓主畫面,再點「做空倉位」button 抓做空畫面。
+    """送 /portfolio 抓「這次新增的 ephemeral」,再點「做空倉位」button 抓
+    「這次新增的 ephemeral」。
 
-    回傳 (main_text, shorts_text)。任一抓不到回 None。做空 button 不存在
-    或點不到時 shorts_text=None(沒做空就跳過,不算錯誤)。
+    回傳 (main_new, shorts_new):**只含本次 query 新增的內容**,不含歷史
+    累積的 ephemeral。讓 parser 不會抓到舊 ephemeral 的 stale 資料(例如
+    持股顯示已賣出的 symbol、做空倉位顯示已平倉的 symbol)。
+
+    任一抓不到回 None。做空 button 不存在或點不到時 shorts=None;點到但
+    沒偵測到新 shorts ephemeral(可能 user 已全部平倉)也回 shorts=None,
+    讓 caller 視為「無做空」,不會誤抓歷史 ephemeral 的舊做空資料。
     """
     async with _lock_ctx(acquire_lock):
         try:
@@ -755,31 +792,49 @@ async def query_portfolio_full(
 
         await _send_slash_command(page, portfolio_command, "")
 
-        main_text = await _wait_for_text_change(
+        main_full = await _wait_for_text_change(
             page, before_text, before_len,
             timeout=20.0, stability_sec=1.5, min_len_change=200,
         )
-        if main_text is None:
+        if main_full is None:
             return None, None
 
+        # 切到「送 /portfolio 後新增的 ephemeral」— 修 stale portfolio bug
+        # (累積的歷史 portfolio ephemeral 含已賣出的 symbol 會被 parse 吃進來)
+        main_new = _slice_after_anchor(main_full, before_text)
+        if main_new is None or not main_new.strip():
+            # anchor 不在 text 中(理論上不應該),fallback 用 full text
+            log.debug("portfolio: 切 main_new 失敗,fallback 用 main_full")
+            main_new = main_full
+
         # 點「做空倉位」button(若沒做空 button 可能不存在 → 跳過)
-        # 點之前先重抓 baseline,因為點擊後 ephemeral 替換,need diff
-        before_shorts_text = main_text
-        before_shorts_len = len(before_shorts_text)
         clicked = await _click_button_with_text(page, "做空倉位", timeout=5.0)
         if not clicked:
             log.info("「做空倉位」button 找不到 — 可能無做空,只回主畫面")
-            return main_text, None
+            return main_new, None
         await asyncio.sleep(0.5)
         try:
-            shorts_text = await page.evaluate("() => document.body.textContent")
+            shorts_raw = await page.evaluate("() => document.body.textContent")
         except Exception:    # noqa: BLE001
-            shorts_text = main_text
-        shorts_text = await _wait_for_text_change(
-            page, before_shorts_text, before_shorts_len,
+            shorts_raw = main_full
+        shorts_full = await _wait_for_text_change(
+            page, main_full, len(main_full),
             timeout=10.0, stability_sec=1.0, min_len_change=50,
-        ) or shorts_text
-        return main_text, shorts_text
+        ) or shorts_raw
+
+        # 切到「點 button 後新增的 ephemeral」— 修 stale shorts bug
+        # (累積的歷史 shorts ephemeral 含已平倉的 symbol 會被 parse 吃進來)
+        shorts_new = _slice_after_anchor(shorts_full, main_full)
+        if shorts_new is None or not shorts_new.strip():
+            # 沒偵測到新 shorts ephemeral(可能 user 已全部平倉,新 ephemeral
+            # 是「目前無做空」短訊息沒達 min_len_change=50;或 button 沒成功
+            # 觸發)→ 回 None 讓 caller 視為「無做空」,不誤抓歷史資料
+            log.info(
+                "query_portfolio_full: 點做空 button 後沒新 ephemeral "
+                "(slice 後為空 / anchor 找不到)— 視為無做空"
+            )
+            return main_new, None
+        return main_new, shorts_new
 
 
 # ── 貓娘 ──────────────────────────────────────────────────────────────
