@@ -1,349 +1,211 @@
 # Discord Auto Bot
 
-以 Playwright 控制 Chromium 自動執行 Discord 斜線指令。Rich 終端 UI + Web Dashboard 雙介面。
+> 以 Python + Playwright 驅動無頭 Chromium、自動操作 Discord 斜線指令的自動化機器人;內建 10 條 asyncio 排程迴圈、Rich 終端 UI、自建 `http.server` 即時儀表板,所有狀態以 SQLite + Fernet 加密落地。約 14.5k 行程式碼。
 
-## 功能
+> ⚠️ **服務條款警告(務必先讀)**
+> 本專案自動化操作的是**一般使用者帳號(user account)**,而非官方 Bot Token。**自動化使用者帳號明確違反 [Discord 服務條款](https://discord.com/terms)**,可能導致帳號被警告、停權或永久封鎖。
+> 本專案**僅供個人學習、技術研究與自動化工程演示之用**。請勿用於任何商業或濫用情境。**使用本軟體所造成的一切後果(包含但不限於帳號處置)由使用者自行承擔,作者不負任何責任。** 若你不接受此風險,請勿執行本程式。
 
-- **自動指令**:`/hourly` 整點對齊、`/daily`(每日 00:00 觸發)、`/slot` 賭博(auto / fixed / kelly 三策略)
-- **目標 / 停損 / 連敗冷靜**:餘額達標自動 `@` 通知;跌破停損點自動停 / 階梯式下移;連敗 N 場強制冷靜 M 分鐘
-- **進階下注策略**(全部 opt-in):時段過濾 / 滾動視窗 EV 動態下注 / Trailing Stop
-- **貓娘監控**:派遣完成自動偵測 → 可選自動點「領取並再派遣」按鈕
-- **自動轉帳**:定期 `/transfer` + 自動點「確認轉錢」按鈕
-- **股票監視 / 建議**:`/stock` + `/portfolio` 自動抓全部股票 + 持股 + 做空倉位 + 技術分析(MA 黃金/死亡交叉、獲利了結、停損)+ 短期波動警示
-- **股票新聞抓取**:獨立 loop 每 60 分鐘對所有股票抓近期新聞 → UI + email
-- **Email 通知**:8 種事件可分別開關(達標 / 停損 / 中大獎 / bot 停擺 / 貓娘完成 / 每日 24h 摘要 / 股票強訊號 / 股票新聞)
-- **🐛 除錯訊息頻道**:把 WARNING+ 紀錄推到獨立 Discord 頻道,手機 Discord 也能即時看到 bot 出狀況
-- **獨立頻道架構**:股票指令 / 新聞 / 貓娘 / 除錯各自可設獨立頻道,避免不同指令 ephemeral 互相污染 parser
-- **自動版本更新**:每 N 分鐘檢查 GitHub 新 commit,可開啟 auto_update 自動 git pull + 重啟
-- **Web Dashboard**:localhost / LAN 即時儀表板,5 個頁面 + HTTP Basic Auth + CSRF 防護
-- **分析**:EV / Kelly Criterion(半 Kelly + 95% CI 下界)/ 賠率分布 / 符號 / 線路 / 連勝紀錄 / 平均時薪 / 時段分析 / 股票買賣訊號評分
-- **Loop 健康追蹤**:每個 loop 有 idle/running/ok/failed/auto_paused 狀態,連續失敗自動暫停 30 分鐘冷卻,UI footer 顯示
-- **可靠性**:頻道掛了自動 reload;連續失敗自動 reboot;session 過期自動引導重新登入
-- **持久化**:所有資料 SQLite + Fernet 加密;輪替日誌;可匯出 CSV / PNG
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Playwright](https://img.shields.io/badge/Playwright-async-2EAD33?logo=playwright&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white)
+![Rich](https://img.shields.io/badge/Rich-TUI-FFD43B)
+![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-none%20yet-lightgrey)
 
-> **使用前須知**:自動化使用者帳號違反 Discord 服務條款,使用造成的帳號處置請自行承擔。僅供研究、學習用途。
+---
 
-## 系統需求
+## 這是什麼
 
-- Windows 10 / 11(其他 OS 未測試,啟動腳本是 .bat)
-- Python 3.10+(已加入 PATH)
+這是一個跑在 Windows 上的 Discord 自動化工具,核心做法是用 **Playwright 控制一個無頭 Chromium 分頁**,把使用者已登入的 Discord session 載入後,自動送出斜線指令(`/hourly`、`/daily`、`/slot`、`/balance`、`/stock`、`/portfolio`、`/transfer`、`/check` 等)、解析 Discord 回傳的 ephemeral 訊息與 embed,再依設定做後續動作。
 
-## 啟動(一鍵)
+它不是單純的腳本,而是一個由 **10 條獨立 asyncio 迴圈**組成的長駐服務:
 
-雙擊 `run.bat`。腳本會自動偵測並依序處理:
+- **賭博自動化** — 自動下注 `/slot`,支援 `auto` / `fixed` / `kelly` 三種下注策略,以及目標停利、停損下移、連敗冷靜等風控。
+- **定時指令** — `/hourly` 整點對齊、`/daily` 每日 00:00 觸發。
+- **貓娘派遣監控** — 偵測派遣完成,可選自動「領取並再派遣」。
+- **自動轉帳** — 定期 `/transfer` 並自動點確認按鈕。
+- **股票監視** — 抓取 `/stock` / `/portfolio` / 做空倉位,做均線交叉、停利停損、波動警示等技術分析(**只給建議,不自動下單**)。
+- **股票新聞抓取** — 獨立迴圈定期抓近期新聞,去重後推到 UI 與 email。
+- **通知與摘要** — 8 種事件的 email 通知、每日 24 小時摘要、把 `WARNING+` 紀錄推到獨立 Discord 除錯頻道。
+- **自我更新** — 定期比對 GitHub 上游 commit,可選自動 `git pull` + 重啟。
 
-1. **沒 .venv** → 自動建 venv、`pip install` 套件、下載 Chromium(~300 MB,需要網路;只跑一次)
-2. **套件缺漏** → 偵測到 import 失敗就重跑 `pip install`
-3. **首次設定** → main.py 內 wizard 互動引導,幫你填基本 ID(伺服器 / 主頻道 / 通知 user ID);啟用股票 / 貓娘 / 除錯頻道時也會要求對應頻道 ID
-4. **首次登入** → 跳出 Chromium,手動完成 Discord 登入(含 2FA),跳到 `/channels/...` 自動儲存
-5. **正常啟動** → 進 Rich UI
+操作介面有兩種:**Rich 終端 UI**(單鍵快速鍵 + 互動式設定選單)與**自建 Web Dashboard**(localhost / LAN,5 個頁面)。所有設定、下注歷史、分析統計、股價與新聞都存進 SQLite,敏感欄位(email / dashboard 密碼)以 Fernet 加密。
 
-之後每次啟動都只跑步驟 5(除非 `requirements.txt` 變動會重跑步驟 2)。
+---
 
-> **怎麼取得 ID**:開啟 Discord 開發者模式(使用者設定 → 進階 → 啟用「開發者模式」),右鍵伺服器 / 頻道 / 使用者就會多出「複製 ID」選項。
+## ✨ 技術亮點
 
-## 終端機快速鍵
+- **10 條 asyncio 迴圈協作**:`hourly` / `daily` / `gambling` / `neko` / `transfer` / `digest` / `updater` / `stock` / `news` / `debug`,加上 `ui` 任務,全部在單一 event loop 上協作排程(見 `main.py`)。
+- **共用指令鎖序列化**:所有送指令動作共用一把 `asyncio.Lock`,避免 10 條迴圈同時送指令、互相污染回應解析。
+- **獨立頻道架構**:股票 / 新聞 / 貓娘 / 除錯可各自綁定獨立 Discord 頻道;`channel_context` 進入時持鎖 + 切到目標頻道、跑完切回主頻道,降低不同指令的 ephemeral 互相干擾。
+- **Ephemeral 累積處理**:Discord ephemeral 訊息在頁面 DOM 上是累加而非替換,parser 以 `rfind` + anchor slice 只解析「最新一則」,避免讀到已賣出 / 已平倉的舊資料。
+- **Emoji DOM 解析**:Discord 把 emoji 渲染成 `<img>`,`textContent` 拿不到 alt;自行 walk DOM 把 alt 接出來,否則 slot 符號全是空字串。
+- **持久化層(SQLite)**:以 stdlib `sqlite3` + WAL mode 落地設定 / 歷史 / 分析 / 股價 / 新聞;async 介面用 `asyncio.to_thread` 包裝,不阻塞 event loop;啟動時自動把舊版根目錄的 JSON / log 一次性遷移到 `data/` 與 `logs/`。
+- **欄位級加密**:email 密碼、dashboard 密碼等敏感字串以 **Fernet(AES-128-CBC + HMAC-SHA256)** 個別加密後存入 SQLite(前綴 `enc:v1:`),未加密欄位仍可直接查詢;若 `cryptography` 套件缺席,退回 stdlib 自製的 AES-CTR-like + HMAC 備援。
+- **零依賴 Web Dashboard**:純 Python stdlib `http.server` 實作,**不需 FastAPI / Flask**;含 HTTP Basic Auth(`hmac.compare_digest` 防 timing attack)、CSRF 防護(POST 須 Origin/Referer 與 Host 同源)、log 敏感字遮蔽。
+- **下注分析引擎**:EV / 樣本變異數(Bessel n-1 修正)/ 賠率分布 / 符號與線路統計 / 時段分析 / 連勝紀錄,以及 **Kelly 下注**(取 EV 95% 信賴區間下界、半 Kelly、上限 0.25、需 ≥ 200 筆樣本)。另有 hourly filter / rolling EV / trailing stop 三種風控策略與歷史 backtest。
+- **可靠性機制**:每條迴圈有 idle/running/ok/failed/auto_paused 健康狀態,連續失敗自動冷卻 30 分鐘;頁面掛掉自動 reload;連續導航失敗刪 session 重新登入並透過 exit code 42 / sentinel 檔讓 `run.bat` 自動重啟整個程式。
+- **可被中斷的暫停**:所有長 sleep 切成 0.5 秒分段 `interruptible_sleep`,`P` 鍵可即時暫停 / 恢復所有迴圈。
+- **三層除錯管道**:終端 `X` 鍵全螢幕 `WARNING+`、Dashboard `/logs` 頁、推到 Discord 除錯頻道(手機也能看);其中 debug 迴圈自身的失敗 log 會被過濾,避免 feedback loop。
+
+---
+
+## 🏗️ 架構
+
+```mermaid
+flowchart TB
+    subgraph entry["main.py 入口"]
+        BOOT["bootstrap 資料夾 / 遷移舊檔"]
+        LOGIN["Playwright 登入精靈\n(首次或 session 過期)"]
+        PW["async_playwright\n無頭 Chromium 分頁"]
+    end
+
+    subgraph loops["10 條 asyncio 迴圈 + UI 任務"]
+        direction TB
+        HOURLY["hourly\n/hourly 整點對齊"]
+        DAILY["daily\n/daily 每日 00:00"]
+        GAMBLING["gambling\n/slot 下注 + 風控"]
+        NEKO["neko\n貓娘派遣監控"]
+        TRANSFER["transfer\n/transfer 自動轉帳"]
+        STOCK["stock\n/stock /portfolio 分析"]
+        NEWS["news\n股票新聞抓取"]
+        DIGEST["digest\n每日 24h 摘要"]
+        UPDATER["updater\nGitHub 上游檢查"]
+        DEBUG["debug\nWARNING+ 推 Discord"]
+        UI["ui\nRich 終端 UI"]
+    end
+
+    subgraph discord["bot.discord.client (Playwright wrapper)"]
+        LOCK["共用 command_lock\n指令序列化"]
+        PARSER["ephemeral / embed parser\n(slot / stock / news)"]
+    end
+
+    subgraph persist["持久化 data/"]
+        DB[("SQLite (WAL)\nbot.db\n設定 / 歷史 / 分析 / 股價 / 新聞")]
+        KEY["secret.key\nFernet 金鑰"]
+        SESSION["storage_state.json\nDiscord session"]
+    end
+
+    subgraph io["對外輸出"]
+        DASH["Web Dashboard\nstdlib http.server (5 頁)"]
+        EMAIL["Email 通知 (SMTP)\n8 種事件"]
+        DCH["Discord 除錯頻道"]
+        EXPORT["匯出 CSV / PNG / 分析"]
+    end
+
+    BOOT --> LOGIN --> PW
+    PW --> loops
+    loops --> LOCK --> PARSER --> DISCORD_WEB(["Discord 網頁"])
+    GAMBLING -->|加密欄位| KEY
+    loops <--> DB
+    PW -.載入.-> SESSION
+    DB --> DASH
+    DB --> EXPORT
+    loops --> EMAIL
+    DEBUG --> DCH
+    UI --> DASH
+```
+
+> 資料流摘要:`main.py` 啟動無頭 Chromium 並載入已登入的 session,接著建立 10 條 asyncio 迴圈與 UI 任務。所有迴圈透過 `bot.discord.client` 的共用指令鎖序列化送指令、解析回應,狀態落地到 SQLite(敏感欄位用 `secret.key` 的 Fernet 加密),再對外輸出到 Web Dashboard、Email、Discord 除錯頻道與匯出檔。
+
+---
+
+## 🚀 快速開始
+
+### 系統需求
+
+- **Windows 10 / 11**(一鍵啟動腳本是 `.bat`;其他作業系統未測試)
+- **Python 3.10+**,且已加入 PATH
+- 首次安裝需網路下載 Playwright Chromium(約 300 MB)
+
+### 一鍵啟動
+
+雙擊或在終端執行 `run.bat`。腳本會自動偵測狀態並依序處理:
+
+```bat
+run.bat
+```
+
+`run.bat` 的流程(摘自腳本本身):
+
+1. **沒有 `.venv`** → 自動建立虛擬環境、`pip install -r requirements.txt`、`playwright install chromium`(只跑一次)。
+2. **套件缺漏** → 偵測到 `import playwright, rich, qrcode, cryptography` 失敗就重裝。
+3. **首次設定** → `main.py` 內的互動式 wizard 引導填入伺服器 / 頻道 / 通知對象等 ID。
+4. **首次登入** → 跳出 Chromium 視窗,手動完成 Discord 登入(含 2FA);網址跳到 `/channels/...` 時自動儲存 session。
+5. **正常啟動** → 進入 Rich 終端 UI。
+
+之後每次啟動只會跑步驟 5(除非套件變動才重跑步驟 2)。程式請求重啟時(exit code 42 或寫入 `data/.reboot` sentinel),`run.bat` 會自動重新啟動。
+
+### 手動安裝(進階)
+
+若想自行控制環境,可不透過 `run.bat`:
+
+```bash
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m playwright install chromium
+.venv\Scripts\python.exe main.py
+```
+
+執行依賴(見 `requirements.txt`):`playwright`、`rich`、`matplotlib`、`qrcode[pil]`、`cryptography`。
+
+### 終端機快速鍵
 
 | 鍵 | 功能 |
 |----|------|
 | `Q` | 退出 |
-| `C` | 修改系統設定(互動式選單,分 9+ 大類)|
+| `C` | 修改系統設定(互動式分類選單)|
 | `P` | 暫停 / 恢復所有功能 |
 | `E` | 匯出賭博紀錄(CSV + PNG + 分析報告 → `exports/`)|
-| `S` | 查看 Slot 分析(EV、Kelly、賠率分布、符號統計、線路統計、時段分析)|
-| `T` | 查看股票分析(摘要 + Top 推薦 + 持股 + 做空 + 全部股票 + 近期新聞)|
+| `S` | 查看 Slot 分析(EV、Kelly、賠率分布、符號 / 線路 / 時段統計)|
+| `T` | 查看股票分析(摘要 + 推薦 + 持股 + 做空 + 全部股票 + 新聞)|
 | `W` | 在預設瀏覽器開啟 Web Dashboard |
-| `K` | 產生並開啟 QR Code 圖檔(手機掃即連 Dashboard)|
-| `X` | 全螢幕除錯紀錄(最近 30 筆 WARNING+,按 level 上色)|
-| `F` | 整個程式重啟(`run.bat` 偵測 exit code 42 自動再啟動)|
-
-主面板 footer 的「X 除錯」字樣會按 level 自動上色:有 ERROR/CRITICAL → 紅、只有 WARNING → 黃、無 → 預設色。
-
-## 設定
-
-所有設定存在加密的 SQLite (`data/bot.db`),**不再需要編輯任何 JSON 檔**。改設定有三種方式:
-
-1. 終端機按 `C` 進入分類選單(賭博 / 目標停損 / 通知 / 貓娘 / 轉帳 / Dashboard / 進階策略 / 股票 / 版本更新 / 除錯頻道 / 進階檔案管理)
-2. Web Dashboard 的「系統設定」頁面(即時生效,不用重啟)
-3. 從 Discord 直接看 bot 狀況(若有設除錯頻道,WARNING+ 訊息會推到 Discord)
-
-### 賭博基本
-
-- `enabled`(主開關)`threshold`(保底門檻)`min_bet` `max_bet` `bet_fraction`
-- `strategy`:`auto`(按比例)/ `fixed`(固定 min_bet)/ `kelly`(依 EV 動態,需 ≥ 200 筆樣本)
-- `interval_min` / `interval_max`(兩次下注秒數區間)
-
-### 目標 / 停損 / 連敗冷靜
-
-- `goal` + `goal_action`(pause / raise)+ `goal_step` — 達標停或階梯式提目標
-- `loss_floor` + `loss_action`(pause / lower_threshold)+ `loss_step` — 跌破停或下移門檻續跑
-- `loss_streak_pause`(連敗 N 場觸發;0 = 停用)+ `loss_streak_cooldown_min`(冷靜 M 分鐘)
-
-> **保底門檻 vs 停損點**:
-> - `threshold`(保底)= 餘額低於此就「等待回升」(不下注、不通知)
-> - `loss_floor`(停損)= 餘額低於此就「觸發動作 + 寄信」
-> - 通常 `loss_floor < threshold` 才合理(先停下注,跌得更慘才真停損)
-
-> **目標達成 raise 模式**:達標後 `threshold` 自動改為 `goal - 10000`,保留 10000 緩衝給 bot 繼續下注,不會立刻撞保底。
-
-### 進階下注策略(opt-in)
-
-預設全部停用。需要時去設定選單 `[C] → [7] 🎯 進階下注策略` 啟用:
-
-| 策略 | 功能 | 注意 |
-|------|------|------|
-| **hourly_filter** | 跳過歷史 EV / 勝率差的小時(per hour-of-day 分析)| 該小時樣本 < `hourly_min_bets` 時不過濾 |
-| **rolling EV** | 近期 EV 差時減碼、好時加碼(滑動視窗)| 不改變期望值,只降 variance / drawdown |
-| **trailing_stop** | 累計淨收從峰值跌幅 > X% → 暫停 N 分鐘 | 冷卻結束 baseline 重設,避免立刻又觸發 |
-
-> 這些策略**不會把負 EV 變成正**,只能降低 variance / drawdown。Dashboard 有「策略 backtest」可看歷史模擬結果。
-
-### Email 通知
-
-`email` 區塊:`enabled` / `smtp_host:port` / `user`(寄件者)/ `password`(**Gmail 必須用 [App Password](https://myaccount.google.com/apppasswords)**)/ `to`(收件者)
-
-8 種事件可分別開關:
-
-| 開關 | 觸發條件 |
-|------|---------|
-| `notify_goal` | 餘額 ≥ `goal` |
-| `notify_loss` | 餘額 ≤ `loss_floor`(每段下跌只寄一次,回升後重置)|
-| `notify_bigwin` | /slot「總計贏得 / 下注」≥ `bigwin_multiplier`(預設 5x)|
-| `notify_dead` | /slot 或 /balance 連續失敗 ≥ `dead_threshold`(每段死亡只寄一次)|
-| `notify_neko` | 貓娘派遣完成 |
-| `notify_digest` | 每天 `digest_hour` 整點寄 24h 摘要(預設 0:00)|
-| `notify_stock_signal` | 某支股 buy/sell score ≥ `signal_score_threshold`(預設 80)|
-| `notify_stock_news` | news loop 抓到新新聞(DB UNIQUE 去重後真的是新項才寄)|
-
-> 設定密碼會以 Fernet 加密存進 SQLite,不會以明文留在任何 JSON。
-
-### 貓娘監控
-
-- `enabled` 每 `check_interval_min` 分鐘送 `/check`,剩 1 小時內加密輪詢
-- `auto_claim`(預設 false)— 偵測到完成時自動 `/nekomusume status` 並點「領取並再派遣」按鈕
-- `channel_id` — 獨立貓娘頻道(wizard 強制設定),`/check` 跟 `/nekomusume` 切到這頻道送,避免跟主頻道的 slot / hourly 混
-
-### 自動轉帳
-
-- `enabled` `target`(user picker 搜尋字串:顯示名稱片段或純數字 user ID)`amount` `interval_min`
-- 連續失敗會自動進入 `auto_paused` 冷卻 30 分鐘(避免 spam 失敗指令)
-- ⚠ 對象搜尋字串請夠精準,否則 Discord 的 user picker 可能選錯人
-
-### 股票監視 / 建議
-
-設定選單 `[C] → [8] 📈 股票監視`:
-
-- `enabled` `poll_interval_min`(預設 15 分鐘)— 抓 `/stock`(全部股票 + 趨勢)+ `/portfolio`(持股 + 平均成本 + 盈虧)+ 做空倉位
-- `ma_short` / `ma_long` — 短/長均線參數(預設 5/20,看近期 vs 大方向)
-- `take_profit_pct` / `stop_loss_pct` — 持股獲利/虧損達 % 建議賣
-- `signal_score_threshold`(預設 80)— 評分高於此才視為「強訊號」,寫進日誌 + 寄 email
-- **短期波動警示**(opt-in):比較最近 N 分鐘價格變動,超過 X% 提醒(同 sym 同方向有冷卻避免洗版)
-- **新聞抓取**(獨立 loop):`news_poll_interval_min`(預設 60 分鐘)對所有抓到的股票送 `/stock symbol:X` + 點「近期新聞」按鈕,新項寫進 DB(UNIQUE 去重)+ UI + email
-
-**獨立頻道**(wizard 在 `enabled=True` 時強制設定):
-- `stock_channel_id` — stock_loop 跑 `/stock` `/portfolio` 切過去
-- `news_channel_id` — news_loop 跑新聞抓取切過去
-
-> **不會自動下單**。Phase 1-2 純建議,user 看訊號自己手動買賣。Discord modal 太脆弱所以 trade 自動化已移除(commit `d18b4df`),不會回來。
-
-> **買賣訊號互斥**:黃金交叉 → +15 多頭(buy 加分);死亡交叉 → -15 空頭(sell 加分,不是 buy 加分)。
-
-### 🐛 除錯訊息頻道
-
-設定選單 `[C] → [B] 🐛 除錯頻道`:
-
-把 bot 運行中的 WARNING+ 紀錄推到一個獨立 Discord 頻道,跟 X 鍵除錯紀錄、`bot.log` 並行。用途:user 不在電腦旁時手機 Discord 也能看到 bot 出狀況(transfer 失敗 / parser 跳掉 / session 過期 等)。
-
-| 設定 | 預設 | 說明 |
-|------|------|------|
-| `enabled` | `false` | 啟用 / 停用 |
-| `channel_id` | `""` | Discord 頻道 ID(wizard 強制設;不可跟主/股票/新聞/貓娘頻道重疊)|
-| `min_level` | `WARNING` | 最低 level(WARNING / ERROR / CRITICAL)|
-| `poll_interval_sec` | `60` | 多久 flush 一次 pending queue 到 Discord |
-| `max_per_flush` | `5` | 一次最多打包幾筆(防 spam,上限 10)|
-| `include_logger_name` | `true` | 訊息是否含 logger 名 |
-
-訊息格式:
-
-```
-**Debug** · 3 筆 · 2026-05-11
-⚠️ `20:32:44` **scheduler.gambling** — 連敗 5 場 ≥5,暫停下注 5.0 分鐘
-❌ `20:33:15` **discord.client** — recover_page 連續 3 次失敗
-🚨 `20:34:01` **scheduler.news** — HOLO 沒抓到 news_text
-```
-
-各 level 配色 emoji:WARNING ⚠️ / ERROR ❌ / CRITICAL 🚨。
-
-子選單裡有 `[T] 立即測試送一筆到頻道` 跟 `[C] 清空待送 queue` 方便調試。
-
-### 版本更新
-
-設定選單 `[C] → [9] 🔄 版本更新`:
-
-- `auto_check`(預設 true)每 `check_interval_min` 分鐘做一次 `git ls-remote` 跟本地 commit hash 比對
-- 偵測到新版 → UI 顯示 🔔 + queue_log + 可選 email
-- `auto_update`(預設 false)— 偵測新版自動 git pull + 重啟(慎用,本地未提交修改會中斷)
-- 選單裡 `[4] 立即檢查 / 更新` 手動觸發
+| `K` | 產生並開啟 Dashboard QR Code 圖檔(手機掃描連線)|
+| `X` | 全螢幕除錯紀錄(最近 30 筆 `WARNING+`,按 level 上色)|
+| `F` | 整個程式重啟 |
 
 ### Web Dashboard
 
-bot 啟動時 log 會印出本機 + LAN IP 兩個網址。
+啟用後(預設開啟),程式啟動時會在 log 印出本機與 LAN 兩個網址(預設 port `8765`)。5 個頁面:`/` 概覽、`/analysis` 拉霸分析、`/stocks` 股票、`/logs` 即時日誌、`/control` 系統設定。
 
-| 欄位 | 預設 | 說明 |
-|------|------|------|
-| `enabled` | `true` | 啟用 / 停用 |
-| `host` | `"127.0.0.1"` | 預設只本機;要讓同 LAN 手機看,改 `"0.0.0.0"`(**請先設密碼**)|
-| `port` | `8765` | 監聽 port |
-| `username` | `"admin"` | HTTP Basic Auth 帳號 |
-| `password` | `""` | HTTP Basic Auth 密碼;空 = 不啟用驗證 |
+> **資安提醒**:若要讓同網段手機連線,需把 `dashboard.host` 改為 `0.0.0.0`,此時**務必設定 `dashboard.password`** —— 否則同 WiFi 內任何人都能控制你的 bot。不對外暴露時保持預設 `127.0.0.1` 即可。
 
-5 個頁面:
+---
 
-- **`/` 概覽** — 餘額 / 目標 / 停損 / 連勝紀錄 / 平均時薪 / 排程倒數 / 累計淨收折線圖(含 Y 軸刻度)/ 最近 15 筆下注
-- **`/analysis` 拉霸分析** — 與 `S` 鍵同等內容,HTML 表格版
-- **`/stocks` 股票** — 5 個 tab:總覽 + Top 3 推薦 + 近期新聞 / 持股(含趨勢欄 + 做空明細 table)/ 買進建議 / 賣出建議 / 全部股票(含趨勢欄)
-- **`/logs` 即時日誌** — 🐛 除錯紀錄 card(WARNING+ 最近 30 筆,按 level 上色)+ 📋 Bot Log 文字流(每 3 秒 tail)
-- **`/control` 系統設定** — 暫停 / 恢復、重置分析、重啟程式、即時編輯設定
+## 🧪 測試
 
-> **手機怎麼連?** 改 `host` 為 `"0.0.0.0"` → 設 `password` → 按 `K` 鍵產 QR PNG → 手機掃。
->
-> **資安提醒**:
-> - `0.0.0.0` 沒密碼 = 同 WiFi 任何人都能控制你的 bot(暫停 / 重置 / 改設定都能做)。**務必設 `dashboard.password`**。
-> - 不在 LAN 暴露的話,保持 `127.0.0.1` 即可,免設密碼。
->
-> **零外部依賴**:dashboard 用 Python 內建 `http.server`,不用裝 FastAPI 等套件。
+**尚無自動化測試(待補)。**
 
-### Slot 分析與 Kelly
-
-按 `S` 鍵看完整報告:
-
-- **EV**(期望值)— 每注平均回報倍率(>1 = 玩家有利)
-- **賠率分布**:`0` / `0~2` / `2~5` / `5~8` / `8~10` / `10~20` / `以上`(≥ 20x 列出實際倍率)
-- **符號統計**:中獎次數、平均倍率、累計賠付、回收率、九宮格機率
-- **線路統計**:8 種連線方向命中次數 + 命中率
-- **時段分析**:依 hour-of-day 分組勝率 / 平均賠率 / 淨收(≥ 10 把的最賺/最虧時段標 🏆/💀)
-- **連勝紀錄 + 平均時薪**:當前 streak、歷史最高連勝/連敗、本 session 每小時淨收
-
-**Kelly 策略** (`strategy: "kelly"`):
-
-- 用 sample variance(n-1 修正)估計變異數
-- 用 EV 95% 信賴區間下界估算 Kelly fraction(更保守)
-- 半 Kelly + 25% 上限(避免極端建議)
-- 需要 ≥ 200 筆樣本才啟用;資料不足時下 `min_bet`
-- EV ≤ 1(負期望值)時固定下 `min_bet`,不停止賭博
-- 隨時可從設定切回 auto / fixed
-
-分析資料持久化在 `data/bot.db`。要重置:`C` → 進階 → 重置分析。
-
-## 檔案結構
-
-```
-.
-├── main.py             入口程式(啟動 10 個 loop + UI + dashboard)
-├── run.bat             一鍵啟動腳本(偵測 exit 42 / data/.reboot 自動重啟)
-├── requirements.txt
-├── README.md
-├── bot/                原始碼 package
-│   ├── core/           DB / 加密 / 設定 schema / 狀態 / log filter / updater
-│   ├── discord/        Playwright wrapper(送指令、讀餘額、play_slot、portfolio、shorts、新聞)
-│   ├── scheduler/      10 個 loop:
-│   │                     hourly / daily / gambling / transfer / nekomusume
-│   │                     digest / stock / news / updater / debug
-│   ├── notifications/  email + digest + stock notification 判斷
-│   ├── slot/           parsers + analysis(Kelly + EV + 三進階策略)
-│   ├── stock/          parser(portfolio / shorts / detail / news)+ analysis(buy/sell signal + volatility)
-│   ├── ui/             Rich 終端 UI + 互動式設定選單 + stock_view + error_view + wizard + maintenance
-│   └── web/            Web dashboard(5 頁,純 stdlib http.server)
-├── data/               runtime 持久化(gitignored)
-│   ├── bot.db          SQLite — 設定 / 歷史 / 分析 / 新聞 / 股價(敏感欄位加密)
-│   ├── secret.key      Fernet 加密金鑰
-│   ├── storage_state.json    Discord session
-│   └── .reboot          重啟 sentinel(run.bat 讀取後刪)
-├── logs/               runtime 日誌(gitignored)
-│   ├── bot.log + .1/.2/.3    主日誌(5 MB × 3 個檔輪替)
-│   ├── slot_debug.log         slot 解析失敗時的 dump
-│   └── stock_debug.log        stock 解析失敗時的 dump
-└── exports/            匯出資料(gitignored)
-```
-
-## 日誌與除錯
-
-- `logs/bot.log`:所有 INFO+ 訊息,達 5 MB 自動輪替(保留 `.1/.2/.3` 共 3 份)
-- `logs/slot_debug.log` / `logs/stock_debug.log`:只在 parser 失敗時才寫,用於 regex 排查
-- 想看 DEBUG 等級:按 `C` → 進階改 `log_level`,重啟後生效
-- 想清掉所有 log:按 `C` → 進階 → 清空 log + 輪替檔
-- **三層除錯管道**:
-  1. 終端按 `X` — 最近 30 筆 WARNING+,全螢幕、按 level 上色
-  2. Web Dashboard `/logs` 頁 — 🐛 除錯紀錄 card(WARNING+)+ bot.log 文字流
-  3. Discord 除錯頻道(若啟用)— 推 WARNING+ 到獨立頻道,手機 Discord 看
-
-- **UI 日誌分兩欄**:主面板下方左欄「📋 系統 + 拉霸」(hourly / daily / gambling / transfer / neko / debug)+ 右欄「📈 股票 / 新聞」(stock / news / 以及 stock/news task 內的 bot.discord.client log)
-
-## 開發者
-
-`pyproject.toml` 內含 ruff 設定。要跑:
+目前 repo 內沒有測試套件或 CI 設定。`pyproject.toml` 提供了 [Ruff](https://docs.astral.sh/ruff/) 的 lint / format 設定,可作為基本品質檢查(Ruff 不是執行期依賴,需自行安裝):
 
 ```bash
 pip install ruff
-python -m ruff check .         # 列出所有 lint issue
-python -m ruff check . --fix   # 自動修能修的
+python -m ruff check .         # 列出 lint 問題
+python -m ruff check . --fix   # 自動修可修的
 python -m ruff format .        # 格式化
 ```
 
-ruff 不是 runtime dependency,只在你想 lint / format 時裝。
+---
 
-## 技術說明
+## ⚠️ 已知限制
 
-- **Emoji 解析**:Discord textContent 不含 `<img>` 的 alt(emoji 是 img),自家 walk DOM 把 alt 也接出來,否則 slot 符號全是空字串
-- **Slot 動畫處理**:要求餘額連續 5 秒不變才採用,避免讀到「先扣下注、再加獎金」中間狀態
-- **指令序列化**:所有送指令動作共用 `command_lock`(asyncio.Lock),避免 10 個 loop 互相污染回應解析
-- **`channel_context` 機制**:stock / news / neko / debug 各自獨立頻道,進 loop 時整段持 command_lock + navigate 到 target channel + 跑完切回主頻道
-- **Ephemeral 累積處理**:Discord ephemeral 不替換而是累積在 page textContent(舊的不消失)。Parser 用 `rfind` + anchor slice 只解析「最新一則 ephemeral」,避免抓到已賣出 / 已平倉的舊資料
-- **暫停機制**:所有長 sleep 用 0.5 秒分段 `interruptible_sleep`,可被 `P` 鍵即時打斷;每個 loop 開頭 `wait_while_paused` 原地等
-- **/hourly 對齊**:等到下個整點 + 30~180 秒隨機 jitter,避免在重置邊界錯位
-- **/daily 對齊**:每日 00:00 整點觸發,DB meta `last_daily_fired_ts` 跨 reboot 防重複,啟動補跑
-- **Loop 健康追蹤**:每個 loop `mark_loop_running` / `mark_loop_ok` / `mark_loop_failed`,連續失敗 5 次自動 `auto_paused` 冷卻 30 分鐘
-- **UI log 分流**:按 logger name(`bot.scheduler.stock/news/...`)+ 當前 asyncio task name(`stock`/`news`)雙重判斷,讓 stock/news task 內的 `bot.discord.client` log 也推右欄
-- **可靠性**:`recover_page()` 連續失敗 3 次 → 設 reboot 旗標 → exit 42 → run.bat 自動重 launch
-- **Session 過期偵測**:頻道載入失敗時看 URL 是否在 `/login` → 自動引導重新登入。連續失敗 ≥ 3 次跨 reboot 才停下不再 wizard(避免無限循環)
-- **加密**:email password / dashboard password 用 Fernet 加密存進 SQLite,金鑰在 `data/secret.key`
-- **CSRF 防護**:dashboard POST 必須 Origin/Referer 與 Host 同源
-- **Log redaction**:dashboard 顯示的 log 過濾 password / token / secret 等敏感字
-- **Debug 頻道 feedback loop 防護**:UILogHandler push WARNING+ 到 `debug_pending` 時用 `asyncio.current_task().get_name() == "debug"` 過濾,避免 debug_loop 自身失敗 log 觸發無限遞迴
-- **`_send_message` emoji 訊息處理**:Discord 把 emoji 渲染成 `<img>`,textContent 拿不到 alt,所以「input 內容比對」用 ASCII signature(剝掉 emoji / 中文 / 空白)避免重複插入
+- **違反 Discord ToS**:見頁首警告。自動化使用者帳號有實質的封鎖風險,本專案僅供研究 / 學習。
+- **Playwright parser 對 Discord 改版脆弱**:所有資料都靠解析 Discord 網頁的 DOM / ephemeral / embed 文字而來。**Discord 一旦改動 UI、selector 或 emoji 渲染方式,解析就可能失效**,需要更新 parser。這是網頁自動化的本質限制,非本專案能完全規避。
+- **加密保護有邊界**:Fernet 是對稱加密,金鑰 `data/secret.key` 與密文存在同一台機器上。**金鑰若外洩,加密即失效** —— 它防的是「設定檔被肉眼讀到 / 隨手外流」,不是抵禦有本機存取權限的攻擊者。若 `cryptography` 未安裝會退回較弱的自製備援加密。
+- **Kelly / 信賴區間下注是啟發式,非保證**:slot 的長期期望值(EV)是**負的**,任何下注策略都無法把負 EV 變成正 EV。Kelly、95% 信賴區間下界、rolling EV、trailing stop 等只是**風險管理**(降低 variance / drawdown),**不是穩賺或回本的保證**。請勿據此期待獲利。
+- **平台限定 Windows**:啟動腳本 `run.bat` 與部分行為(`os.startfile`、`msvcrt` 鍵盤監聽、CP950 編碼處理)綁定 Windows;其他作業系統未測試。
+- **股票功能不自動下單**:僅輸出買賣建議訊號,需使用者自行手動操作(Discord 交易 modal 太脆弱,自動下單已移除且不會回來)。
+- **單帳號設計**:多帳號需複製整個資料夾並各自使用獨立的 `data/` 與不同的 dashboard port。
 
-## 常見問題
+---
 
-**Q: bot 一直讀不到餘額?**
-A: 確認頻道權限正常、目標 bot 有回應、`/balance` 指令可用。看 `logs/bot.log` 是否一堆 timeout。連續失敗 ≥ 3 次會自動 reload 頻道;累積夠多會 exit 42 由 `run.bat` 重啟整個 bot。
+## 📄 授權與來源
 
-**Q: 想換頻道?**
-A: 按 `C` → 賭博基本(或 Web Dashboard 的「系統設定」頁面)→ 改 channel_id。下次重啟生效。
+- **授權**:本 repo 目前**未包含 LICENSE 檔**。在作者補上授權條款之前,預設保留所有權利;若你打算重用程式碼,請先聯繫作者確認授權。<!-- TODO: 補上 LICENSE 檔(例如 MIT)後更新此段 -->
+- **第三方相依**:本專案使用下列開源套件,各自依其授權條款釋出 —— [Playwright](https://playwright.dev/python/)(Apache-2.0)、[Rich](https://github.com/Textualize/rich)(MIT)、[matplotlib](https://matplotlib.org/)(matplotlib license / PSF-based)、[qrcode](https://github.com/lincolnloop/python-qrcode)(BSD)、[cryptography](https://cryptography.io/)(Apache-2.0 / BSD)。
+- **互動對象**:本工具與 Discord 及其上的特定遊戲 / 經濟 bot 互動,但與這些服務**無任何官方關聯**;Discord 為 Discord Inc. 之商標。
 
-**Q: 股票 / 貓娘 / 新聞用同一個頻道行嗎?**
-A: 技術上可行(設一樣的 channel_id),但**強烈不建議**。不同指令的 ephemeral 會互相累積在 page 上,parser 可能誤抓舊資料。建議:主頻道跑 slot/hourly/daily/transfer,股票指令一個頻道、新聞一個、貓娘一個、除錯一個(共 5 個頻道)。
+---
 
-**Q: 補回做空後 bot 還顯示已平倉的 symbol?**
-A: 已修(commit `ffb4348`)。Discord ephemeral 累積,parser 之前會吃到舊 ephemeral 的資料。現在切只抓「本次點 button 後新增的 ephemeral」。同理 holdings 賣股後也會即時更新。
-
-**Q: 多帳號怎麼跑?**
-A: 把整個資料夾複製成 `bot1/` `bot2/`,各自有獨立 `data/bot.db` 和 `data/storage_state.json`。記得每個資料夾的 `dashboard.port` 要不一樣(例如 8765 / 8766),同時跑才不會搶 port。
-
-**Q: 不小心搞壞 bot.db?**
-A: 刪掉 `data/bot.db`,下次啟動 wizard 會重建(但歷史資料會清空)。`data/secret.key` 也別刪,否則密碼欄位無法解密。
-
-**Q: 從舊版(root JSON)升級?**
-A: 啟動時自動偵測 `config.json` / `slot_analysis.json` / `gambling_history.json` 並一次性遷移到 `data/bot.db`。遷移完那些 JSON 就可以刪。
-
-**Q: 除錯頻道訊息一直沒出現?**
-A:
-1. 設定選單 `[B] → [T] 立即測試送一筆` 看會不會送
-2. 確認 bot 有權限發訊息到該頻道
-3. `min_level` 設太嚴(例 CRITICAL)會把 WARNING 篩掉
-4. 按 X 看「除錯 loop 自身有沒有失敗」(連續 5 次失敗會 auto_paused 冷卻 30 分鐘)
-
-**Q: stock auto_paused 怎麼手動恢復?**
-A: 按 `T` 進股票檢視 → 按 `R + Enter` 立即重 poll(會 override auto_paused 冷卻)。或 Dashboard 概覽頁有「立即重 poll 股票」按鈕。
-
-**Q: 我帳號被 Discord 鎖了 / Captcha?**
-A: Bot 帳號自動化違反 Discord ToS。請自行承擔風險。如果頻繁觸發,把 `interval_min/max` 加大、`/hourly` jitter 加大、減少 transfer / 貓娘的頻率。
+> 此 README 由程式碼分析重寫,內容均對應 repo 中可驗證的實作。展示用 demo 連結 / 截圖請見下方 accuracy notes 中的待補項目。
