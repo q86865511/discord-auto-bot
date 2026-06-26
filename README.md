@@ -2,6 +2,8 @@
 
 > 以 Python + Playwright 驅動無頭 Chromium、自動操作 Discord 斜線指令的自動化機器人;內建 10 條 asyncio 排程迴圈、Rich 終端 UI、自建 `http.server` 即時儀表板,所有狀態以 SQLite + Fernet 加密落地。約 14.5k 行程式碼。
 
+<p align="center"><img src="docs/cover.png" alt="Discord 自動化機器人 — 封面" width="100%"></p>
+
 > ⚠️ **服務條款警告(務必先讀)**
 > 本專案自動化操作的是**一般使用者帳號(user account)**,而非官方 Bot Token。**自動化使用者帳號明確違反 [Discord 服務條款](https://discord.com/terms)**,可能導致帳號被警告、停權或永久封鎖。
 > 本專案**僅供個人學習、技術研究與自動化工程演示之用**。請勿用於任何商業或濫用情境。**使用本軟體所造成的一切後果(包含但不限於帳號處置)由使用者自行承擔,作者不負任何責任。** 若你不接受此風險,請勿執行本程式。
