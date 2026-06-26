@@ -55,59 +55,7 @@
 
 ## 🏗️ 架構
 
-```mermaid
-flowchart TB
-    subgraph entry["main.py 入口"]
-        BOOT["bootstrap 資料夾 / 遷移舊檔"]
-        LOGIN["Playwright 登入精靈\n(首次或 session 過期)"]
-        PW["async_playwright\n無頭 Chromium 分頁"]
-    end
-
-    subgraph loops["10 條 asyncio 迴圈 + UI 任務"]
-        direction TB
-        HOURLY["hourly\n/hourly 整點對齊"]
-        DAILY["daily\n/daily 每日 00:00"]
-        GAMBLING["gambling\n/slot 下注 + 風控"]
-        NEKO["neko\n貓娘派遣監控"]
-        TRANSFER["transfer\n/transfer 自動轉帳"]
-        STOCK["stock\n/stock /portfolio 分析"]
-        NEWS["news\n股票新聞抓取"]
-        DIGEST["digest\n每日 24h 摘要"]
-        UPDATER["updater\nGitHub 上游檢查"]
-        DEBUG["debug\nWARNING+ 推 Discord"]
-        UI["ui\nRich 終端 UI"]
-    end
-
-    subgraph discord["bot.discord.client (Playwright wrapper)"]
-        LOCK["共用 command_lock\n指令序列化"]
-        PARSER["ephemeral / embed parser\n(slot / stock / news)"]
-    end
-
-    subgraph persist["持久化 data/"]
-        DB[("SQLite (WAL)\nbot.db\n設定 / 歷史 / 分析 / 股價 / 新聞")]
-        KEY["secret.key\nFernet 金鑰"]
-        SESSION["storage_state.json\nDiscord session"]
-    end
-
-    subgraph io["對外輸出"]
-        DASH["Web Dashboard\nstdlib http.server (5 頁)"]
-        EMAIL["Email 通知 (SMTP)\n8 種事件"]
-        DCH["Discord 除錯頻道"]
-        EXPORT["匯出 CSV / PNG / 分析"]
-    end
-
-    BOOT --> LOGIN --> PW
-    PW --> loops
-    loops --> LOCK --> PARSER --> DISCORD_WEB(["Discord 網頁"])
-    GAMBLING -->|加密欄位| KEY
-    loops <--> DB
-    PW -.載入.-> SESSION
-    DB --> DASH
-    DB --> EXPORT
-    loops --> EMAIL
-    DEBUG --> DCH
-    UI --> DASH
-```
+<p align="center"><img src="docs/architecture.svg" alt="Discord 自動化機器人 系統架構" width="900"></p>
 
 > 資料流摘要:`main.py` 啟動無頭 Chromium 並載入已登入的 session,接著建立 10 條 asyncio 迴圈與 UI 任務。所有迴圈透過 `bot.discord.client` 的共用指令鎖序列化送指令、解析回應,狀態落地到 SQLite(敏感欄位用 `secret.key` 的 Fernet 加密),再對外輸出到 Web Dashboard、Email、Discord 除錯頻道與匯出檔。
 
