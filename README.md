@@ -125,16 +125,17 @@ python -m venv .venv
 
 ## 🧪 測試
 
-**尚無自動化測試(待補)。**
-
-目前 repo 內沒有測試套件或 CI 設定。`pyproject.toml` 提供了 [Ruff](https://docs.astral.sh/ruff/) 的 lint / format 設定,可作為基本品質檢查(Ruff 不是執行期依賴,需自行安裝):
+核心**純函式邏輯**(下注策略計算、停損/目標風控、餘額解析、設定驗證、dashboard 安全旗標)有 `pytest` 單元測試,**不依賴 Playwright / Chromium / 真實帳號**,可離線快速跑:
 
 ```bash
-pip install ruff
-python -m ruff check .         # 列出 lint 問題
-python -m ruff check . --fix   # 自動修可修的
-python -m ruff format .        # 格式化
+pip install -r requirements-dev.txt   # 只裝 pytest + ruff,不含執行期重依賴
+pytest -q                              # 純函式單元測試
+ruff check .                           # lint(列出問題)
 ```
+
+- **測試範圍**:`tests/test_strategies.py`(rolling EV / 倍率 / trailing drawdown)、`tests/test_parsers.py`(餘額解析,含全形逗號)、`tests/test_config.py`(GamblingConfig / DashboardConfig 驗證與 `is_lan_open` 安全旗標)。
+- **CI**([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):每次 push / PR 跑 `pytest`(硬性門檻)+ `ruff`(advisory —— 既有風格/現代化 lint 債先不阻擋,待逐步清理)。
+- 自動化操作路徑(Playwright DOM 互動、排程迴圈)需真實環境,**不在 CI 執行**。
 
 ---
 

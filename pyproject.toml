@@ -44,3 +44,8 @@ ignore = [
 # format 風格走 ruff 預設(類似 black)
 quote-style = "double"
 indent-style = "space"
+
+[tool.pytest.ini_options]
+# 讓 tests/ 能 import 頂層 bot package(免安裝、純函式單元測試)
+pythonpath = ["."]
+testpaths = ["tests"]

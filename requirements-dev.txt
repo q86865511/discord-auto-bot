@@ -1,0 +1,3 @@
+# 開發 / CI 用(不含執行期重依賴 playwright/matplotlib);純函式單元測試 + lint
+pytest>=8.0
+ruff>=0.6
