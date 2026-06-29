@@ -1,0 +1,30 @@
+name: CI
+
+# 純函式單元測試 + lint。執行期重依賴(Playwright/matplotlib/cryptography)為
+# 自動化操作所需,CI 不安裝、不執行 bot 本體;這裡只驗證可獨立測試的純邏輯。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: 安裝開發相依（pytest + ruff，不含執行期重依賴）
+        run: pip install -r requirements-dev.txt
+
+      # ruff 設為 advisory:既有程式碼仍有風格 / 現代化(lint)債,
+      # 先不阻擋 PR,待後續逐步清理;pytest 才是硬性門檻。
+      - name: Lint（ruff，advisory）
+        continue-on-error: true
+        run: ruff check .
+
+      - name: 單元測試（pytest，硬性門檻）
+        run: pytest -q
